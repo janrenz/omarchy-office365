@@ -35,11 +35,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Default app registration: "Omarchy Office 365 Mail & Calendar", in the
 # schollaart.net tenant. Multi-tenant and personal-account enabled, public
-# client, no secret — a client id in a device-code public-client flow is an
+# client, no secret - a client id in a device-code public-client flow is an
 # identifier rather than a secret, which is why one can ship in the open.
 #
-# Organizations that would rather own the registration themselves — for consent
-# control, conditional access, or auditing — set "clientId" per mailbox in
+# Published by a verified publisher (Case Online), so consent shows the
+# verified badge and tenants that block unverified apps still accept it.
+#
+# Organizations that would rather own the registration themselves - for consent
+# control, conditional access, or auditing - set "clientId" per mailbox in
 # shell.json.
 DEFAULT_CLIENT_ID = "1cebbbf2-9896-4381-b471-0b6740eb6748"
 

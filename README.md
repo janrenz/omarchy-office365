@@ -279,10 +279,12 @@ safe to ship in the open: in a device-code public-client flow a client id is an
 identifier, not a secret. There is no client secret anywhere in this plugin,
 because this kind of app is not allowed one.
 
-It is not a verified publisher, so the consent screen says the publisher is
-unverified, and a tenant configured to block unverified apps will refuse it.
-That is the main reason to bring your own. The others are consent control,
-conditional access and auditing. Create one in Entra ID:
+It is published by a **verified publisher**, Case Online, so the consent screen
+shows the verified badge rather than an unverified-publisher warning, and a
+tenant that blocks unverified apps will still accept it.
+
+Some organizations would nonetheless rather own the registration themselves,
+for consent control, conditional access or auditing. Create one in Entra ID:
 
 - **Supported account types:** accounts in any organizational directory **and**
   personal Microsoft accounts, if any of your mailboxes are Outlook.com ones
