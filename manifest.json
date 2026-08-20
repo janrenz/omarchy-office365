@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 1,
+  "id": "caseonline.omarchy.office365",
+  "name": "Office 365 Mail & Calendar",
+  "version": "1.0.0",
+  "author": "Kees Schollaart",
+  "license": "MIT",
+  "description": "Unread Outlook mail and your agenda in the Omarchy bar. One widget can carry several mailboxes, or add one per mailbox. Needs python3 (standard library only) and talks to Microsoft Graph, nothing else.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "src/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Office 365",
+    "description": "Unread mail and agenda for one or more Microsoft 365 or Outlook.com mailboxes.",
+    "category": "Info",
+    "allowMultiple": true,
+    "defaultSection": "right",
+    "defaults": {
+      "icon": "󰇮",
+      "label": "",
+      "mails": 5,
+      "calendar": "3day",
+      "agendaView": "list",
+      "refreshIntervalSec": 180,
+      "tintOnUnread": true
+    },
+    "schema": [
+      {
+        "key": "label",
+        "type": "string",
+        "label": "Bar label",
+        "description": "Short text shown instead of the icon, e.g. MAIL."
+      },
+      {
+        "key": "icon",
+        "type": "string",
+        "label": "Bar icon",
+        "description": "Nerd Font glyph shown in the bar. Ignored when a label is set.",
+        "defaultValue": "󰇮"
+      },
+      {
+        "key": "mails",
+        "type": "integer",
+        "label": "Mail rows to show",
+        "min": 1,
+        "max": 25,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "calendar",
+        "type": "string",
+        "label": "Agenda range",
+        "description": "How far ahead the agenda looks.",
+        "defaultValue": "3day",
+        "options": [
+          "1day",
+          "3day",
+          "week"
+        ]
+      },
+      {
+        "key": "agendaView",
+        "type": "string",
+        "label": "Agenda style",
+        "description": "A day-grouped list, or a drawn time grid.",
+        "defaultValue": "list",
+        "options": [
+          "list",
+          "timeline"
+        ]
+      },
+      {
+        "key": "dayStart",
+        "type": "string",
+        "label": "Grid starts at",
+        "description": "Top of the drawn agenda, as HH:MM.",
+        "defaultValue": "07:00"
+      },
+      {
+        "key": "dayEnd",
+        "type": "string",
+        "label": "Grid ends at",
+        "description": "Bottom of the drawn agenda, as HH:MM.",
+        "defaultValue": "22:00"
+      },
+      {
+        "key": "showWeekends",
+        "type": "boolean",
+        "label": "Draw Saturday and Sunday in the week grid",
+        "defaultValue": true
+      },
+      {
+        "key": "dedupeEvents",
+        "type": "boolean",
+        "label": "Show a meeting from two mailboxes once",
+        "defaultValue": true
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 60,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 180
+      },
+      {
+        "key": "tintOnUnread",
+        "type": "boolean",
+        "label": "Highlight the bar icon when unread mail is waiting",
+        "defaultValue": true
+      },
+      {
+        "key": "previewLine",
+        "type": "boolean",
+        "label": "Show a line of the message body under each subject",
+        "defaultValue": true
+      },
+      {
+        "key": "focusedByDefault",
+        "type": "boolean",
+        "label": "Open with the Focused filter already on",
+        "defaultValue": false
+      },
+      {
+        "key": "markReadOnOpen",
+        "type": "boolean",
+        "label": "Mark a message read when you open it",
+        "description": "Needs permission to change mail, granted per mailbox from the panel.",
+        "defaultValue": false
+      },
+      {
+        "key": "ipcTarget",
+        "type": "string",
+        "label": "IPC name",
+        "description": "Set this to bind a key to one widget, e.g. mail for `omarchy-shell mail toggle`. Leave empty for none."
+      }
+    ]
+  }
+}
