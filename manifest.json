@@ -127,6 +127,12 @@
         "defaultValue": false
       },
       {
+        "key": "unreadByDefault",
+        "type": "boolean",
+        "label": "Open with the Unread filter already on",
+        "defaultValue": false
+      },
+      {
         "key": "markReadOnOpen",
         "type": "boolean",
         "label": "Mark a message read when you open it",

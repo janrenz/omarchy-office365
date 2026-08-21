@@ -10,7 +10,7 @@ on its own icon - the two styles mix freely.
 
 Works with Microsoft 365 (work/school) and Outlook.com (personal) accounts.
 
-![The panel: merged mail on the left, the agenda drawn as a time grid on the right](preview.png)
+![The panel on the desktop: merged mail on the left, the agenda drawn as a three-day grid on the right](preview.png)
 
 ## Install
 
@@ -56,6 +56,8 @@ library only - nothing to install).
 
 ## Settings
 
+![The settings pages: the index, one mailbox, and the calendar](preview-settings.png)
+
 Click the **gear** in the popup. It opens an index of pages rather than one
 long form:
 
@@ -90,6 +92,7 @@ Widget-level keys:
 | `tintOnUnread` | `true` | Highlight the bar icon while unread mail is waiting. When the mailbox will not say how many are unread, the panel shows `3+` rather than `3`, and `?` rather than claiming none. |
 | `previewLine` | `true` | Show a line of the message body under each subject. Off gives a two-line row. |
 | `focusedByDefault` | `false` | Open with the Focused filter already on, hiding Outlook's Other mail. |
+| `unreadByDefault` | `false` | Open with the Unread filter already on, for a widget you keep as an inbox rather than a record of everything that arrived. |
 | `markReadOnOpen` | `false` | Mark a message read once you open it in the panel. Needs permission to change mail, per mailbox. |
 | `instance` | written for you | Identifies this widget among several. Written the first time you save, and read back on the next save so two widgets holding the same mailbox never write into each other's settings. Nothing to set by hand. |
 
@@ -158,10 +161,8 @@ and reopening it starts from the whole picture again.
 The right-hand column is a day-grouped list by default, and can be a drawn
 time grid instead - hours down the side, days across, meetings at the size and
 position their times give them. Switch with **Show as** on the settings form's
-Calendar page, or `"agendaView": "timeline"`. The grid is at the top of this
-page; the list is the same agenda, a day at a time:
-
-![The agenda as a day-grouped list, which is the default](preview-list.png)
+Calendar page, or `"agendaView": "timeline"`. The grid is the one at the top of
+this page.
 
 The grid draws whatever range `calendar` is set to. The panel widens to make
 room for it - a week is a wide popup - so that mail and calendar are always
@@ -192,6 +193,8 @@ mailbox's `openCommand`, so it lands in the browser profile that is already
 signed in as the right person.
 
 ## Reading a message
+
+![A message open beside the list, narrowed to unread](preview-reading.png)
 
 Clicking a mail opens it in the right-hand column, in place of the agenda:
 sender, recipients, when it arrived, and the message as plain text. **Open**
@@ -352,12 +355,18 @@ laying out a calendar grid, so `dev/` renders the plugin's own components
 against fixture data instead:
 
 ```bash
+dev/showcase.sh             # regenerate the images in this README
 dev/run.sh                  # start it, rendered offscreen
 dev/shot.sh out.png         # ask it to draw itself into a PNG
 dev/shot.sh out.png 7       # ... as a week
 node dev/test-model.js      # the layout maths, with no window at all
 python3 dev/test-python.py  # aliases, and which widget a save lands in
 ```
+
+`showcase.sh` drives the real panel through each scenario with demo data,
+finds it by photographing the screen with the panel shut and open and taking
+the difference, and pastes it onto the wallpaper so nothing you had open is in
+frame. It puts your `shell.json` back on the way out, including if it fails.
 
 Both test suites are quick and neither needs a display, so run them before
 sending anything. They cover the parts that fail quietly rather than loudly:

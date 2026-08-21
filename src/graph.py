@@ -809,6 +809,8 @@ DEMO_MAIL = {
          "Four nights, arriving Friday. Keys are in the box by the door.", True, True),
         ("Garage", "Service reminder",
          "The annual service is due next month. Reply to book a slot.", False, False),
+        ("Allotment society", "Water is back on",
+         "The standpipes are running again after the repairs.", True, False),
     ],
     "family": [
         ("School office", "Parents' evening — pick a slot",
@@ -931,6 +933,43 @@ def demo_account(alias, index, args):
     }
 
 
+def demo_message(alias, message_id):
+    """The body behind a demo row, so the reading pane works in demo mode too.
+
+    Without this, opening a synthetic message asks Graph about an id it has
+    never seen and the pane shows an auth error - which is a poor way to find
+    out that demo mode stops at the list.
+    """
+    letters = DEMO_MAIL.get(alias, DEMO_FALLBACK_MAIL)
+    slot = 0
+    if message_id.startswith("demo-"):
+        tail = message_id.rsplit("-", 1)[-1]
+        if tail.isdigit():
+            slot = int(tail)
+    who, subject, preview, read, _focused = letters[slot % len(letters)]
+    address = who.lower().replace(" ", ".").replace("'", "") + "@example.com"
+    return {
+        "ok": True,
+        "id": message_id,
+        "subject": subject,
+        "from": who,
+        "fromAddress": address,
+        "to": ["you@example.com"],
+        "cc": [],
+        "received": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "webLink": "https://outlook.office.com/mail/",
+        "hasAttachments": False,
+        "read": read,
+        "body": preview + "\n\n"
+        + "This is demo content, so the panel can be looked at and photographed "
+        + "without anyone's mailbox being involved. A real message would carry "
+        + "its own text here, converted to plain text by Graph before it ever "
+        + "reaches this pane.\n\n"
+        + "Thanks,\n" + who,
+        "truncated": False,
+    }
+
+
 def cmd_palette(_args):
     """The active theme's named colours, so accounts can be tinted in hues that
     belong to whatever theme is running rather than hardcoded hex."""
@@ -994,6 +1033,10 @@ def cmd_message(args):
     HTML mail to plain text for us given the right Prefer header, which is
     exactly what a small preview pane wants.
     """
+    if getattr(args, "demo", False):
+        out(demo_message(args.account, args.id))
+        return
+
     account = read_json(state_path(args.account))
     if not account:
         fail("auth_required", "Not signed in")
@@ -1144,6 +1187,7 @@ def main():
 
     message = with_account("message", "fetch one message with its body")
     message.add_argument("--id", required=True, help="message id from a fetch")
+    message.add_argument("--demo", action="store_true", help="synthetic body, matching --demo fetch")
     message.set_defaults(func=cmd_message)
 
     mark = with_account("mark", "mark a message read or unread")

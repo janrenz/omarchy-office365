@@ -52,6 +52,9 @@ Item {
   readonly property bool previewLine: setting("previewLine", true) !== false
   // Whether the panel opens already narrowed to Outlook's Focused mail.
   readonly property bool focusedByDefault: setting("focusedByDefault", false) === true
+  // The same for the unread filter, for a widget you keep as an inbox rather
+  // than as a record of everything that arrived.
+  readonly property bool unreadByDefault: setting("unreadByDefault", false) === true
   // The agenda as a day-grouped list or as a drawn time grid. The list is the
   // default until the grid has earned it.
   readonly property string agendaView: String(setting("agendaView", "list")) === "timeline" ? "timeline" : "list"
@@ -104,9 +107,10 @@ Item {
   property bool unreadOnly: false
   property bool focusedOnly: false
 
-  // Settings arrive after this object is built, so pick the default up when
-  // it resolves rather than only at construction.
+  // Settings arrive after this object is built, so pick the defaults up when
+  // they resolve rather than only at construction.
   onFocusedByDefaultChanged: focusedOnly = focusedByDefault
+  onUnreadByDefaultChanged: unreadOnly = unreadByDefault
 
   function toggleFilter(alias) {
     filterAlias = filterAlias === alias ? "" : alias
@@ -114,7 +118,7 @@ Item {
 
   function clearFilters() {
     filterAlias = ""
-    unreadOnly = false
+    unreadOnly = unreadByDefault
     focusedOnly = focusedByDefault
     selectedEvent = null
     expandedStart = -1
@@ -147,7 +151,11 @@ Item {
     previewError = ""
     previewLoading = true
     if (messageProc.running) messageProc.running = false
-    messageProc.command = ["python3", helper(), "message", "--account", String(mail.alias), "--id", String(mail.id)]
+    var command = ["python3", helper(), "message", "--account", String(mail.alias), "--id", String(mail.id)]
+    // Demo mode has to reach the reading pane too, or opening a synthetic row
+    // asks Graph about an id it has never seen.
+    if (setting("demo", false) === true) command.push("--demo")
+    messageProc.command = command
     messageProc.running = true
   }
 

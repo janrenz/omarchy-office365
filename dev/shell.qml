@@ -50,7 +50,12 @@ ShellRoot {
         ]
       })
       property var accountConfigs: settings.accounts
-      property var themePalette: ({})
+      // A few named colours, so the mailbox page's swatches are not all grey
+      // the way they are before a real palette has been read.
+      property var themePalette: ({
+        blue: "#7aa2f7", green: "#9ece6a", magenta: "#bb9af7", yellow: "#e0af68",
+        cyan: "#7dcfff", orange: "#ff9e64", red: "#f7768e", brown: "#cfa07a"
+      })
       property bool configured: true
       property bool saving: false
       property string saveError: ""
@@ -113,6 +118,15 @@ ShellRoot {
 
       function shot(path: string): void {
         var started = content.grabToImage(function(result) {
+          console.log("shot", path, result ? result.saveToFile(path) : "no result")
+        })
+        if (!started) console.log("shot", path, "grab refused - is the window mapped?")
+      }
+
+      // Just the stage, without the harness's own controls above it - for
+      // figures where the dev chrome would be noise.
+      function stageShot(path: string): void {
+        var started = stage.grabToImage(function(result) {
           console.log("shot", path, result ? result.saveToFile(path) : "no result")
         })
         if (!started) console.log("shot", path, "grab refused - is the window mapped?")
