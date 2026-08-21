@@ -364,5 +364,24 @@ group("the list view still works", () => {
   check("finished meetings stay dropped there", merged.groups[0].events.map((e) => e.id), ["soon"])
 })
 
+// Anything the shell draws for us cannot be pinned to Text.PlainText from here,
+// so it has to arrive already unable to look like markup. Qt switches a string
+// to rich text as soon as it finds a `<` that could open a tag, and rich text
+// fetches what it is told to.
+group("text handed to the shell", () => {
+  const attack = '<img src="http://tracker.example/pixel.png">Invoice'
+  check("a tag cannot survive", Model.plainText(attack).indexOf("<"), -1)
+  check("the words do", Model.plainText(attack).indexOf("Invoice") >= 0, true)
+  check("a closing tag cannot either",
+        Model.plainText("</b><a href='http://x'>x</a>").indexOf("<"), -1)
+  check("nor an html document",
+        Model.plainText("<!DOCTYPE html><html><body>hi").indexOf("<"), -1)
+  check("ordinary text is untouched",
+        Model.plainText("Re: sprint 24 scope"), "Re: sprint 24 scope")
+  check("an address keeps its name",
+        Model.plainText("Priya Raman kees@example.com>"), "Priya Raman kees@example.com>")
+  check("nothing is empty, not undefined", Model.plainText(undefined), "")
+})
+
 console.log(`\n${checks - failures}/${checks} passed`)
 process.exit(failures ? 1 : 0)

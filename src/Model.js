@@ -125,6 +125,25 @@ function accountViews(configs, snapshot, palette, fallback, busyMap, loading) {
   return views
 }
 
+// Text handed to something the shell draws for us - a bar tooltip, a widget
+// label - where a Text item in the shell's own code renders it and we cannot
+// pin that item to Text.PlainText from here.
+//
+// Qt's AutoText decides a string is rich text the moment it finds a `<` that
+// could open a tag, and rich text fetches what it is told to fetch. A display
+// name or subject line arrives from a mailbox, so a crafted one could pull a
+// remote resource into the shared shell process - the shape of a tracking
+// pixel, and it would run whether or not the panel was ever opened. Taking the
+// `<` away takes the decision away. Everything this is used on is a name, a
+// subject or an error message, where a stray `<` is no loss.
+//
+// Text this plugin renders itself does not need this: those items set
+// textFormat: Text.PlainText directly, which is the stronger fix.
+function plainText(value) {
+  if (value === undefined || value === null) return ""
+  return String(value).replace(/</g, "")
+}
+
 // How many are unread, said only as precisely as it is known.
 //
 // The inbox is asked for the number directly; when that request fails, all

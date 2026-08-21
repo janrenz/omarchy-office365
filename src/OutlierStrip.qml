@@ -27,6 +27,7 @@ Item {
   }
 
   Text {
+    textFormat: Text.PlainText
     anchors.left: parent.left
     anchors.leftMargin: root.leftInset + Style.spacing.xs
     anchors.verticalCenter: parent.verticalCenter

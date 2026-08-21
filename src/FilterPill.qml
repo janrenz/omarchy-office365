@@ -45,6 +45,7 @@ Rectangle {
     }
 
     Text {
+      textFormat: Text.PlainText
       text: root.label
       color: root.fg
       font.family: root.fontFamily
@@ -54,6 +55,7 @@ Rectangle {
     }
 
     Text {
+      textFormat: Text.PlainText
       text: root.detail
       visible: text !== ""
       color: root.alert ? root.accent : root.dim

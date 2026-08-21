@@ -22,6 +22,7 @@ Column {
   spacing: Style.spacing.lg
 
   Text {
+    textFormat: Text.PlainText
     visible: root.agenda.groups.length === 0
     text: "Nothing scheduled"
     color: root.dim
@@ -38,6 +39,7 @@ Column {
       spacing: Style.spacing.sm
 
       Text {
+        textFormat: Text.PlainText
         text: modelData.label
         color: root.dim
         font.family: root.fontFamily
@@ -119,6 +121,7 @@ Column {
               implicitHeight: timeText.implicitHeight
 
               Text {
+                textFormat: Text.PlainText
                 id: timeText
                 anchors.left: parent.left
                 text: eventRow.modelData.timeRange
@@ -129,6 +132,7 @@ Column {
               }
 
               Text {
+                textFormat: Text.PlainText
                 anchors.right: parent.right
                 anchors.baseline: timeText.baseline
                 visible: root.showAccount
@@ -140,6 +144,7 @@ Column {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: Model.oneLine(eventRow.modelData.subject, 90)
               color: root.fg
@@ -150,6 +155,7 @@ Column {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: text !== ""
               text: Model.oneLine(eventRow.modelData.location, 70)
@@ -173,6 +179,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     visible: root.agenda.hidden > 0
     text: "+" + root.agenda.hidden + " more"
     color: root.dim

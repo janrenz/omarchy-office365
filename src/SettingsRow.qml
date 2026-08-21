@@ -50,6 +50,7 @@ Rectangle {
     spacing: Style.spacing.xxs
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       text: root.title
       color: root.fg
@@ -60,6 +61,7 @@ Rectangle {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: text !== ""
       text: root.detail
@@ -71,6 +73,7 @@ Rectangle {
   }
 
   Text {
+    textFormat: Text.PlainText
     id: chevron
     anchors.right: parent.right
     anchors.rightMargin: Style.spacing.lg

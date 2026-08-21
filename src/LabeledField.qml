@@ -25,6 +25,7 @@ Column {
   spacing: Style.spacing.xxs
 
   Text {
+    textFormat: Text.PlainText
     text: root.label
     visible: text !== ""
     color: root.dim
@@ -45,6 +46,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     text: root.hint
     visible: text !== ""
     width: parent.width

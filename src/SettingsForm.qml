@@ -255,6 +255,7 @@ Item {
         spacing: Style.spacing.sm
 
         Text {
+          textFormat: Text.PlainText
           text: "MAILBOXES"
           color: root.dim
           font.family: root.fontFamily
@@ -281,6 +282,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           visible: root.rows.length === 0
           width: parent.width
           wrapMode: Text.WordWrap
@@ -308,6 +310,7 @@ Item {
         spacing: Style.spacing.sm
 
         Text {
+          textFormat: Text.PlainText
           text: "SHOW"
           color: root.dim
           font.family: root.fontFamily
@@ -349,6 +352,7 @@ Item {
         spacing: Style.spacing.sm
 
         Text {
+          textFormat: Text.PlainText
           text: "BAR"
           color: root.dim
           font.family: root.fontFamily
@@ -414,6 +418,7 @@ Item {
               Behavior on color { ColorAnimation { duration: 120 } }
 
               Text {
+                textFormat: Text.PlainText
                 anchors.centerIn: parent
                 text: choice.modelData
                 color: choice.selected ? root.accent : root.fg
@@ -435,6 +440,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           wrapMode: Text.WordWrap
           text: root.vLabel.trim() !== ""
@@ -450,6 +456,7 @@ Item {
           implicitHeight: Math.max(tintLabel.implicitHeight, tintSwitch.implicitHeight)
 
           Text {
+            textFormat: Text.PlainText
             id: tintLabel
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
@@ -471,6 +478,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           wrapMode: Text.WordWrap
           text: "Colours the bar icon while any mailbox here has unread mail, so it stands out without showing a number."
@@ -487,6 +495,7 @@ Item {
         spacing: Style.spacing.sm
 
         Text {
+          textFormat: Text.PlainText
           text: "UPDATES"
           color: root.dim
           font.family: root.fontFamily
@@ -500,6 +509,7 @@ Item {
           implicitHeight: Math.max(refreshLabel.implicitHeight, refreshField.implicitHeight)
 
           Text {
+            textFormat: Text.PlainText
             id: refreshLabel
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
@@ -525,6 +535,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           wrapMode: Text.WordWrap
           text: "How often every mailbox here is asked for new mail and meetings."
@@ -550,6 +561,7 @@ Item {
           spacing: Style.spacing.sm
 
           Text {
+            textFormat: Text.PlainText
             text: "󰅁"
             color: root.dim
             font.family: root.fontFamily
@@ -558,6 +570,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             text: "MAIL"
             color: root.dim
             font.family: root.fontFamily
@@ -580,6 +593,7 @@ Item {
         implicitHeight: Math.max(mailsLabel.implicitHeight, mailsField.implicitHeight)
 
         Text {
+          textFormat: Text.PlainText
           id: mailsLabel
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
@@ -605,6 +619,7 @@ Item {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         wrapMode: Text.WordWrap
         text: root.rows.length > 1
@@ -620,6 +635,7 @@ Item {
         implicitHeight: Math.max(focusedLabel.implicitHeight, focusedSwitch.implicitHeight)
 
         Text {
+          textFormat: Text.PlainText
           id: focusedLabel
           anchors.left: parent.left
           anchors.right: focusedSwitch.left
@@ -644,6 +660,7 @@ Item {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         wrapMode: Text.WordWrap
         text: "Open with Outlook's Other mail hidden. Press f in the panel to switch it either way, u for unread."
@@ -657,6 +674,7 @@ Item {
         implicitHeight: Math.max(previewLabel.implicitHeight, previewSwitch.implicitHeight)
 
         Text {
+          textFormat: Text.PlainText
           id: previewLabel
           anchors.left: parent.left
           anchors.right: previewSwitch.left
@@ -681,6 +699,7 @@ Item {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         wrapMode: Text.WordWrap
         text: "A line of the message body under each subject."
@@ -694,6 +713,7 @@ Item {
         implicitHeight: Math.max(markLabel.implicitHeight, markSwitch.implicitHeight)
 
         Text {
+          textFormat: Text.PlainText
           id: markLabel
           anchors.left: parent.left
           anchors.right: markSwitch.left
@@ -718,6 +738,7 @@ Item {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         wrapMode: Text.WordWrap
         text: root.vMarkRead
@@ -744,6 +765,7 @@ Item {
           spacing: Style.spacing.sm
 
           Text {
+            textFormat: Text.PlainText
             text: "󰅁"
             color: root.dim
             font.family: root.fontFamily
@@ -752,6 +774,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             text: "CALENDAR"
             color: root.dim
             font.family: root.fontFamily
@@ -774,6 +797,7 @@ Item {
         implicitHeight: Math.max(viewLabel.implicitHeight, viewGroup.implicitHeight)
 
         Text {
+          textFormat: Text.PlainText
           id: viewLabel
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
@@ -797,6 +821,7 @@ Item {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         wrapMode: Text.WordWrap
         text: "A grid draws meetings at the size and position their times give them, the way Outlook does. The panel widens to make room for it."
@@ -810,6 +835,7 @@ Item {
         implicitHeight: Math.max(rangeLabel.implicitHeight, rangeGroup.implicitHeight)
 
         Text {
+          textFormat: Text.PlainText
           id: rangeLabel
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
@@ -869,6 +895,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           wrapMode: Text.WordWrap
           text: "The hours the grid draws, so a day fits at a useful size. Nothing is hidden by it - meetings outside these hours appear as a line at the top or bottom that opens the day up when clicked."
@@ -882,6 +909,7 @@ Item {
           implicitHeight: Math.max(weekendLabel.implicitHeight, weekendSwitch.implicitHeight)
 
           Text {
+            textFormat: Text.PlainText
             id: weekendLabel
             anchors.left: parent.left
             anchors.right: weekendSwitch.left
@@ -906,6 +934,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           wrapMode: Text.WordWrap
           text: "Leaving them out gives the working days more room across."
@@ -946,6 +975,7 @@ Item {
               spacing: Style.spacing.sm
 
               Text {
+                textFormat: Text.PlainText
                 text: "󰅁"
                 color: root.dim
                 font.family: root.fontFamily
@@ -954,6 +984,7 @@ Item {
               }
 
               Text {
+                textFormat: Text.PlainText
                 text: "Mailboxes"
                 color: root.dim
                 font.family: root.fontFamily
@@ -975,6 +1006,7 @@ Item {
           // thing the widget ever shows and "no alias yet" needs a sentence
           // around it to make sense.
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             visible: !!root.service && !root.service.configured
             wrapMode: Text.WordWrap
@@ -993,6 +1025,7 @@ Item {
             implicitHeight: Math.max(pageStatus.implicitHeight, pageActions.implicitHeight)
 
             Text {
+              textFormat: Text.PlainText
               id: pageStatus
               anchors.left: parent.left
               anchors.right: pageActions.left
@@ -1041,6 +1074,7 @@ Item {
             visible: root.isSignedIn(page.modelData.account)
 
             Text {
+              textFormat: Text.PlainText
               id: writeText
               anchors.left: parent.left
               anchors.right: writeButton.left
@@ -1099,6 +1133,7 @@ Item {
             spacing: Style.spacing.xxs
 
             Text {
+              textFormat: Text.PlainText
               text: "Colour"
               color: root.dim
               font.family: root.fontFamily
@@ -1132,6 +1167,7 @@ Item {
 
           // ---- advanced ----
           Text {
+            textFormat: Text.PlainText
             text: (root.advancedOpen[page.index] ? "▾  " : "▸  ") + "ADVANCED"
             color: root.dim
             font.family: root.fontFamily
@@ -1214,6 +1250,7 @@ Item {
 
     // ==================== actions ====================
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: !!root.service && root.service.saveError !== ""
       wrapMode: Text.WordWrap

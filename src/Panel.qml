@@ -267,6 +267,7 @@ Panel {
             spacing: Style.spacing.xxs
 
             Text {
+              textFormat: Text.PlainText
               text: root.service ? root.service.primaryTitle : "Office 365"
               color: root.fg
               font.family: root.fontFamily
@@ -283,6 +284,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: text !== ""
               text: {
                 if (!root.service) return ""
@@ -441,6 +443,7 @@ Panel {
             spacing: Style.spacing.lg
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               wrapMode: Text.WordWrap
               color: root.dim
@@ -467,6 +470,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   text: modelData.alias
                   color: root.fg
                   font.family: root.fontFamily
@@ -492,6 +496,7 @@ Panel {
             spacing: Style.spacing.lg
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               wrapMode: Text.WordWrap
               color: root.fg
@@ -510,6 +515,7 @@ Panel {
               color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
 
               Text {
+                textFormat: Text.PlainText
                 id: codeText
                 anchors.centerIn: parent
                 text: root.service ? root.service.userCode : ""
@@ -528,6 +534,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: !!root.service && root.service.userCode !== ""
               width: parent.width
               wrapMode: Text.WordWrap

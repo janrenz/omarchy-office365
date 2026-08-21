@@ -193,6 +193,23 @@ def local_zone(name):
         return datetime.now().astimezone().tzinfo
 
 
+# Nothing Graph legitimately answers with comes close to this, and the widget
+# holds whatever arrives in memory inside the shared shell process. An
+# unbounded read trusts the far end to be reasonable about length; a cap costs
+# nothing and means a wrong or hostile answer cannot grow without limit.
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
+def read_capped(response, limit=MAX_RESPONSE_BYTES):
+    """The body, up to `limit` bytes. A longer one is cut, not swallowed whole.
+
+    Reading one byte past the cap is what tells us it was too long: the JSON
+    then fails to parse and the caller reports a failure, which is the right
+    outcome for a response we cannot trust the shape of anyway.
+    """
+    return response.read(limit + 1)[:limit].decode("utf-8", "replace")
+
+
 def http(url, *, method="GET", data=None, json_body=None, headers=None, timeout=20):
     """Return (status, parsed_json). Non-2xx comes back with its body parsed."""
     body = None
@@ -208,13 +225,13 @@ def http(url, *, method="GET", data=None, json_body=None, headers=None, timeout=
     request = urllib.request.Request(url, data=body, method=method, headers=request_headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", "replace")
+            raw = read_capped(response)
             try:
                 return response.status, (json.loads(raw) if raw.strip() else {})
             except ValueError:
                 return response.status, {}
     except urllib.error.HTTPError as error:
-        raw = error.read().decode("utf-8", "replace")
+        raw = read_capped(error)
         try:
             parsed = json.loads(raw)
         except ValueError:

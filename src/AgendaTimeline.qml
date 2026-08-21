@@ -105,6 +105,7 @@ Item {
         height: dayHeader.height
 
         Text {
+          textFormat: Text.PlainText
           anchors.left: parent.left
           anchors.leftMargin: Style.spacing.xs
           anchors.verticalCenter: parent.verticalCenter
@@ -237,6 +238,7 @@ Item {
             y: index * root.hourHeight
 
             Text {
+              textFormat: Text.PlainText
               anchors.right: parent.left
               anchors.rightMargin: -root.gutterWidth + Style.spacing.xs
               anchors.verticalCenter: parent.verticalCenter
@@ -399,6 +401,7 @@ Item {
   }
 
   Text {
+    textFormat: Text.PlainText
     anchors.centerIn: gridViewport
     visible: root.days.length > 0 && root.earlierCount === 0 && root.laterCount === 0
              && !hasAnything()

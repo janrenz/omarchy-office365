@@ -54,6 +54,7 @@ Column {
     implicitHeight: Math.max(subjectText.implicitHeight, closeButton.implicitHeight)
 
     Text {
+      textFormat: Text.PlainText
       id: subjectText
       anchors.left: parent.left
       anchors.right: closeButton.left
@@ -86,6 +87,7 @@ Column {
     spacing: Style.spacing.xxs
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       text: {
         if (!root.detail) return root.mail ? Model.senderName(root.mail) : ""
@@ -101,6 +103,7 @@ Column {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: text !== ""
       text: root.detail ? "To  " + root.people(root.detail.to) : ""
@@ -111,6 +114,7 @@ Column {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: text !== ""
       text: root.detail && root.detail.cc && root.detail.cc.length > 0
@@ -122,6 +126,7 @@ Column {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       text: root.when(root.detail ? root.detail.received : (root.mail ? root.mail.received : ""))
       color: root.dim
@@ -134,6 +139,7 @@ Column {
 
   // ---- body ----
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.loading
     text: "Opening…"
@@ -143,6 +149,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.error !== ""
     text: root.error
@@ -164,6 +171,7 @@ Column {
     boundsBehavior: Flickable.StopAtBounds
 
     Text {
+      textFormat: Text.PlainText
       id: bodyText
       width: parent.width
       text: root.detail ? String(root.detail.body || "").trim() : ""
@@ -176,6 +184,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: !!root.detail && root.detail.truncated === true
     text: "Message continues - open it to read the rest."
@@ -185,6 +194,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.actionError !== ""
     text: root.actionError

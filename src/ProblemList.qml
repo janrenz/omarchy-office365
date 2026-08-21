@@ -33,6 +33,7 @@ Column {
     model: root.views
 
     Text {
+      textFormat: Text.PlainText
       required property var modelData
       width: root.width
       visible: modelData.loaded && !modelData.ok && modelData.errorCode !== "auth_required"
@@ -48,6 +49,7 @@ Column {
     model: root.warnings
 
     Text {
+      textFormat: Text.PlainText
       required property var modelData
       width: root.width
       wrapMode: Text.WordWrap
@@ -59,6 +61,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: root.width
     visible: root.errorMessage !== ""
     wrapMode: Text.WordWrap

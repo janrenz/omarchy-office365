@@ -120,6 +120,7 @@ Rectangle {
     clip: true
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: root.roomForTime
       // The real start time even when the grid cuts the block short of it, so
@@ -133,6 +134,7 @@ Rectangle {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       text: root.event ? Model.oneLine(root.event.subject, 80) : ""
       color: root.past ? root.dim : root.fg
@@ -145,6 +147,7 @@ Rectangle {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: root.roomForLocation && text !== ""
       text: root.event ? Model.oneLine(root.event.location, 40) : ""
@@ -159,6 +162,7 @@ Rectangle {
   // glance. Joining itself is a button in the bar below: blocks get narrow
   // enough that a button inside one would be a coin toss to hit.
   Text {
+    textFormat: Text.PlainText
     anchors.right: parent.right
     anchors.top: parent.top
     anchors.rightMargin: Style.space(2)

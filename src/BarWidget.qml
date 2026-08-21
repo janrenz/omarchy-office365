@@ -90,7 +90,9 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.barLabel !== "" ? root.barLabel : root.barIcon
+    // Rendered by the shell's own Text item, so it is cleaned here rather than
+    // pinned to plain text there.
+    text: Model.plainText(root.barLabel !== "" ? root.barLabel : root.barIcon)
     // A text label needs more room than a glyph does.
     slotSize: root.barLabel !== "" ? Style.bar.statusSlot * 2 : Style.bar.iconSlot
     // Colour, not a count: the panel is where the numbers live.
@@ -103,14 +105,15 @@ BarWidget {
       var views = service.views
       for (var i = 0; i < views.length; i++) {
         var view = views[i]
-        var who = view.username !== "" ? view.username : view.alias
+        // From the mailbox, and about to be drawn by the shell's tooltip.
+        var who = Model.plainText(view.username !== "" ? view.username : view.alias)
         if (view.busy) lines.push(who + ": signed in, loading…")
         else if (!view.loaded) lines.push(who + ": loading…")
         else if (view.ok) lines.push(who + " · " + Model.unreadSummary(view))
         else if (view.errorCode === "auth_required") lines.push(who + ": sign in")
-        else lines.push(who + ": " + view.errorMessage)
+        else lines.push(who + ": " + Model.plainText(view.errorMessage))
       }
-      if (service.errorCode !== "") lines.push(service.errorMessage)
+      if (service.errorCode !== "") lines.push(Model.plainText(service.errorMessage))
       return lines.join("\n")
     }
 

@@ -36,6 +36,7 @@ Item {
     Behavior on color { ColorAnimation { duration: 120 } }
 
     Text {
+      textFormat: Text.PlainText
       anchors.left: parent.left
       anchors.right: joinButton.visible ? joinButton.left : openButton.left
       anchors.rightMargin: Style.spacing.sm
@@ -59,6 +60,7 @@ Item {
       spacing: Style.spacing.xxs
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: root.event ? Model.oneLine(root.event.subject, 90) : ""
         color: root.fg
@@ -71,6 +73,7 @@ Item {
       // Everything else on one line, in the order you would ask about it:
       // when, where, who, and whose calendar it came from.
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: {
           if (!root.event) return ""

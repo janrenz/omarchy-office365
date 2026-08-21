@@ -89,6 +89,7 @@ Column {
   ListModel { id: rows }
 
   Text {
+    textFormat: Text.PlainText
     visible: rows.count === 0
     text: root.unreadOnly ? "No unread mail" : "No mail"
     color: root.dim
@@ -197,6 +198,7 @@ Column {
           implicitHeight: senderText.implicitHeight
 
           Text {
+            textFormat: Text.PlainText
             id: senderText
             anchors.left: parent.left
             anchors.right: meta.left
@@ -210,6 +212,7 @@ Column {
           }
 
           Text {
+            textFormat: Text.PlainText
             id: meta
             anchors.right: parent.right
             anchors.baseline: senderText.baseline
@@ -221,6 +224,7 @@ Column {
         }
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           text: (row.hasAttachments ? "󰏢  " : "") + Model.oneLine(row.subject, 90)
           color: row.read ? root.dim : root.fg
@@ -232,6 +236,7 @@ Column {
         // Shown for read and unread alike, and kept even when a message has
         // no preview text, so every row is the same height.
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           visible: root.showPreviewLine
           text: {
@@ -281,6 +286,7 @@ Column {
         Behavior on color { ColorAnimation { duration: 120 } }
 
         Text {
+          textFormat: Text.PlainText
           anchors.centerIn: parent
           text: "󰩹"
           color: row.overTrash ? root.accent : root.dim

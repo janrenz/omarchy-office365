@@ -39,6 +39,7 @@ Item {
                                + metrics.tightBoundingRect.height / 2
 
   Text {
+    textFormat: Text.PlainText
     id: glyph
     text: root.text
     color: root.color
