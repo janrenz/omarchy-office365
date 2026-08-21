@@ -171,7 +171,6 @@ Column {
     boundsBehavior: Flickable.StopAtBounds
 
     Text {
-      textFormat: Text.PlainText
       id: bodyText
       width: parent.width
       text: root.detail ? String(root.detail.body || "").trim() : ""

@@ -9,6 +9,7 @@ tokens. Both would look like the plugin working.
 """
 
 import contextlib
+import re
 import io
 import json
 import os
@@ -358,6 +359,46 @@ class OnlineMeetings(unittest.TestCase):
         self.assertEqual(graph.online_provider({"onlineMeetingProvider": "skypeForConsumer"}), "skype")
         self.assertEqual(graph.online_provider({"onlineMeetingProvider": "unknown", "isOnlineMeeting": True}), "teams")
         self.assertEqual(graph.online_provider({}), "")
+
+
+class QmlText(unittest.TestCase):
+    """Every Text item must pin textFormat, exactly once.
+
+    Pinning matters because Qt's AutoText would otherwise let mailbox content
+    turn itself into rich text and fetch remote resources. Exactly once matters
+    because QML refuses a property assigned twice and drops the whole component
+    - which is how a blanket edit that duplicated one line silently killed the
+    reading pane, in a file no screenshot happened to cover.
+    """
+
+    def text_blocks(self):
+        """(file, line, textFormat count) for every Text item in src/."""
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
+        opener = re.compile(r"^\s*(?:[A-Za-z_][\w.]*\s*:\s*)?Text\s*\{\s*$")
+        for name in sorted(os.listdir(root)):
+            if not name.endswith(".qml"):
+                continue
+            with open(os.path.join(root, name), encoding="utf-8") as handle:
+                lines = handle.read().split("\n")
+            for i, line in enumerate(lines):
+                if not opener.match(line):
+                    continue
+                indent = len(line) - len(line.lstrip())
+                count, j = 0, i + 1
+                while j < len(lines):
+                    cur = lines[j]
+                    if cur.strip() and (len(cur) - len(cur.lstrip())) <= indent:
+                        break
+                    if re.match(r"^\s*textFormat\s*:", cur):
+                        count += 1
+                    j += 1
+                yield name, i + 1, count
+
+    def test_every_text_item_pins_its_format_exactly_once(self):
+        blocks = list(self.text_blocks())
+        self.assertGreater(len(blocks), 50, "the scanner found almost nothing - has the syntax changed?")
+        wrong = ["%s:%d has %d" % b for b in blocks if b[2] != 1]
+        self.assertEqual(wrong, [], "Text items not pinned exactly once: " + ", ".join(wrong))
 
 
 if __name__ == "__main__":
