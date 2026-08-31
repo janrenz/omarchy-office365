@@ -404,7 +404,10 @@ Item {
             // for as long as the fetch takes.
             SkeletonList {
               width: columns.listWidth
+              // Also the very first fetch, which had nothing at all to show
+              // for itself - an empty column while the mailbox loaded.
               visible: service.switchingFolder
+                       || (service.mail.length === 0 && service.loading)
               fg: Color.foreground
               fontFamily: Style.font.family
               groups: [Math.max(3, Math.min(8, service.mails))]
@@ -417,6 +420,7 @@ Item {
               width: columns.listWidth
               height: columns.height
               visible: !columns.listGivesWay && !service.switchingFolder
+                       && !(service.mail.length === 0 && service.loading)
               clip: true
 
               MailList {
