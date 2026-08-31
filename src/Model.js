@@ -113,12 +113,22 @@ function accountViews(configs, snapshot, palette, fallback, busyMap, loading) {
       errorMessage: data && data.error ? String(data.error.message || "") : "",
       // Whether this mailbox was signed in with permission to change mail.
       write: !!data && data.write === true,
+      // ...and separately, to send it. Marking and drafting are Mail.ReadWrite;
+      // sending is a grant of its own, so a mailbox can be able to write a
+      // draft and not able to send it.
+      send: !!data && data.send === true,
       mail: data && data.mail ? data.mail : [],
       unreadCount: data && data.unreadCount ? Number(data.unreadCount) : 0,
       // False when the inbox would not say, and unreadCount is only a floor
       // taken from the rows that did arrive.
       unreadKnown: !data || data.unreadKnown !== false,
       events: data && data.events ? data.events : [],
+      // The mailbox's folder tree, and which folder the rows above came from.
+      // Empty until the first fetch answers, which is why the sidebar falls
+      // back to showing the inbox alone rather than nothing at all.
+      folders: (data && data.folders) || [],
+      folderId: data && data.folderId ? String(data.folderId) : "inbox",
+      folderName: data && data.folderName ? String(data.folderName) : "",
       warnings: (data && data.warnings) || []
     })
   }
@@ -209,6 +219,89 @@ function collectWarnings(views) {
 //           while its own reading pane is open
 // Keying by id is what stops a slow reply to one message from landing on
 // another one the user has since moved to.
+// Sidebar rows: every mailbox's folder tree, flattened, in draw order.
+//
+// One mailbox is just its tree. Several get a header apiece and their trees
+// indented under it, because a folder id names a folder in one mailbox only -
+// there is no "Archive" that several mailboxes could share a row for, and
+// pretending otherwise would send a click to whichever mailbox happened to be
+// first.
+//
+// `selected` is {alias: folder id}; a mailbox missing from it is on its inbox.
+function folderRows(views, selected) {
+  var rows = []
+  var list = views || []
+  var multi = list.length > 1
+  var chosenAll = selected || {}
+
+  for (var i = 0; i < list.length; i++) {
+    var view = list[i]
+    var folders = view.folders || []
+    var chosen = String(chosenAll[view.alias] || "inbox")
+
+    if (multi)
+      rows.push({
+        kind: "account",
+        key: "account:" + view.alias,
+        alias: view.alias,
+        name: view.username !== "" ? view.username : view.alias,
+        short: view.short,
+        color: view.color,
+        depth: 0,
+        unread: view.unreadCount || 0,
+        selected: false
+      })
+
+    // Nothing fetched yet, or a mailbox that could not list its folders. One
+    // inbox row keeps the sidebar navigable instead of empty, and it is the
+    // folder the mailbox is already reading.
+    if (folders.length === 0) {
+      rows.push({
+        kind: "folder", key: view.alias + ":inbox", alias: view.alias,
+        id: "inbox", name: view.folderName !== "" ? view.folderName : "Inbox",
+        unread: view.unreadCount || 0, total: 0,
+        depth: multi ? 1 : 0, color: view.color, short: view.short,
+        isInbox: true, selected: chosen === "inbox", placeholder: true
+      })
+      continue
+    }
+
+    for (var f = 0; f < folders.length; f++) {
+      var folder = folders[f]
+      var id = String(folder.id || "")
+      var isInbox = folder.isInbox === true
+      rows.push({
+        kind: "folder",
+        key: view.alias + ":" + id,
+        alias: view.alias,
+        id: id,
+        name: String(folder.name || ""),
+        unread: Number(folder.unread || 0),
+        total: Number(folder.total || 0),
+        depth: (multi ? 1 : 0) + Number(folder.depth || 0),
+        color: view.color,
+        short: view.short,
+        isInbox: isInbox,
+        // "inbox" is the well-known name the fetch defaults to; the tree knows
+        // the same folder by its real id, so both have to match the same row.
+        selected: id === chosen || (chosen === "inbox" && isInbox),
+        placeholder: false
+      })
+    }
+  }
+  return rows
+}
+
+// The folder a mailbox is reading, named. Falls back to the row marked inbox,
+// so the header says "Inbox" rather than nothing before a folder is picked.
+function folderNameFor(views, alias, selected) {
+  var rows = folderRows(views, selected)
+  for (var i = 0; i < rows.length; i++)
+    if (rows[i].kind === "folder" && rows[i].alias === alias && rows[i].selected) return rows[i].name
+  return ""
+}
+
+
 function mergeMail(views, unreadOnly, limit, state, focusedOnly) {
   var overrides = (state && state.read) || {}
   var deleted = (state && state.deleted) || {}

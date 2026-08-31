@@ -220,6 +220,7 @@ class Args:
     mails = 5
     days = 3
     from_now = False
+    folder = []
 
 
 class FetchAccount(unittest.TestCase):
@@ -232,35 +233,47 @@ class FetchAccount(unittest.TestCase):
     the test.
     """
 
-    def fetch(self, failing_queries=(), inbox_ok=True, timezone_name="UTC"):
+    def fetch(self, failing_queries=(), inbox_ok=True, timezone_name="UTC",
+              folder=(), folders=None, folders_error=""):
         failing = set(failing_queries)
         self.calendar_params = {}
+        # Every folder the mail queries were pointed at, in order.
+        self.folders_read = []
 
         def collect(token, path, params, *a, **k):
             self.calendar_params = params
             return 200, [], {}, True
 
+        args = Args()
+        args.folder = list(folder)
+
         patched = {
             "read_json": lambda *a, **k: {"username": "you@example.com"},
             "access_token": lambda alias, account: ("token", account),
             "graph_get": lambda *a, **k: (
-                (200, {"unreadItemCount": 9}) if inbox_ok
+                (200, {"id": "INBOX-ID", "unreadItemCount": 9}) if inbox_ok
                 else (403, {"error": {"message": "Access is denied"}})
             ),
             "fetch_messages": self.messages(failing),
+            "fetch_folders": lambda token, inbox_id="": (
+                [] if folders_error else (list(folders) if folders is not None else []),
+                folders_error,
+                True,
+            ),
             "graph_collect": collect,
         }
         original = {name: getattr(graph, name) for name in patched}
         for name, stub in patched.items():
             setattr(graph, name, stub)
         try:
-            return graph.fetch_account("work", Args(), timezone_name)
+            return graph.fetch_account("work", args, timezone_name)
         finally:
             for name, value in original.items():
                 setattr(graph, name, value)
 
     def messages(self, failing):
-        def answer(token, top, tz, unread_only=False, focused_only=False):
+        def answer(token, top, tz, unread_only=False, focused_only=False, folder_id="inbox"):
+            self.folders_read.append(folder_id)
             for label, unread, focused in graph.MAIL_QUERIES:
                 if (unread, focused) != (unread_only, focused_only):
                     continue
@@ -310,6 +323,315 @@ class FetchAccount(unittest.TestCase):
         self.assertEqual(
             (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days, Args.days
         )
+
+
+ARCHIVE = {"id": "ARCHIVE-ID", "name": "Archive", "unread": 0, "total": 12,
+           "childCount": 0, "parentId": "", "depth": 0, "isInbox": False}
+INBOX_ROW = {"id": "INBOX-ID", "name": "Inbox", "unread": 9, "total": 40,
+             "childCount": 0, "parentId": "", "depth": 0, "isInbox": True}
+
+
+class Folders(FetchAccount):
+    """Reading a folder other than the inbox."""
+
+    def test_no_choice_reads_the_inbox(self):
+        result = self.fetch(folders=[INBOX_ROW, ARCHIVE])
+        self.assertEqual(result["folderId"], "inbox")
+        self.assertEqual(result["folderName"], "Inbox")
+        self.assertEqual(set(self.folders_read), {"inbox"})
+
+    def test_a_chosen_folder_is_the_one_read(self):
+        result = self.fetch(folder=["work=ARCHIVE-ID"], folders=[INBOX_ROW, ARCHIVE])
+        self.assertEqual(result["folderId"], "ARCHIVE-ID")
+        self.assertEqual(result["folderName"], "Archive")
+        self.assertEqual(set(self.folders_read), {"ARCHIVE-ID"})
+
+    def test_another_mailboxs_choice_is_not_this_ones(self):
+        # Folder ids belong to one mailbox. A choice made for "personal" must
+        # leave "work" on its inbox rather than sending work's id somewhere.
+        result = self.fetch(folder=["personal=ARCHIVE-ID"], folders=[INBOX_ROW, ARCHIVE])
+        self.assertEqual(result["folderId"], "inbox")
+        self.assertEqual(set(self.folders_read), {"inbox"})
+
+    def test_outside_the_inbox_focused_is_not_asked_for(self):
+        # Focused/Other is an inbox split, so those two queries would spend two
+        # round trips on a question the folder cannot answer.
+        self.fetch(folder=["work=ARCHIVE-ID"], folders=[INBOX_ROW, ARCHIVE])
+        self.assertEqual(len(self.folders_read), 2)
+        self.fetch(folders=[INBOX_ROW, ARCHIVE])
+        self.assertEqual(len(self.folders_read), 4)
+
+    def test_a_folder_that_is_gone_falls_back_to_the_inbox(self):
+        result = self.fetch(folder=["work=DELETED-ID"], folders=[INBOX_ROW, ARCHIVE])
+        self.assertEqual(result["folderId"], "inbox")
+        self.assertEqual(set(self.folders_read), {"inbox"})
+        self.assertTrue(any(w["scope"] == "folders" for w in result["warnings"]))
+
+    def test_the_badge_still_counts_the_inbox(self):
+        # Browsing Sent must not stop the bar counting new mail.
+        result = self.fetch(folder=["work=ARCHIVE-ID"], folders=[INBOX_ROW, ARCHIVE])
+        self.assertEqual(result["unreadCount"], 9)
+        self.assertTrue(result["unreadKnown"])
+
+    def test_an_unreadable_folder_list_is_a_warning_not_a_failure(self):
+        # No sidebar is a degraded window, not a broken mailbox: the inbox is
+        # still readable, so the mail must still arrive.
+        result = self.fetch(folders_error="Access is denied")
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["mail"]), 4)
+        self.assertEqual(result["folders"], [])
+        self.assertIn("Access is denied", [w["message"] for w in result["warnings"]])
+
+
+class FolderChoices(unittest.TestCase):
+    def test_pairs_are_read_per_mailbox(self):
+        self.assertEqual(
+            graph.folder_choices(["work=A", "personal=B"]),
+            {"work": "A", "personal": "B"},
+        )
+
+    def test_junk_is_dropped_rather_than_guessed_at(self):
+        self.assertEqual(graph.folder_choices(["no-equals-sign", "=B", "work=", ""]), {})
+
+    def test_an_id_may_contain_an_equals_sign(self):
+        # Graph ids are base64url-ish and routinely end in padding.
+        self.assertEqual(graph.folder_choices(["work=AAA=="]), {"work": "AAA=="})
+
+
+class FolderPaths(unittest.TestCase):
+    def test_an_id_is_escaped_into_the_path(self):
+        self.assertEqual(graph.messages_path("inbox"), "/me/mailFolders/inbox/messages")
+        self.assertEqual(
+            graph.messages_path("AA/BB+CC=="),
+            "/me/mailFolders/AA%2FBB%2BCC%3D%3D/messages",
+        )
+
+    def test_no_folder_means_the_inbox(self):
+        self.assertEqual(graph.messages_path(""), "/me/mailFolders/inbox/messages")
+
+
+class Emitted(Exception):
+    """graph.out() reached, carrying what it was about to print."""
+
+    def __init__(self, payload):
+        super().__init__("emitted")
+        self.payload = payload
+
+
+class ComposeArgs:
+    account = "work"
+    id = "MSG-1"
+    mode = "reply"
+    comment = "Thanks - will do."
+    to = ""
+    draft = False
+
+
+class Compose(unittest.TestCase):
+    """Replying, replying to everyone, and forwarding.
+
+    Sending needs Mail.Send; drafting needs only the Mail.ReadWrite a
+    write-enabled mailbox already has. The split is the whole point of these
+    tests: a mailbox that cannot send must be told so before the request, not
+    after a 403, or the window has nothing useful to offer in its place.
+    """
+
+    def run_compose(self, scopes="Mail.ReadWrite Mail.Send", write=True, responses=None, **overrides):
+        self.calls = []
+        queue = list(responses or [(202, {})])
+
+        def http(url, method="GET", data=None, json_body=None, headers=None, timeout=20):
+            self.calls.append({"url": url, "method": method, "body": json_body})
+            return queue.pop(0) if queue else (202, {})
+
+        args = ComposeArgs()
+        for key, value in overrides.items():
+            setattr(args, key, value)
+
+        patched = {
+            "read_json": lambda *a, **k: {"write": write, "scopes": scopes},
+            "access_token": lambda alias, account: ("token", account),
+            "http": http,
+            "out": lambda payload: (_ for _ in ()).throw(Emitted(payload)),
+        }
+        original = {name: getattr(graph, name) for name in patched}
+        for name, stub in patched.items():
+            setattr(graph, name, stub)
+        try:
+            graph.cmd_compose(args)
+        except Emitted as emitted:
+            return emitted.payload
+        finally:
+            for name, value in original.items():
+                setattr(graph, name, value)
+        raise AssertionError("cmd_compose emitted nothing")
+
+    def test_a_reply_is_sent_to_the_reply_endpoint(self):
+        result = self.run_compose()
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["drafted"])
+        self.assertTrue(self.calls[0]["url"].endswith("/reply"))
+        self.assertEqual(self.calls[0]["body"], {"comment": "Thanks - will do."})
+
+    def test_reply_all_and_forward_use_their_own_endpoints(self):
+        self.run_compose(mode="reply-all")
+        self.assertTrue(self.calls[0]["url"].endswith("/replyAll"))
+        self.run_compose(mode="forward", to="her@example.com")
+        self.assertTrue(self.calls[0]["url"].endswith("/forward"))
+        self.assertEqual(
+            self.calls[0]["body"]["toRecipients"],
+            [{"emailAddress": {"address": "her@example.com"}}],
+        )
+
+    def test_a_forward_with_nobody_to_forward_to_is_refused(self):
+        result = self.run_compose(mode="forward")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "no_recipient")
+        self.assertEqual(self.calls, [])
+
+    def test_an_address_that_is_not_one_is_refused_before_sending(self):
+        result = self.run_compose(mode="forward", to="her@example.com, notanaddress")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "bad_recipient")
+        self.assertIn("notanaddress", result["error"]["message"])
+        self.assertEqual(self.calls, [])
+
+    def test_a_mailbox_without_send_is_told_before_the_request(self):
+        result = self.run_compose(scopes="Mail.ReadWrite")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "send_permission_required")
+        # Nothing was attempted: the point is to offer the draft instead.
+        self.assertEqual(self.calls, [])
+
+    def test_a_read_only_mailbox_cannot_compose_at_all(self):
+        result = self.run_compose(write=False)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "write_required")
+
+    def test_a_draft_needs_no_send_permission(self):
+        result = self.run_compose(
+            scopes="Mail.ReadWrite", draft=True,
+            responses=[(201, {"id": "DRAFT-1", "webLink": "https://outlook/draft"})])
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["drafted"])
+        self.assertEqual(result["webLink"], "https://outlook/draft")
+        self.assertTrue(self.calls[0]["url"].endswith("/createReply"))
+
+    def test_a_forwarded_draft_is_addressed_afterwards(self):
+        # createForward takes no recipients, so they go on with a PATCH.
+        result = self.run_compose(
+            mode="forward", to="her@example.com", draft=True, scopes="Mail.ReadWrite",
+            responses=[(201, {"id": "DRAFT-2", "webLink": "https://outlook/d2"}), (200, {})])
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.calls[1]["method"], "PATCH")
+        self.assertEqual(
+            self.calls[1]["body"]["toRecipients"],
+            [{"emailAddress": {"address": "her@example.com"}}],
+        )
+        self.assertEqual(result["warning"], "")
+
+    def test_a_draft_that_could_not_be_addressed_still_opens(self):
+        # Half a draft in Outlook beats an error and no draft.
+        result = self.run_compose(
+            mode="forward", to="her@example.com", draft=True, scopes="Mail.ReadWrite",
+            responses=[(201, {"id": "D", "webLink": "https://outlook/d"}),
+                       (403, {"error": {"message": "Access is denied"}})])
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["drafted"])
+        self.assertEqual(result["warning"], "Access is denied")
+
+    def test_a_refused_send_names_the_permission(self):
+        # The tenant withheld Mail.Send even though the token claims it.
+        result = self.run_compose(responses=[(403, {"error": {"message": "Access denied"}})])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "send_permission_required")
+
+    def test_any_other_failure_is_reported_as_itself(self):
+        result = self.run_compose(responses=[(400, {"error": {"message": "Message too large"}})])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "send_failed")
+        self.assertEqual(result["error"]["message"], "Message too large")
+
+
+class Recipients(unittest.TestCase):
+    def test_the_separators_people_type_all_work(self):
+        good, bad = graph.recipient_list("a@b.com, c@d.org; e@f.net\ng@h.io")
+        self.assertEqual([r["emailAddress"]["address"] for r in good],
+                         ["a@b.com", "c@d.org", "e@f.net", "g@h.io"])
+        self.assertEqual(bad, [])
+
+    def test_angle_brackets_are_stripped(self):
+        good, _ = graph.recipient_list("<a@b.com>")
+        self.assertEqual(good[0]["emailAddress"]["address"], "a@b.com")
+
+    def test_what_is_not_an_address_is_named(self):
+        good, bad = graph.recipient_list("fine@example.com, nope, @host, tail@")
+        self.assertEqual(len(good), 1)
+        self.assertEqual(bad, ["nope", "@host", "tail@"])
+
+
+class SendPermission(unittest.TestCase):
+    def test_the_granted_scopes_decide(self):
+        self.assertTrue(graph.can_send({"scopes": "openid Mail.ReadWrite Mail.Send"}))
+        self.assertFalse(graph.can_send({"scopes": "openid Mail.ReadWrite"}))
+
+    def test_a_mailbox_from_before_scopes_were_recorded_may_not_send(self):
+        # Unknown has to mean no: offering Send and failing is worse than
+        # offering the draft, which works either way.
+        self.assertFalse(graph.can_send({}))
+        self.assertFalse(graph.can_send(None))
+
+
+class SanitizeHtml(unittest.TestCase):
+    """What a mail body may keep when it is rendered as markup.
+
+    Qt's rich text fetches what it is told to fetch, from the shell process and
+    the user's IP. A remote image in a message is a tracking pixel that fires
+    on render whether or not anyone meant to open it, so the remote references
+    come out here rather than being trusted to the renderer.
+    """
+
+    def test_text_and_structure_survive(self):
+        kept = graph.sanitize_html("<p>Hi <b>there</b></p><ul><li>one</li></ul>")
+        self.assertEqual(kept, "<p>Hi <b>there</b></p><ul><li>one</li></ul>")
+
+    def test_a_tracking_pixel_does_not(self):
+        self.assertNotIn("tracker", graph.sanitize_html('<img src="https://tracker/x.gif">'))
+        self.assertNotIn("<img", graph.sanitize_html('text <img src="https://tracker/x.gif"> more'))
+
+    def test_script_goes_with_its_contents(self):
+        cleaned = graph.sanitize_html("before<script>steal()</script>after")
+        self.assertEqual(cleaned, "beforeafter")
+
+    def test_style_and_frames_go_the_same_way(self):
+        self.assertEqual(graph.sanitize_html("a<style>p{color:red}</style>b"), "ab")
+        self.assertEqual(graph.sanitize_html('a<iframe src="https://evil"></iframe>b'), "ab")
+
+    def test_event_handlers_are_stripped(self):
+        cleaned = graph.sanitize_html('<div onclick="bad()">body</div>')
+        self.assertNotIn("onclick", cleaned)
+        self.assertIn("body", cleaned)
+
+    def test_css_cannot_fetch_either(self):
+        cleaned = graph.sanitize_html('<div style="background:url(https://tracker/y.png)">x</div>')
+        self.assertNotIn("tracker", cleaned)
+
+    def test_a_link_that_runs_something_loses_its_href(self):
+        cleaned = graph.sanitize_html('<a href="javascript:bad()">x</a>')
+        self.assertNotIn("javascript", cleaned)
+        self.assertIn(">x</a>", cleaned)
+
+    def test_an_ordinary_link_is_left_alone(self):
+        # The whole point of rendering markup is that the links still work.
+        cleaned = graph.sanitize_html('<a href="https://ok.example">ok</a>')
+        self.assertIn('href="https://ok.example"', cleaned)
+
+    def test_comments_are_removed(self):
+        self.assertEqual(graph.sanitize_html("a<!-- hidden -->b"), "ab")
+
+    def test_nothing_in_nothing_out(self):
+        self.assertEqual(graph.sanitize_html(None), "")
+        self.assertEqual(graph.sanitize_html(""), "")
 
 
 class CalendarWindow(unittest.TestCase):

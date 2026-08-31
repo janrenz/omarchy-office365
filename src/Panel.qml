@@ -321,6 +321,26 @@ Panel {
             // The button keeps its hover background and tooltip; only the
             // glyph turns, and it turns about its own painted centre so the
             // icon does not wobble.
+            // Hand this widget's mailboxes to the window: the same mail, with
+            // room for a folder tree and a reading pane that stays put. The
+            // instance id goes with it so the window opens THIS widget's
+            // mailboxes rather than whichever the bar happens to hold first.
+            PanelActionButton {
+              iconText: "󰏌"
+              tooltipText: "Open in a window"
+              foreground: root.fg
+              visible: !!root.service && root.service.configured && !root.showSettings
+              onClicked: {
+                var instance = String(root.setting("instance", "")).trim()
+                var payload = instance !== "" ? JSON.stringify({ instance: instance }) : "{}"
+                Quickshell.execDetached(["omarchy-shell", "shell", "summon",
+                                         "caseonline.omarchy.office365", payload])
+                // The dropdown has served its purpose the moment the window is
+                // up; leaving it open would put the same mail on screen twice.
+                root.close()
+              }
+            }
+
             PanelActionButton {
               id: refreshButton
               readonly property bool spinning: !!root.service && root.service.loading
@@ -710,6 +730,10 @@ Panel {
                       && root.service.canWrite(root.service.previewMail.alias)
             actionRunning: !!root.service && root.service.actionRunning
             actionError: root.service ? root.service.actionError : ""
+            onLinkActivated: function(url) {
+              if (root.service && root.service.previewMail)
+                root.service.openUrl(url, root.service.previewMail.alias)
+            }
             onCloseRequested: if (root.service) root.service.closePreview()
             onOpenRequested: {
               if (root.service) root.service.openPreviewed()

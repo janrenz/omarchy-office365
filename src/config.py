@@ -119,14 +119,58 @@ def write_config(path, config):
     os.replace(tmp, path)
 
 
+def list_widgets(args):
+    """Every entry in the bar layout belonging to this plugin.
+
+    The window is one per plugin while the widget is multi-instance, so the
+    window has no settings of its own to be handed: it reads the widget's.
+    Entries come back in layout order with their section, which is the only
+    stable way to tell two otherwise identical widgets apart before either has
+    been saved and stamped with an instance id.
+    """
+    try:
+        with open(args.shell_json, "r", encoding="utf-8") as handle:
+            config = json.load(handle)
+    except OSError as error:
+        fail("no_config", "Could not read %s: %s" % (args.shell_json, error))
+    except ValueError as error:
+        fail("bad_config", "%s is not valid JSON: %s" % (args.shell_json, error))
+
+    layout = ((config.get("bar") or {}).get("layout") or {})
+    widgets = []
+    for section in SECTIONS:
+        entries = layout.get(section) or []
+        if not isinstance(entries, list):
+            continue
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict) or entry.get("id") != args.plugin_id:
+                continue
+            settings = {key: value for key, value in entry.items() if key != "id"}
+            widgets.append({"section": section, "index": index, "settings": settings})
+    out({"ok": True, "widgets": widgets})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plugin-id", default="caseonline.omarchy.office365")
-    parser.add_argument("--match", required=True, help="the widget's current settings, as JSON")
-    parser.add_argument("--set", dest="updates", required=True, help="keys to write, as JSON")
+    parser.add_argument(
+        "--list",
+        dest="listing",
+        action="store_true",
+        help="print this plugin's widget entries and exit; --match and --set are then unused",
+    )
+    parser.add_argument("--match", default="", help="the widget's current settings, as JSON")
+    parser.add_argument("--set", dest="updates", default="", help="keys to write, as JSON")
     parser.add_argument("--instance", default="", help="this widget's instance id, if it has one yet")
     parser.add_argument("--shell-json", default=DEFAULT_SHELL_JSON)
     args = parser.parse_args()
+
+    if args.listing:
+        list_widgets(args)
+        return
+
+    if not args.match or not args.updates:
+        fail("bad_args", "--match and --set are required unless --list is given")
 
     try:
         match = json.loads(args.match)

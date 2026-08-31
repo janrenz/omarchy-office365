@@ -20,6 +20,7 @@ Column {
   property real maxBodyHeight: Style.space(360)
 
   property bool canWrite: false
+  property bool canCompose: false
   property bool actionRunning: false
   property string actionError: ""
 
@@ -28,6 +29,13 @@ Column {
   signal markRequested(bool read)
   signal deleteRequested()
   signal writeAccessRequested()
+  // Answering a message. Offered only where there is somewhere to type: the
+  // window sets canCompose, the bar dropdown leaves it off, since a popup that
+  // closes the moment you click away is no place to write a reply.
+  signal linkActivated(string url)
+  signal replyRequested()
+  signal replyAllRequested()
+  signal forwardRequested()
 
   readonly property string subject: detail && detail.subject ? detail.subject
                                     : (mail && mail.subject ? mail.subject : "")
@@ -175,10 +183,24 @@ Column {
       width: parent.width
       text: root.detail ? String(root.detail.body || "").trim() : ""
       color: root.fg
+      linkColor: root.accent
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
       wrapMode: Text.Wrap
-      textFormat: Text.PlainText
+      // The message says which it is, not the setting: a plain-text message in
+      // an HTML-enabled widget is still plain text, and rendering it as markup
+      // would eat any < it happens to contain. AutoText is never the answer -
+      // letting the content decide is what this is guarding against.
+      textFormat: root.detail && root.detail.bodyFormat === "html" ? Text.RichText : Text.PlainText
+      // Rich text makes links clickable. They open where every other link in
+      // this plugin opens rather than in whatever Qt would do with them.
+      onLinkActivated: function(url) { root.linkActivated(url) }
+
+      // A link under the pointer should look like one.
+      HoverHandler {
+        enabled: bodyText.hoveredLink !== ""
+        cursorShape: Qt.PointingHandCursor
+      }
     }
   }
 
@@ -213,6 +235,42 @@ Column {
       fontFamily: root.fontFamily
       fontSize: Style.font.caption
       onClicked: root.openRequested()
+    }
+
+    // Writing needs the same Mail.ReadWrite that marking does - even a draft
+    // is a write - so these keep company with the buttons above rather than
+    // appearing on a read-only mailbox and failing.
+    Button {
+      visible: root.canCompose && root.canWrite
+      enabled: !root.actionRunning
+      text: "Reply"
+      bordered: true
+      foreground: root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.replyRequested()
+    }
+
+    Button {
+      visible: root.canCompose && root.canWrite
+      enabled: !root.actionRunning
+      text: "Reply all"
+      bordered: true
+      foreground: root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.replyAllRequested()
+    }
+
+    Button {
+      visible: root.canCompose && root.canWrite
+      enabled: !root.actionRunning
+      text: "Forward"
+      bordered: true
+      foreground: root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.forwardRequested()
     }
 
     // Changing mail needs permission this plugin does not ask for by

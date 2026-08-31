@@ -50,6 +50,10 @@ Item {
   // permission to change mail, and the default stays read-only.
   readonly property bool markReadOnOpen: setting("markReadOnOpen", false) === true
   readonly property bool previewLine: setting("previewLine", true) !== false
+  // Keep the message's own formatting - headings, lists, tables, links -
+  // instead of Graph's flattening to text. Everything that would fetch or run
+  // is stripped in graph.py before the markup gets anywhere near the pane.
+  readonly property bool htmlBody: setting("htmlBody", false) === true
   // Whether the panel opens already narrowed to Outlook's Focused mail.
   readonly property bool focusedByDefault: setting("focusedByDefault", false) === true
   // The same for the unread filter, for a widget you keep as an inbox rather
@@ -155,6 +159,7 @@ Item {
     // Demo mode has to reach the reading pane too, or opening a synthetic row
     // asks Graph about an id it has never seen.
     if (setting("demo", false) === true) command.push("--demo")
+    if (htmlBody) command.push("--html")
     messageProc.command = command
     messageProc.running = true
   }
@@ -266,6 +271,160 @@ Item {
     mailState = next
   }
 
+  // ---- composing ------------------------------------------------------
+  //
+  // One message at a time, held here rather than in the window so that closing
+  // the window mid-reply does not throw the text away.
+  //
+  // Two ways out, because they need different permission. Sending needs
+  // Mail.Send, which a mailbox signed in for reading and writing does not
+  // have; leaving a draft needs only Mail.ReadWrite, which it does. So the
+  // draft is always offered and Send appears when the mailbox can.
+  property string composeMode: ""
+  property var composeMail: null
+  property string composeTo: ""
+  property string composeText: ""
+  property bool composeRunning: false
+  property string composeError: ""
+  property string composeNotice: ""
+
+  readonly property bool composing: composeMode !== ""
+  readonly property bool composeNeedsRecipient: composeMode === "forward"
+
+  function canSend(alias) {
+    var view = viewFor(String(alias || ""))
+    return !!view && view.send === true
+  }
+
+  function startCompose(mode, mail) {
+    if (!mail) return
+    composeMode = String(mode || "reply")
+    composeMail = mail
+    composeTo = ""
+    composeText = ""
+    composeError = ""
+    composeNotice = ""
+  }
+
+  function cancelCompose() {
+    composeMode = ""
+    composeMail = null
+    composeTo = ""
+    composeText = ""
+    composeError = ""
+  }
+
+  // asDraft: build it in Outlook and open it there, rather than sending from
+  // here. Also the fallback when the mailbox may not send.
+  function submitCompose(asDraft) {
+    if (!composing || composeRunning || !composeMail || pluginDir === "") return
+    var alias = String(composeMail.alias || "")
+    if (alias === "") return
+    if (composeNeedsRecipient && composeTo.trim() === "" ) {
+      composeError = "A forward needs somebody to forward it to"
+      return
+    }
+    composeRunning = true
+    composeError = ""
+    composeNotice = ""
+    var command = ["python3", helper(), "compose",
+                   "--account", alias,
+                   "--id", String(composeMail.id),
+                   "--mode", composeMode,
+                   "--comment", composeText,
+                   "--to", composeTo]
+    if (asDraft === true) command.push("--draft")
+    composeProc.command = command
+    composeProc.running = true
+  }
+
+  Process {
+    id: composeProc
+    running: false
+    stdout: StdioCollector { id: composeOut; waitForEnd: true }
+    stderr: StdioCollector { id: composeErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.composeRunning = false
+      var parsed = Model.parseJson(composeOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        var code = parsed && parsed.error ? String(parsed.error.code || "") : ""
+        root.composeError = parsed && parsed.error
+          ? String(parsed.error.message)
+          : Model.oneLine(composeErr.text || "Could not write this message", 160)
+        // The one failure with an obvious next step, so the window can offer
+        // it instead of only reporting the problem.
+        root.composeSendBlocked = code === "send_permission_required"
+        return
+      }
+      if (parsed.drafted === true) {
+        // The draft is on the server with its quoting and recipients already
+        // right; Outlook is where it gets finished.
+        root.openUrl(String(parsed.webLink || ""), String(root.composeMail ? root.composeMail.alias : ""))
+        root.composeNotice = parsed.warning ? String(parsed.warning) : "Draft opened in Outlook"
+      } else {
+        root.composeNotice = "Sent"
+      }
+      root.cancelCompose()
+      // A reply changes the conversation and a forward marks nothing, but both
+      // are worth a fresh look - a sent reply usually means the message is
+      // dealt with.
+      root.refresh()
+    }
+  }
+
+  // Set when a send failed for want of permission, so the window can say what
+  // to do about it rather than repeating the error.
+  property bool composeSendBlocked: false
+
+  // ---- folders --------------------------------------------------------
+  //
+  // Which folder each mailbox is reading, as {alias: folder id}. A mailbox
+  // missing from the map is on its inbox, which is why the map is empty until
+  // something is picked and why "inbox" is removed rather than stored.
+  //
+  // Kept per mailbox because a folder id names a folder in one mailbox only:
+  // there is no single id that could mean "Archive" across several.
+  property var selectedFolders: ({})
+
+  // True from the moment a folder is picked until the fetch answering that
+  // pick lands. The rows still in hand belong to the folder being left, so
+  // anything drawing them has to stand something else in their place rather
+  // than leave the old folder's mail sitting under the new folder's name.
+  property bool switchingFolder: false
+
+  readonly property var folderRows: Model.folderRows(views, selectedFolders)
+
+  function folderIdFor(alias) {
+    return String(selectedFolders[String(alias || "")] || "inbox")
+  }
+
+  function folderNameFor(alias) {
+    return Model.folderNameFor(views, String(alias || ""), selectedFolders)
+  }
+
+  function selectFolder(alias, folderId) {
+    var key = String(alias || "")
+    if (key === "") return
+    var id = String(folderId || "inbox")
+    if (folderIdFor(key) === id) return
+
+    var next = {}
+    for (var k in selectedFolders) next[k] = selectedFolders[k]
+    if (id === "inbox") delete next[key]
+    else next[key] = id
+    selectedFolders = next
+
+    // Read, deleted and held overrides name messages in the folder being left,
+    // and the reading pane is showing one of them. Both would otherwise be
+    // applied to whatever lands in their place.
+    mailState = ({ read: ({}), deleted: ({}), held: ({}) })
+    closePreview()
+    switchingFolder = true
+
+    if (fetchProc.running) queueRefresh()
+    else refresh()
+  }
+
   readonly property var mail: Model.mergeMail(filteredViews, unreadOnly, mails, listState, focusedOnly)
   readonly property var agenda: Model.mergeEvents(filteredViews, new Date(), 20, dedupeEvents)
 
@@ -368,8 +527,15 @@ Item {
     var command = ["python3", helper(), "fetch",
                    "--mails", String(mails),
                    "--days", String(Model.calendarDays(calendarMode))]
-    for (var i = 0; i < accountConfigs.length; i++)
-      command = command.concat(["--account", String(accountConfigs[i].account).trim()])
+    for (var i = 0; i < accountConfigs.length; i++) {
+      var alias = String(accountConfigs[i].account).trim()
+      command = command.concat(["--account", alias])
+      // Only a folder that was actually picked. Leaving the default off keeps
+      // the command line the same as it was for anyone reading their inbox.
+      var chosen = String(selectedFolders[alias] || "")
+      if (chosen !== "" && chosen !== "inbox")
+        command = command.concat(["--folder", alias + "=" + chosen])
+    }
     // "demo": true in shell.json fills the widget with synthetic data, for
     // working on the layout without every mailbox being signed in.
     if (setting("demo", false) === true) command.push("--demo")
@@ -441,8 +607,9 @@ Item {
     // only in error when the whole fetch failed.
     snapshot = parsed
     // Every fetch covers every mailbox, so whatever was waiting on one now has
-    // its real state.
+    // its real state - including a folder switch, whose new rows are in here.
     busy = ({})
+    switchingFolder = false
     mailState = Model.pruneOverrides(views, mailState)
     errorCode = ""
     errorMessage = ""
@@ -618,6 +785,10 @@ Item {
       else {
         root.errorCode = "helper_failed"
         root.errorMessage = Model.oneLine(fetchErr.text || "The helper could not be run", 160)
+        // A switch that failed still has to stop waiting, or the placeholder
+        // rows pulse over the old folder's mail until the retry happens to
+        // work.
+        root.switchingFolder = false
       }
       if (root.errorCode !== "") retryTimer.restart()
       // A refresh that had to give way to this one.

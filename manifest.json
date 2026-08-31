@@ -7,10 +7,12 @@
   "license": "MIT",
   "description": "Unread Outlook mail and your agenda in the Omarchy bar. One widget can carry several mailboxes, or add one per mailbox. Needs python3 (standard library only) and talks to Microsoft Graph, nothing else.",
   "kinds": [
-    "bar-widget"
+    "bar-widget",
+    "panel"
   ],
   "entryPoints": {
-    "barWidget": "src/BarWidget.qml"
+    "barWidget": "src/BarWidget.qml",
+    "panel": "src/MailWindow.qml"
   },
   "barWidget": {
     "displayName": "Office 365",
@@ -113,6 +115,13 @@
         "type": "boolean",
         "label": "Highlight the bar icon when unread mail is waiting",
         "defaultValue": true
+      },
+      {
+        "key": "htmlBody",
+        "type": "boolean",
+        "label": "Keep the message's own formatting",
+        "description": "Render headings, lists, tables and links instead of flattening to text. Images and anything else remote are stripped out before rendering, so nothing in a message can phone home.",
+        "defaultValue": false
       },
       {
         "key": "previewLine",

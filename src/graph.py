@@ -54,7 +54,11 @@ DEFAULT_AUTHORITY = "common"
 # something that needs it, and then only for that mailbox - a mail widget has
 # no business holding permission to delete mail it was never asked to touch.
 SCOPES_READ = "openid profile offline_access User.Read Mail.Read Calendars.Read"
-SCOPES_WRITE = "openid profile offline_access User.Read Mail.ReadWrite Calendars.Read"
+# Mail.ReadWrite covers marking, deleting and drafting; sending is a separate
+# grant. A mailbox signed in before Mail.Send was asked for keeps working -
+# every draft path below needs only ReadWrite - and says so rather than failing
+# at the moment someone presses Send.
+SCOPES_WRITE = "openid profile offline_access User.Read Mail.ReadWrite Mail.Send Calendars.Read"
 
 
 def scopes_for(write):
@@ -199,6 +203,11 @@ def local_zone(name):
 # nothing and means a wrong or hostile answer cannot grow without limit.
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
+# Markup costs several times what the words in it do, so an HTML body gets a
+# larger cap than the plain-text one - the same message should not come out
+# shorter just because it was asked for as HTML.
+HTML_BODY_CAP = 40000
+
 
 def read_capped(response, limit=MAX_RESPONSE_BYTES):
     """The body, up to `limit` bytes. A longer one is cut, not swallowed whole.
@@ -261,8 +270,25 @@ def store_tokens(alias, account, token_response):
     account["refresh_token"] = token_response.get("refresh_token", account.get("refresh_token", ""))
     account["access_token"] = token_response.get("access_token", "")
     account["expires_at"] = time.time() + int(token_response.get("expires_in", 3600)) - 120
+    # What the tenant actually consented to, which is not always what was
+    # asked for: an admin can withhold one scope and grant the rest. Keeping
+    # it means the window can hide Send rather than offer a button that will
+    # come back 403.
+    granted = token_response.get("scope")
+    if granted:
+        account["scopes"] = str(granted)
     write_json(state_path(alias), account)
     return account
+
+
+def can_send(account):
+    """Whether this mailbox consented to sending.
+
+    Unknown for a mailbox signed in before scopes were recorded, and unknown
+    has to mean no: offering Send and failing is worse than offering the draft
+    path, which works either way.
+    """
+    return "mail.send" in str((account or {}).get("scopes", "")).lower()
 
 
 def access_token(alias, account):
@@ -494,8 +520,114 @@ MAIL_QUERIES = (
 )
 
 
-def fetch_messages(token, top, timezone_name, unread_only=False, focused_only=False):
-    """The newest inbox messages, or the newest matching the given filters.
+# A mailbox with hundreds of folders is a sidebar nobody can read, and a tree
+# of unknown depth is one request per level. Both ends are capped: what the
+# caps cut off is said in a warning rather than quietly dropped.
+FOLDER_CAP = 200
+FOLDER_MAX_DEPTH = 3
+FOLDER_SELECT = "id,displayName,unreadItemCount,totalItemCount,childFolderCount,parentFolderId"
+
+
+def quote_id(value):
+    """A folder id where a URL path segment is wanted.
+
+    Graph hands out base64url-ish ids that can carry characters a path should
+    not, and the well-known names ("inbox") pass through unchanged.
+    """
+    return urllib.parse.quote(str(value), safe="")
+
+
+def folder_choices(values):
+    """`--folder alias=ID` pairs, as {alias: folder id}.
+
+    Folder ids belong to one mailbox: the id of Archive in one account names
+    nothing in another. So the choice is made per mailbox rather than once for
+    the widget, and a mailbox nobody chose for reads its inbox.
+    """
+    chosen = {}
+    for item in values or []:
+        alias, sep, folder = str(item).partition("=")
+        if not sep:
+            continue
+        alias, folder = alias.strip(), folder.strip()
+        if alias and folder:
+            chosen[alias] = folder
+    return chosen
+
+
+def messages_path(folder_id):
+    return "/me/mailFolders/%s/messages" % quote_id(folder_id or "inbox")
+
+
+def folder_row(folder, depth, is_inbox=False):
+    return {
+        "id": folder.get("id", ""),
+        "name": (folder.get("displayName") or "(unnamed)").strip(),
+        "unread": int(folder.get("unreadItemCount") or 0),
+        "total": int(folder.get("totalItemCount") or 0),
+        "childCount": int(folder.get("childFolderCount") or 0),
+        "parentId": folder.get("parentFolderId") or "",
+        "depth": depth,
+        "isInbox": bool(is_inbox),
+    }
+
+
+def fetch_folders(token, inbox_id=""):
+    """The mailbox's folder tree, flattened depth-first.
+
+    Returns (rows, error, complete). Children are walked a level at a time:
+    Graph will not expand a tree of unknown depth in one request, and
+    $expand=childFolders only reaches the level asked for.
+    """
+    status, roots, payload, _ = graph_collect(
+        token, "/me/mailFolders", {"$top": "100", "$select": FOLDER_SELECT}, cap=FOLDER_CAP
+    )
+    if status != 200:
+        return [], graph_error(payload, "Could not read the folder list"), True
+
+    def sort_key(folder):
+        # The inbox leads, and the rest are alphabetical. Graph returns display
+        # names in the mailbox's own language, so there is no stable English
+        # ordering to sort a Postausgang or Papierkorb into - only the inbox is
+        # identifiable, by the id the counts call already resolved.
+        return (0 if folder.get("id") == inbox_id else 1, (folder.get("displayName") or "").lower())
+
+    rows = []
+    truncated = [False]
+
+    def walk(folders, depth):
+        for folder in sorted(folders, key=sort_key):
+            if len(rows) >= FOLDER_CAP:
+                truncated[0] = True
+                return
+            rows.append(folder_row(folder, depth, folder.get("id") == inbox_id))
+            if depth + 1 >= FOLDER_MAX_DEPTH:
+                if folder.get("childFolderCount"):
+                    truncated[0] = True
+                continue
+            if not folder.get("childFolderCount"):
+                continue
+            child_status, children, _, child_complete = graph_collect(
+                token,
+                "/me/mailFolders/%s/childFolders" % quote_id(folder.get("id", "")),
+                {"$top": "100", "$select": FOLDER_SELECT},
+                cap=FOLDER_CAP,
+            )
+            if child_status != 200:
+                # One unreadable branch is not worth failing the sidebar over;
+                # its parent still lists, and its children simply do not.
+                truncated[0] = True
+                continue
+            if not child_complete:
+                truncated[0] = True
+            walk(children, depth + 1)
+
+    walk(roots, 0)
+    return rows[:FOLDER_CAP], "", not truncated[0]
+
+
+def fetch_messages(token, top, timezone_name, unread_only=False, focused_only=False, folder_id="inbox"):
+    """The newest messages in one folder, or the newest matching the given filters.
 
     Sorting is more than some mailboxes will do in one query (Exchange answers
     with a complexity error), so fall back to a plainer form rather than
@@ -525,7 +657,7 @@ def fetch_messages(token, top, timezone_name, unread_only=False, focused_only=Fa
 
     status, payload = 0, {}
     for params in attempts:
-        status, payload = graph_get(token, "/me/mailFolders/inbox/messages", params, prefer)
+        status, payload = graph_get(token, messages_path(folder_id), params, prefer)
         if status == 200:
             return status, payload
         # Only a rejected query is worth retrying in a simpler form; auth and
@@ -589,11 +721,19 @@ def fetch_account(alias, args, timezone_name):
         "username": account.get("username", ""),
         "displayName": account.get("displayName", ""),
         "write": bool(account.get("write")),
+        "send": can_send(account),
         "mail": [],
         "unreadCount": 0,
         # Whether unreadCount is the inbox's own number or a floor taken from
         # the rows that did arrive.
         "unreadKnown": True,
+        # The folder tree, and which of it this fetch read. The bar badge stays
+        # the inbox's number whatever is being browsed: a widget that stopped
+        # counting new mail because someone left the window on Sent would be a
+        # worse widget than one that cannot browse at all.
+        "folders": [],
+        "folderId": "inbox",
+        "folderName": "",
         "events": [],
         "warnings": [],
     }
@@ -601,12 +741,56 @@ def fetch_account(alias, args, timezone_name):
     # ---- inbox counts ----------------------------------------------------
     # One cheap call for the badge number: with the message list no longer
     # filtered to unread, its length says nothing about how many are waiting.
-    status, payload = graph_get(token, "/me/mailFolders/inbox", {"$select": "unreadItemCount,totalItemCount"})
+    # The id comes back with it, which is what lets the folder list mark which
+    # of its rows the inbox is without a second request or a guess at the name.
+    status, payload = graph_get(token, "/me/mailFolders/inbox", {"$select": "id,unreadItemCount,totalItemCount"})
     count_known = status == 200
+    inbox_id = ""
     if count_known:
         result["unreadCount"] = int(payload.get("unreadItemCount", 0) or 0)
+        inbox_id = str(payload.get("id") or "")
     else:
         count_error = graph_error(payload, "Could not read the unread count")
+
+    # ---- folders ---------------------------------------------------------
+    folders, folder_error, folders_complete = fetch_folders(token, inbox_id)
+    result["folders"] = folders
+    if folder_error:
+        result["warnings"].append({"scope": "folders", "message": folder_error})
+    elif not folders_complete:
+        result["warnings"].append(
+            {"scope": "folders", "message": "Too many folders to list them all - some are not shown"}
+        )
+
+    # Which folder to read. An id that is no longer in the tree - a folder
+    # deleted or renamed away since it was picked - falls back to the inbox
+    # and says so, rather than reading nothing and looking like an empty
+    # mailbox.
+    wanted = folder_choices(getattr(args, "folder", [])).get(alias, "")
+    folder_id = "inbox"
+    folder_name = ""
+    if wanted and wanted != "inbox":
+        for row in folders:
+            if row["id"] == wanted:
+                folder_id, folder_name = wanted, row["name"]
+                break
+        else:
+            if folders:
+                result["warnings"].append(
+                    {"scope": "folders", "message": "That folder is gone - showing the inbox"}
+                )
+            else:
+                # No tree to check against, so take the caller at its word
+                # rather than silently ignoring the choice.
+                folder_id = wanted
+    if folder_name == "":
+        for row in folders:
+            if row["id"] == folder_id or (folder_id == "inbox" and row["isInbox"]):
+                folder_name = row["name"]
+                break
+    result["folderId"] = folder_id
+    result["folderName"] = folder_name
+    reading_inbox = folder_id == "inbox" or folder_id == inbox_id
 
     # ---- mail ------------------------------------------------------------
     # One list per combination of the panel's two filters. Each query backs one
@@ -618,8 +802,13 @@ def fetch_account(alias, args, timezone_name):
     collected = {}
     failures = []
 
-    for label, unread_only, focused_only in MAIL_QUERIES:
-        status, payload = fetch_messages(token, top, timezone_name, unread_only, focused_only)
+    # Focused/Other is a split Outlook draws across the inbox and nowhere else,
+    # so outside it those two queries would cost two round trips to answer a
+    # question the folder cannot be asked.
+    queries = MAIL_QUERIES if reading_inbox else tuple(q for q in MAIL_QUERIES if not q[2])
+
+    for label, unread_only, focused_only in queries:
+        status, payload = fetch_messages(token, top, timezone_name, unread_only, focused_only, folder_id)
         if status != 200:
             failures.append((label, graph_error(payload, "Could not read mail")))
             continue
@@ -629,7 +818,7 @@ def fetch_account(alias, args, timezone_name):
                 collected[row["id"]] = row
 
     result["mail"] = sorted(collected.values(), key=lambda row: row["received"], reverse=True)
-    if len(failures) == len(MAIL_QUERIES):
+    if len(failures) == len(queries):
         result["warnings"].append({"scope": "mail", "message": failures[0][1]})
     elif failures:
         # Say which views are short rather than only complaining when every
@@ -919,15 +1108,42 @@ def demo_account(alias, index, args):
         )
 
     unread = sum(1 for row in mail if not row["read"])
+
+    # A synthetic tree, so the sidebar can be built and shown without anyone
+    # signing in. Ids are per-mailbox here exactly as they are on the server.
+    folders = [
+        {"id": "demo-%s-inbox" % alias, "name": "Inbox", "unread": unread, "total": len(mail),
+         "childCount": 0, "parentId": "", "depth": 0, "isInbox": True},
+        {"id": "demo-%s-archive" % alias, "name": "Archive", "unread": 0, "total": 128,
+         "childCount": 1, "parentId": "", "depth": 0, "isInbox": False},
+        {"id": "demo-%s-archive-2025" % alias, "name": "2025", "unread": 0, "total": 64,
+         "childCount": 0, "parentId": "demo-%s-archive" % alias, "depth": 1, "isInbox": False},
+        {"id": "demo-%s-drafts" % alias, "name": "Drafts", "unread": 1, "total": 3,
+         "childCount": 0, "parentId": "", "depth": 0, "isInbox": False},
+        {"id": "demo-%s-sent" % alias, "name": "Sent Items", "unread": 0, "total": 412,
+         "childCount": 0, "parentId": "", "depth": 0, "isInbox": False},
+        {"id": "demo-%s-deleted" % alias, "name": "Deleted Items", "unread": 2, "total": 17,
+         "childCount": 0, "parentId": "", "depth": 0, "isInbox": False},
+    ]
+    wanted = folder_choices(getattr(args, "folder", [])).get(alias, "inbox") or "inbox"
+    chosen = next((f for f in folders if f["id"] == wanted), folders[0])
+    if not chosen["isInbox"]:
+        # A different folder should not be the inbox with a new title on it.
+        mail = [dict(row, read=True, focused=True) for row in mail[: max(1, len(mail) // 2)]]
+
     return {
         "ok": True,
         "alias": alias,
         "username": "%s@example.com" % alias,
         "displayName": alias.capitalize(),
         "write": False,
+        "send": False,
         "mail": mail,
         "unreadCount": unread,
         "unreadKnown": True,
+        "folders": folders,
+        "folderId": chosen["id"] if not chosen["isInbox"] else "inbox",
+        "folderName": chosen["name"],
         "events": events,
         "warnings": [],
     }
@@ -1018,6 +1234,58 @@ def tidy_body(text):
     return text.strip()
 
 
+# Everything that could make a mail body reach out of the pane. Qt's rich text
+# will fetch what it is told to fetch, and the shell process is the one doing
+# the fetching - a remote image in a message is a tracking pixel that fires
+# whether or not anyone meant to load it, and it fires from the user's IP.
+# So the remote references come out here, before the markup ever reaches Qt.
+_HTML_DROP_BLOCKS = re.compile(
+    r"<\s*(script|style|iframe|object|embed|applet|frameset|frame|noscript)\b[^>]*>.*?"
+    r"<\s*/\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_DROP_TAGS = re.compile(
+    r"<\s*/?\s*(script|style|iframe|object|embed|applet|link|meta|base|form|input|button)\b[^>]*>",
+    re.IGNORECASE,
+)
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+# Any element that pulls a resource in by URL, images included. Dropping the
+# whole <img> rather than blanking its src leaves no broken-image furniture.
+_HTML_IMAGES = re.compile(r"<\s*img\b[^>]*>", re.IGNORECASE)
+_HTML_EVENT_ATTRS = re.compile(r'''\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)''', re.IGNORECASE)
+_HTML_REMOTE_ATTRS = re.compile(
+    r'''\s(?:background|poster|srcset|src|data|codebase)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)''',
+    re.IGNORECASE,
+)
+_HTML_CSS_URL = re.compile(r"url\s*\([^)]*\)", re.IGNORECASE)
+# A link that runs something rather than going somewhere.
+_HTML_BAD_HREF = re.compile(
+    r'''\shref\s*=\s*("|')?\s*(?:javascript|vbscript|data)\s*:[^"'>]*(\1)?''',
+    re.IGNORECASE,
+)
+
+
+def sanitize_html(markup):
+    """A mail body safe to hand to Qt's rich text.
+
+    Not a general-purpose sanitiser and not trying to be: Qt renders a small
+    subset of HTML, so this only has to remove what that subset would act on.
+    What it removes is everything that fetches (images, styles, frames),
+    everything that runs (script, event handlers, javascript: links), and
+    everything that could submit. What survives is text, structure and links.
+    """
+    text = str(markup or "")
+    text = _HTML_COMMENT.sub("", text)
+    text = _HTML_DROP_BLOCKS.sub("", text)
+    text = _HTML_IMAGES.sub("", text)
+    text = _HTML_DROP_TAGS.sub("", text)
+    text = _HTML_EVENT_ATTRS.sub("", text)
+    text = _HTML_REMOTE_ATTRS.sub("", text)
+    text = _HTML_CSS_URL.sub("none", text)
+    text = _HTML_BAD_HREF.sub("", text)
+    return text.strip()
+
+
 def recipients(values):
     people = []
     for entry in values or []:
@@ -1047,17 +1315,28 @@ def cmd_message(args):
         fail(error.code, error.message)
 
     timezone_name = local_timezone()
+    want_html = bool(getattr(args, "html", False))
     status, payload = graph_get(
         token,
         "/me/messages/" + urllib.parse.quote(args.id, safe=""),
         {"$select": "subject,from,toRecipients,ccRecipients,receivedDateTime,body,webLink,hasAttachments,isRead"},
-        {"Prefer": 'outlook.body-content-type="text", outlook.timezone="%s"' % timezone_name},
+        {"Prefer": 'outlook.body-content-type="%s", outlook.timezone="%s"'
+                   % ("html" if want_html else "text", timezone_name)},
     )
     if status != 200:
         fail("message_failed", graph_error(payload, "Could not open this message"))
 
     sender = (payload.get("from") or {}).get("emailAddress") or {}
-    body = tidy_body((payload.get("body") or {}).get("content") or "")
+    raw = (payload.get("body") or {}).get("content") or ""
+    # Graph answers with what it has, which is not always what was asked for -
+    # a plain-text message stays plain text however the Prefer header is set.
+    served_html = str((payload.get("body") or {}).get("contentType") or "").lower() == "html"
+    if want_html and served_html:
+        body = sanitize_html(raw)
+        body_format = "html"
+    else:
+        body = tidy_body(raw)
+        body_format = "text"
     out(
         {
             "ok": True,
@@ -1072,8 +1351,12 @@ def cmd_message(args):
             "hasAttachments": bool(payload.get("hasAttachments")),
             # Capped: a preview pane cannot show a novel, and the Open button
             # is one click away for the whole thing.
-            "body": body[:8000],
-            "truncated": len(body) > 8000,
+            "body": body[:HTML_BODY_CAP if body_format == "html" else 8000],
+            "truncated": len(body) > (HTML_BODY_CAP if body_format == "html" else 8000),
+            # "html" or "text". The pane picks its text format from this rather
+            # than from the setting, so a plain-text message in an HTML-enabled
+            # widget still renders as what it is.
+            "bodyFormat": body_format,
         }
     )
 
@@ -1121,6 +1404,122 @@ def cmd_delete(args):
     if status not in (200, 204):
         fail("delete_failed", graph_error(payload, "Could not delete this message"))
     out({"ok": True, "id": args.id, "deleted": True})
+
+
+def cmd_folders(args):
+    """One mailbox's folder tree. The window reads this; it is also the way to
+    find the id of a folder to hand to `fetch --folder`."""
+    account = read_json(state_path(args.account))
+    if not account:
+        raise AccountError("auth_required", "Not signed in")
+    token, _ = access_token(args.account, account)
+    status, payload = graph_get(token, "/me/mailFolders/inbox", {"$select": "id"})
+    inbox_id = str(payload.get("id") or "") if status == 200 else ""
+    folders, error, complete = fetch_folders(token, inbox_id)
+    if error:
+        fail("graph_error", error)
+    out({"ok": True, "alias": args.account, "folders": folders, "complete": complete})
+
+
+# The three shapes a written message can take, and what Graph calls each one.
+# The "create" endpoints make a draft and hand it back; the plain ones send.
+COMPOSE_MODES = {
+    "reply": ("reply", "createReply"),
+    "reply-all": ("replyAll", "createReplyAll"),
+    "forward": ("forward", "createForward"),
+}
+
+
+def recipient_list(value):
+    """Addresses typed into a To field, as Graph recipients.
+
+    Split on the separators people actually type - comma, semicolon, newline -
+    rather than insisting on one of them. Anything without an @ is refused
+    here: Graph would take it, fail to route it, and the reply would look sent.
+    """
+    parts = re.split(r"[,;\s]+", str(value or ""))
+    addresses, bad = [], []
+    for part in parts:
+        part = part.strip().strip("<>")
+        if not part:
+            continue
+        if "@" not in part or part.startswith("@") or part.endswith("@"):
+            bad.append(part)
+            continue
+        addresses.append({"emailAddress": {"address": part}})
+    return addresses, bad
+
+
+def cmd_compose(args):
+    """Reply, reply all or forward - sent, or left as a draft in Outlook.
+
+    Sending needs Mail.Send, which a mailbox signed in for reading and writing
+    does not have. Rather than refuse, --draft asks Graph to build the draft
+    (with its quoting and recipients already right) and returns its webLink, so
+    the message can be finished in Outlook. That path needs only Mail.ReadWrite.
+    """
+    mode = COMPOSE_MODES.get(args.mode)
+    if not mode:
+        fail("bad_mode", "Unknown compose mode: %s" % args.mode)
+    send_path, draft_path = mode
+
+    recipients, bad = recipient_list(args.to)
+    if bad:
+        fail("bad_recipient", "Not an email address: %s" % ", ".join(bad[:3]))
+    if args.mode == "forward" and not recipients:
+        fail("no_recipient", "A forward needs somebody to forward it to")
+
+    account = read_json(state_path(args.account))
+    if not account:
+        fail("auth_required", "Not signed in")
+    if not account.get("write"):
+        fail("write_required", "This mailbox is signed in for reading only")
+    try:
+        token = access_token(args.account, account)[0]
+    except AccountError as error:
+        fail(error.code, error.message)
+
+    base = GRAPH + "/me/messages/" + urllib.parse.quote(args.id, safe="")
+    headers = {"Authorization": "Bearer " + token}
+    comment = str(args.comment or "")
+
+    if args.draft:
+        status, payload = http(base + "/" + draft_path, method="POST",
+                               json_body={"comment": comment}, headers=headers)
+        if status not in (200, 201):
+            fail("draft_failed", graph_error(payload, "Could not create the draft"))
+        draft_id = str((payload or {}).get("id") or "")
+        # createForward takes no recipients, so they go on afterwards. A draft
+        # that could not be addressed is still a draft worth opening, so this
+        # is a warning rather than a failure.
+        warning = ""
+        if recipients and draft_id:
+            patch_status, patch_payload = http(
+                GRAPH + "/me/messages/" + urllib.parse.quote(draft_id, safe=""),
+                method="PATCH", json_body={"toRecipients": recipients}, headers=headers)
+            if patch_status not in (200, 204):
+                warning = graph_error(patch_payload, "Could not add the recipients to the draft")
+        out({"ok": True, "mode": args.mode, "drafted": True, "id": draft_id,
+             "webLink": (payload or {}).get("webLink", ""), "warning": warning})
+
+    if not can_send(account):
+        # Said before the request rather than after a 403, so the window can
+        # offer the draft instead of reporting a failure.
+        fail("send_permission_required",
+             "This mailbox is signed in without permission to send. Sign in again to allow it, "
+             "or save this as a draft and finish it in Outlook.")
+
+    body = {"comment": comment}
+    if recipients:
+        body["toRecipients" if args.mode == "forward" else "message"] = (
+            recipients if args.mode == "forward" else {"toRecipients": recipients})
+    status, payload = http(base + "/" + send_path, method="POST", json_body=body, headers=headers)
+    if status == 403:
+        fail("send_permission_required",
+             graph_error(payload, "This mailbox is not allowed to send. Sign in again to allow it."))
+    if status not in (200, 202, 204):
+        fail("send_failed", graph_error(payload, "Could not send this message"))
+    out({"ok": True, "mode": args.mode, "drafted": False, "id": args.id})
 
 
 def cmd_list(_args):
@@ -1178,6 +1577,15 @@ def main():
     fetch.add_argument("--mails", type=int, default=5, help="unread messages kept per mailbox")
     fetch.add_argument("--days", type=int, default=3)
     fetch.add_argument("--demo", action="store_true", help="synthetic data, for building the layout")
+    # Repeatable and per mailbox: a folder id names a folder in one mailbox
+    # only, so one id could not stand for "Archive" across several.
+    fetch.add_argument(
+        "--folder",
+        action="append",
+        default=[],
+        metavar="ALIAS=ID",
+        help="read this folder in this mailbox; repeat per mailbox. Default is each mailbox's inbox.",
+    )
     fetch.add_argument(
         "--from-now",
         action="store_true",
@@ -1188,6 +1596,8 @@ def main():
     message = with_account("message", "fetch one message with its body")
     message.add_argument("--id", required=True, help="message id from a fetch")
     message.add_argument("--demo", action="store_true", help="synthetic body, matching --demo fetch")
+    message.add_argument("--html", action="store_true",
+                         help="keep the message's own formatting, with everything remote stripped out")
     message.set_defaults(func=cmd_message)
 
     mark = with_account("mark", "mark a message read or unread")
@@ -1199,6 +1609,17 @@ def main():
     delete = with_account("delete", "move a message to Deleted Items")
     delete.add_argument("--id", required=True)
     delete.set_defaults(func=cmd_delete)
+
+    compose = with_account("compose", "reply, reply all or forward a message")
+    compose.add_argument("--id", required=True, help="message id from a fetch")
+    compose.add_argument("--mode", required=True, choices=sorted(COMPOSE_MODES), help="what to write")
+    compose.add_argument("--comment", default="", help="what to say above the quoted message")
+    compose.add_argument("--to", default="", help="recipients for a forward, comma separated")
+    compose.add_argument("--draft", action="store_true",
+                         help="leave it as a draft in Outlook instead of sending it")
+    compose.set_defaults(func=cmd_compose)
+
+    with_account("folders", "list one mailbox's folders").set_defaults(func=cmd_folders)
 
     sub.add_parser("list", help="list configured accounts").set_defaults(func=cmd_list)
     sub.add_parser("palette", help="the active theme's named colours").set_defaults(func=cmd_palette)
