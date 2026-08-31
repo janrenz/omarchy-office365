@@ -90,6 +90,7 @@ Widget-level keys:
 | `showWeekends` | `true` | Draw Saturday and Sunday in the grid. |
 | `refreshIntervalSec` | `180` | How often to poll Microsoft Graph (60–3600). |
 | `tintOnUnread` | `true` | Highlight the bar icon while unread mail is waiting. When the mailbox will not say how many are unread, the panel shows `3+` rather than `3`, and `?` rather than claiming none. |
+| `notify` | `true` | Desktop notification when new mail arrives. |
 | `previewLine` | `true` | Show a line of the message body under each subject. Off gives a two-line row. |
 | `focusedByDefault` | `false` | Open with the Focused filter already on, hiding Outlook's Other mail. |
 | `unreadByDefault` | `false` | Open with the Unread filter already on, for a widget you keep as an inbox rather than a record of everything that arrived. |
@@ -135,6 +136,14 @@ sign-in page in its own Edge profile, and focusing that profile's window.
 A widget written with a single top-level `account` string instead of an
 `accounts` list still works, and is read as a one-mailbox list. It is only
 rewritten if you save from the settings form.
+
+## Notifications
+
+New mail raises a desktop notification: who it is from, and the subject. More than three arriving in one poll become a single summary instead of a stack. With several mailboxes, or a folder that is not the inbox, the notification says which one it landed in.
+
+What counts as new is *new since the shell started watching*, not *unread*. The first answer after a sign-in — or after a laptop wakes up to a morning of mail — is an entire mailbox at once, and announcing all of it is what makes people turn notifications off for good. So the first poll of each mailbox primes quietly and only what turns up after it is announced. A mailbox with notifications switched off is still watched, so switching them on later does not announce the backlog.
+
+The announcement is made by the store, which is the one thing there is exactly one of: the bar widget and the window watching the same inbox share one fetch, and so share one notification rather than raising two.
 
 ## Filtering
 
@@ -226,7 +235,7 @@ The name is yours to choose and must be unique across widgets; without one
 the widget registers no handler at all, so several of them cannot collide.
 `open`, `close` and `toggle` are all accepted.
 
-Once the panel is up:
+Once the bar panel is up:
 
 | Key | What it does |
 |---|---|
@@ -237,6 +246,38 @@ Once the panel is up:
 | Delete, Backspace or x | Delete it - the mailbox must allow changes |
 | Escape | Close the reading pane, then the panel |
 | Tab | Move to the next bar panel |
+
+### In the window
+
+Press `?` in the window for this list without leaving it.
+
+The window is a focus ladder rather than a bag of shortcuts: **folders → mail
+→ message**. `h` and `l` step between the rungs, `Escape` walks back out one
+rung at a time, and `j`/`k` always mean "down and up in whatever has focus" -
+including inside a message, which is the one place they used to do nothing.
+
+| Key | What it does |
+|---|---|
+| `j` / `k`, `↓` / `↑` | Down and up in whatever has focus: the folder tree, the list, or the message |
+| `Enter` | Open the message, and move focus into it |
+| `h` / `←` | Back a rung: message to list, list to folders |
+| `l` / `→` | In a rung: folders to list, list to message |
+| `Tab` | Between the folder tree and the list |
+| `Escape` | Back one step: reply → folder tree → message → reading pane → window |
+| `Page Up` / `Page Down` | A screenful of whatever has focus |
+| `Ctrl-u` / `Ctrl-d` | Half a screen |
+| `Ctrl-b` / `Ctrl-f` | A screen |
+| `g` / `G` | To the top / to the bottom |
+| `x` | Delete the message under the cursor |
+| `u` / `f` | Only unread / only Focused |
+| `r` | Refresh |
+| `?` | This list |
+
+Escape never skips a rung: stepping back from a message to the list leaves the
+message open, and only the next Escape closes it.
+
+This is the same ladder the [Teams plugin](https://github.com/janrenz/omarchy-teams)
+uses, so what is learned in one window works in the other.
 
 ## Interactions
 
