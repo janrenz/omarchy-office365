@@ -61,8 +61,7 @@ Column {
     width: parent.width
     implicitHeight: Math.max(subjectText.implicitHeight, closeButton.implicitHeight)
 
-    Text {
-      textFormat: Text.PlainText
+    SelectableText {
       id: subjectText
       anchors.left: parent.left
       anchors.right: closeButton.left
@@ -73,9 +72,10 @@ Column {
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
       font.bold: true
-      wrapMode: Text.WordWrap
-      maximumLineCount: 3
-      elide: Text.ElideRight
+      // A TextEdit has no maximumLineCount, so an absurd subject is bounded by
+      // height instead of by line count. Three lines' worth, then clipped.
+      height: Math.min(implicitHeight, Style.font.body * 4.5)
+      clip: true
     }
 
     PanelActionButton {
@@ -94,9 +94,9 @@ Column {
     width: parent.width
     spacing: Style.spacing.xxs
 
-    Text {
-      textFormat: Text.PlainText
+    SelectableText {
       width: parent.width
+      singleLine: true
       text: {
         if (!root.detail) return root.mail ? Model.senderName(root.mail) : ""
         var name = String(root.detail.from || "").trim()
@@ -107,35 +107,32 @@ Column {
       color: root.fg
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
-      elide: Text.ElideRight
     }
 
-    Text {
-      textFormat: Text.PlainText
+    SelectableText {
       width: parent.width
+      singleLine: true
       visible: text !== ""
       text: root.detail ? "To  " + root.people(root.detail.to) : ""
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
-      elide: Text.ElideRight
     }
 
-    Text {
-      textFormat: Text.PlainText
+    SelectableText {
       width: parent.width
+      singleLine: true
       visible: text !== ""
       text: root.detail && root.detail.cc && root.detail.cc.length > 0
             ? "Cc  " + root.people(root.detail.cc) : ""
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
-      elide: Text.ElideRight
     }
 
-    Text {
-      textFormat: Text.PlainText
+    SelectableText {
       width: parent.width
+      singleLine: true
       text: root.when(root.detail ? root.detail.received : (root.mail ? root.mail.received : ""))
       color: root.dim
       font.family: root.fontFamily
@@ -178,20 +175,20 @@ Column {
     clip: true
     boundsBehavior: Flickable.StopAtBounds
 
-    Text {
+    SelectableText {
       id: bodyText
       width: parent.width
       text: root.detail ? String(root.detail.body || "").trim() : ""
       color: root.fg
-      linkColor: root.accent
+      // No linkColor: that is a Text property and this is a TextEdit, which
+      // takes link colour from the markup. Links stay clickable either way.
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
-      wrapMode: Text.Wrap
       // The message says which it is, not the setting: a plain-text message in
       // an HTML-enabled widget is still plain text, and rendering it as markup
       // would eat any < it happens to contain. AutoText is never the answer -
       // letting the content decide is what this is guarding against.
-      textFormat: root.detail && root.detail.bodyFormat === "html" ? Text.RichText : Text.PlainText
+      textFormat: root.detail && root.detail.bodyFormat === "html" ? TextEdit.RichText : TextEdit.PlainText
       // Rich text makes links clickable. They open where every other link in
       // this plugin opens rather than in whatever Qt would do with them.
       onLinkActivated: function(url) { root.linkActivated(url) }

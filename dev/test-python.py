@@ -684,7 +684,7 @@ class OnlineMeetings(unittest.TestCase):
 
 
 class QmlText(unittest.TestCase):
-    """Every Text item must pin textFormat, exactly once.
+    """Every Text and TextEdit item must pin textFormat, exactly once.
 
     Pinning matters because Qt's AutoText would otherwise let mailbox content
     turn itself into rich text and fetch remote resources. Exactly once matters
@@ -694,9 +694,15 @@ class QmlText(unittest.TestCase):
     """
 
     def text_blocks(self):
-        """(file, line, textFormat count) for every Text item in src/."""
+        """(file, line, textFormat count) for every Text/TextEdit item in src/.
+
+        TextEdit is in here because selectable text is a TextEdit - a Text item
+        cannot be selected at all - and it has the same AutoText default and so
+        the same problem. SelectableText does not match: it is this plugin's own
+        component, and it pins the format once in its own file.
+        """
         root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
-        opener = re.compile(r"^\s*(?:[A-Za-z_][\w.]*\s*:\s*)?Text\s*\{\s*$")
+        opener = re.compile(r"^\s*(?:[A-Za-z_][\w.]*\s*:\s*)?(?:TextEdit|Text)\s*\{\s*$")
         for name in sorted(os.listdir(root)):
             if not name.endswith(".qml"):
                 continue
