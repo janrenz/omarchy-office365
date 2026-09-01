@@ -95,6 +95,18 @@ dev/shot.sh /tmp/mail.png                            # photograph what it is dra
 dev/showcase.sh                                      # regenerate the README images
 ```
 
+A syntax check across the whole repo, which is worth having before a commit and
+is not on `$PATH`:
+
+```bash
+/usr/lib/qt6/bin/qmlformat src/*.qml >/dev/null   # silence means they all parse
+```
+
+A bare `qmlformat` is "command not found", and inside a loop with `|| echo FAIL`
+that reads as every file being broken - which is a confusing way to learn that
+nothing is wrong. It catches what a running shell does not: a file that parses
+but is never imported by the harness.
+
 `dev/link.sh` assembles a Quickshell config folder in
 `$XDG_RUNTIME_DIR/omarchy-office365-dev` and symlinks the sources plus
 `dev/shell.qml` and `dev/Fixtures.js` into it. It has to: Quickshell only
