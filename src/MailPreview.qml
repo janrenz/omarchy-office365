@@ -175,7 +175,14 @@ Column {
   // size when it did would walk the buttons below up and down the pane.
   Item {
     width: parent.width
-    visible: bodyPane.visible
+    // The condition belongs here, on the wrapper, and must not be read off the
+    // Flickable inside it. An item's `visible` is ANDed with its parent's, so
+    // a parent reading its child's visibility is a circular binding: `detail`
+    // is null until the body arrives, the child starts invisible, the parent
+    // follows it to false - and then the child can never come back, because
+    // its own visibility is now held down by the parent's. The body never
+    // appeared at all.
+    visible: !root.loading && root.error === "" && !!root.detail
     implicitHeight: bodyPane.height
 
   // Scrolls inside the pane rather than growing it: a long mail must not
@@ -183,7 +190,6 @@ Column {
   Flickable {
     id: bodyPane
     width: parent.width
-    visible: !root.loading && root.error === "" && !!root.detail
     height: Math.min(bodyText.implicitHeight, root.maxBodyHeight)
     contentHeight: bodyText.implicitHeight
     contentWidth: width
