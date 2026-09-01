@@ -48,6 +48,15 @@ Column {
     cursorIndex = Math.max(0, Math.min(pickable.length - 1, next))
   }
 
+  // A folder's name from its id. The picked signal carries the id, which is
+  // what a caller acts on; the name is what it then has to say about it.
+  function nameFor(folderId) {
+    var id = String(folderId)
+    for (var i = 0; i < rows.length; i++)
+      if (rows[i].kind === "folder" && String(rows[i].id) === id) return String(rows[i].name || "")
+    return ""
+  }
+
   function activateCursor() {
     if (cursorIndex < 0 || cursorIndex >= pickable.length) return
     var row = rows[pickable[cursorIndex]]
@@ -68,6 +77,16 @@ Column {
       readonly property int pickIndex: root.pickable.indexOf(index)
       readonly property bool cursored: !isHeader && root.cursorIndex >= 0
                                        && root.cursorIndex === pickIndex
+
+      // How far in the text starts, and how much room is left for it. Kept
+      // here, off the row's own width, rather than measured from the Row that
+      // holds them: a Row sums its children to get an implicit width, so a
+      // child sized from that Row is a cycle - and one Qt only trips over when
+      // the tree is laid out a second time, which is what opening the move
+      // picker over the window does.
+      readonly property real labelIndent: Style.spacing.md + rail.width
+                                          + Style.space(10) * modelData.depth
+      readonly property real labelWidth: Math.max(0, width - labelIndent - Style.spacing.md)
 
       width: parent ? parent.width : 0
       implicitHeight: label.implicitHeight + Style.spacing.sm * 2
@@ -104,13 +123,13 @@ Column {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        anchors.leftMargin: Style.spacing.md + rail.width
-                            + Style.space(10) * line.modelData.depth
+        anchors.leftMargin: line.labelIndent
         anchors.rightMargin: Style.spacing.md
         spacing: Style.spacing.sm
 
         Text {
-          width: label.width - counter.width - label.spacing
+          width: Math.max(0, line.labelWidth
+                             - (counter.visible ? counter.implicitWidth + label.spacing : 0))
           text: String(line.modelData.name || "")
           textFormat: Text.PlainText
           elide: Text.ElideRight
@@ -127,7 +146,6 @@ Column {
           id: counter
           anchors.verticalCenter: parent.verticalCenter
           visible: !line.isHeader && Number(line.modelData.unread || 0) > 0
-          width: visible ? implicitWidth : 0
           text: Number(line.modelData.unread || 0) > 999 ? "999+" : String(line.modelData.unread || 0)
           textFormat: Text.PlainText
           color: line.selected ? root.accent : root.dim

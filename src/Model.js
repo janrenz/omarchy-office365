@@ -292,6 +292,53 @@ function folderRows(views, selected) {
   return rows
 }
 
+// The folders one message could be filed in: its own mailbox's tree, without
+// the folder it is already in.
+//
+// One mailbox only, because a move is one: a folder id names a folder in a
+// single mailbox, and Graph has no way to move a message into another one. And
+// no account header, because with only one mailbox in the list there is
+// nothing for a header to distinguish it from.
+function moveTargets(views, alias, currentFolderId) {
+  var wanted = String(alias || "")
+  var current = String(currentFolderId || "inbox")
+  var list = views || []
+  var rows = []
+
+  for (var i = 0; i < list.length; i++) {
+    var view = list[i]
+    if (String(view.alias) !== wanted) continue
+    var folders = view.folders || []
+    for (var f = 0; f < folders.length; f++) {
+      var folder = folders[f]
+      var id = String(folder.id || "")
+      if (id === "") continue
+      // Where it already is. "inbox" is the well-known name the fetch defaults
+      // to; the tree knows the same folder by its real id, so both spellings
+      // have to drop the same row. Graph would perform the move happily, but
+      // offering it is a row that does nothing.
+      if (id === current || (current === "inbox" && folder.isInbox === true)) continue
+      rows.push({
+        kind: "folder",
+        key: view.alias + ":" + id,
+        alias: view.alias,
+        id: id,
+        name: String(folder.name || ""),
+        unread: Number(folder.unread || 0),
+        total: Number(folder.total || 0),
+        depth: Number(folder.depth || 0),
+        color: view.color,
+        short: view.short,
+        isInbox: folder.isInbox === true,
+        selected: false,
+        placeholder: false
+      })
+    }
+    break
+  }
+  return rows
+}
+
 // The folder a mailbox is reading, named. Falls back to the row marked inbox,
 // so the header says "Inbox" rather than nothing before a folder is picked.
 function folderNameFor(views, alias, selected) {
@@ -390,35 +437,55 @@ function containsId(list, id) {
 
 // Drop optimistic flags the server has caught up with, so the overrides do
 // not outlive their purpose and quietly mask later changes made elsewhere.
-function pruneOverrides(views, state) {
-  var overrides = (state && state.read) || {}
+//
+// One mailbox's fetch at a time, because that is the unit the store fetches
+// in: `account` is what came back for one mailbox, `owner` says which mailbox
+// each override belongs to, and only that mailbox's own overrides are up for
+// retirement here. Judging another mailbox's override against a fetch that
+// could never have carried its message would retire every one of them on the
+// first answer that arrived.
+//
+// Returns null when there is nothing to change, so the caller can leave its
+// properties - and everything bound to them - alone.
+function pruneOwnedOverrides(account, state, owner) {
+  if (!account || account.ok !== true) return null
+  var alias = String(account.alias || "")
+  var read = (state && state.read) || {}
   var deleted = (state && state.deleted) || {}
+  var owners = owner || {}
+
   var seen = {}
   var serverRead = {}
-
-  for (var v = 0; v < (views || []).length; v++) {
-    var view = views[v]
-    if (!view.ok) return state
-    for (var m = 0; m < view.mail.length; m++) {
-      var id = String(view.mail[m].id)
-      seen[id] = true
-      serverRead[id] = view.mail[m].read === true
-    }
+  var mail = account.mail || []
+  for (var m = 0; m < mail.length; m++) {
+    var id = String(mail[m].id)
+    seen[id] = true
+    serverRead[id] = mail[m].read === true
   }
 
+  var changed = false
   var nextRead = {}
-  for (var key in overrides) {
+  for (var key in read) {
     // Retire an override only once the server has actually caught up with it.
     // A message the fetch no longer carries keeps its flag: that is exactly
     // the message just marked read, which fell out of both queries, and
     // dropping it here would let its pinned row read as unread again.
-    if (!seen[key] || serverRead[key] !== overrides[key]) nextRead[key] = overrides[key]
+    if (owners[key] !== alias || !seen[key] || serverRead[key] !== read[key]) nextRead[key] = read[key]
+    else changed = true
   }
 
   var nextDeleted = {}
-  for (var gone in deleted) if (seen[gone]) nextDeleted[gone] = true
+  for (var gone in deleted) {
+    if (owners[gone] !== alias || seen[gone]) nextDeleted[gone] = deleted[gone]
+    else changed = true
+  }
 
-  return { read: nextRead, deleted: nextDeleted, held: (state && state.held) || {} }
+  if (!changed) return null
+
+  var nextOwner = {}
+  for (var o in owners) if (o in nextRead || o in nextDeleted) nextOwner[o] = owners[o]
+
+  return { overrides: { read: nextRead, deleted: nextDeleted }, owner: nextOwner }
 }
 
 // One agenda across mailboxes, grouped by day. Events keep epoch times and a

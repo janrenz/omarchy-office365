@@ -31,6 +31,7 @@ Column {
     ["g / G", "To the top / to the bottom", "Scrolling"],
 
     ["x", "Delete the message under the cursor", "Doing"],
+    ["m", "Move it to another folder", "Doing"],
     ["u", "Show only unread mail", "Doing"],
     ["f", "Show only Focused mail", "Doing"],
     ["r", "Refresh", "Doing"],

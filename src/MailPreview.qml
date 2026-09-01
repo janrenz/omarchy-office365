@@ -21,6 +21,7 @@ Column {
 
   property bool canWrite: false
   property bool canCompose: false
+  property bool canMove: false
   property bool actionRunning: false
   property string actionError: ""
 
@@ -28,6 +29,10 @@ Column {
   signal closeRequested()
   signal markRequested(bool read)
   signal deleteRequested()
+  // Filing it in another folder. Offered only where there is room to pick one:
+  // the window sets canMove, the bar dropdown leaves it off, the same way it
+  // leaves composing off.
+  signal moveRequested()
   signal writeAccessRequested()
   // Answering a message. Offered only where there is somewhere to type: the
   // window sets canCompose, the bar dropdown leaves it off, since a popup that
@@ -164,9 +169,19 @@ Column {
     font.pixelSize: Style.font.caption
   }
 
+  // The message, with the address of whatever link is under the pointer drawn
+  // across the foot of it. This wrapper is what keeps the two apart: the
+  // address appears and disappears with the pointer, and anything that changed
+  // size when it did would walk the buttons below up and down the pane.
+  Item {
+    width: parent.width
+    visible: bodyPane.visible
+    implicitHeight: bodyPane.height
+
   // Scrolls inside the pane rather than growing it: a long mail must not
   // stretch the popup past the screen.
   Flickable {
+    id: bodyPane
     width: parent.width
     visible: !root.loading && root.error === "" && !!root.detail
     height: Math.min(bodyText.implicitHeight, root.maxBodyHeight)
@@ -180,15 +195,23 @@ Column {
       width: parent.width
       text: root.detail ? String(root.detail.body || "").trim() : ""
       color: root.fg
-      // No linkColor: that is a Text property and this is a TextEdit, which
-      // takes link colour from the markup. Links stay clickable either way.
+      // Link colour is SelectableText's business - through the palette, since
+      // linkColor is a Text property and this is a TextEdit. A message that
+      // colours its own anchors keeps its own colour; the rest come out in the
+      // theme's accent instead of Qt's blue.
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
       // The message says which it is, not the setting: a plain-text message in
-      // an HTML-enabled widget is still plain text, and rendering it as markup
-      // would eat any < it happens to contain. AutoText is never the answer -
-      // letting the content decide is what this is guarding against.
-      textFormat: root.detail && root.detail.bodyFormat === "html" ? TextEdit.RichText : TextEdit.PlainText
+      // an HTML-enabled widget is still plain text. AutoText is never the
+      // answer - letting the content decide is what this is guarding against.
+      //
+      // "html" is the message's own markup, sanitised. "linked" is markup
+      // graph.py built out of the message's plain text, so that the links the
+      // text conversion leaves unusable can be clicked. Both are rich text.
+      textFormat: {
+        var kind = root.detail ? String(root.detail.bodyFormat || "") : ""
+        return kind === "html" || kind === "linked" ? TextEdit.RichText : TextEdit.PlainText
+      }
       // Rich text makes links clickable. They open where every other link in
       // this plugin opens rather than in whatever Qt would do with them.
       onLinkActivated: function(url) { root.linkActivated(url) }
@@ -197,6 +220,35 @@ Column {
       HoverHandler {
         enabled: bodyText.hoveredLink !== ""
         cursorShape: Qt.PointingHandCursor
+      }
+    }
+  }
+
+    // Where the link under the pointer actually goes. A link's visible text is
+    // shortened - nobody can read a safelink at full length - so this is the
+    // one place the whole address can be seen before it is followed.
+    //
+    // Over the message rather than under it, on a ground of its own so it
+    // stays readable against whatever it covers.
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.bottom: parent.bottom
+      height: hoveredAddress.implicitHeight + Style.spacing.xs * 2
+      visible: bodyText.hoveredLink !== ""
+      color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.92)
+
+      Text {
+        id: hoveredAddress
+        anchors.fill: parent
+        anchors.margins: Style.spacing.xs
+        verticalAlignment: Text.AlignVCenter
+        textFormat: Text.PlainText
+        text: bodyText.hoveredLink
+        elide: Text.ElideMiddle
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
       }
     }
   }
@@ -283,6 +335,18 @@ Column {
     }
 
     Button {
+      visible: root.canMove && root.canWrite
+      enabled: !root.actionRunning
+      text: "Move…"
+      tooltipText: "File it in another folder of this mailbox"
+      bordered: true
+      foreground: root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.moveRequested()
+    }
+
+    Button {
       visible: root.canWrite
       enabled: !root.actionRunning
       text: "Delete"
@@ -298,7 +362,7 @@ Column {
     Button {
       visible: !root.canWrite
       text: "Allow changes…"
-      tooltipText: "Sign in again to let this widget mark and delete mail"
+      tooltipText: "Sign in again to let this widget mark, move and delete mail"
       bordered: true
       foreground: root.dim
       fontFamily: root.fontFamily

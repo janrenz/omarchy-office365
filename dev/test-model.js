@@ -383,5 +383,113 @@ group("text handed to the shell", () => {
   check("nothing is empty, not undefined", Model.plainText(undefined), "")
 })
 
+// The optimistic overlay is shared by every host now, and retired one
+// mailbox at a time - because one mailbox at a time is what a fetch answers.
+// Judging another mailbox's override against a fetch that could never have
+// carried its message would retire the lot on the first answer to arrive.
+group("retiring the optimistic overlay", () => {
+  const fetched = (alias, mail) => ({ ok: true, alias, mail })
+  const msg = (id, read) => ({ id, read })
+
+  check("an override the server has caught up with goes",
+        Model.pruneOwnedOverrides(
+          fetched("work", [msg("a", true)]),
+          { read: { a: true }, deleted: {} }, { a: "work" }),
+        { overrides: { read: {}, deleted: {} }, owner: {} })
+
+  check("one it has not stays",
+        Model.pruneOwnedOverrides(
+          fetched("work", [msg("a", false)]),
+          { read: { a: true }, deleted: {} }, { a: "work" }),
+        null)
+
+  // The message just marked read fell out of the unread query. Dropping its
+  // flag here would let the pinned row read as unread again.
+  check("a message the fetch no longer carries keeps its flag",
+        Model.pruneOwnedOverrides(
+          fetched("work", [msg("b", false)]),
+          { read: { a: true }, deleted: {} }, { a: "work" }),
+        null)
+
+  check("another mailbox's override is not this fetch's business",
+        Model.pruneOwnedOverrides(
+          fetched("work", [msg("b", false)]),
+          { read: { a: true }, deleted: {} }, { a: "personal" }),
+        null)
+
+  // A deleted row is confirmed by the server no longer returning it, which is
+  // the opposite way round from a read flag.
+  check("a deletion the server has taken up goes",
+        Model.pruneOwnedOverrides(
+          fetched("work", [msg("b", false)]),
+          { read: {}, deleted: { a: true } }, { a: "work" }),
+        { overrides: { read: {}, deleted: {} }, owner: {} })
+
+  check("one still being returned stays",
+        Model.pruneOwnedOverrides(
+          fetched("work", [msg("a", false)]),
+          { read: {}, deleted: { a: true } }, { a: "work" }),
+        null)
+
+  check("a mailbox that failed prunes nothing",
+        Model.pruneOwnedOverrides(
+          { ok: false, alias: "work", mail: [] },
+          { read: { a: true }, deleted: {} }, { a: "work" }),
+        null)
+
+  check("what is kept keeps its owner",
+        Model.pruneOwnedOverrides(
+          fetched("work", [msg("a", true), msg("b", false)]),
+          { read: { a: true, b: true }, deleted: {} }, { a: "work", b: "work" }),
+        { overrides: { read: { b: true }, deleted: {} }, owner: { b: "work" } })
+})
+
+group("where a message can be filed", () => {
+  // Two mailboxes, because the answer has to come from one of them: a folder
+  // id names a folder in a single mailbox, and Graph cannot move a message
+  // across mailboxes at all.
+  const views = [
+    { alias: "work", color: "#7aa2f7", short: "W", folders: [
+      { id: "F-INBOX", name: "Inbox", depth: 0, unread: 3, total: 9, isInbox: true },
+      { id: "F-ARCHIVE", name: "Archive", depth: 0, unread: 0, total: 40 },
+      { id: "F-2024", name: "2024", depth: 1, unread: 0, total: 12 }
+    ] },
+    { alias: "home", color: "#9ece6a", short: "H", folders: [
+      { id: "H-INBOX", name: "Inbox", depth: 0, unread: 1, total: 4, isInbox: true },
+      { id: "H-BILLS", name: "Bills", depth: 0, unread: 0, total: 7 }
+    ] }
+  ]
+
+  const names = (alias, current) =>
+    Model.moveTargets(views, alias, current).map(row => row.name)
+
+  check("only the mailbox being filed out of",
+        names("work", "F-ARCHIVE"), ["Inbox", "2024"])
+
+  // "inbox" is the well-known name the fetch defaults to; the tree knows the
+  // same folder as F-INBOX, and offering it would be a row that does nothing.
+  check("the inbox is dropped under either of its names",
+        names("work", "inbox"), ["Archive", "2024"])
+
+  check("and under its real id too",
+        names("work", "F-INBOX"), ["Archive", "2024"])
+
+  check("the other mailbox has its own answer",
+        names("home", "inbox"), ["Bills"])
+
+  check("a mailbox nobody knows has nowhere to put anything",
+        names("nobody", "inbox"), [])
+
+  check("a mailbox whose folders have not arrived yet has nothing to offer",
+        Model.moveTargets([{ alias: "work", folders: [] }], "work", "inbox"), [])
+
+  // The tree draws these, so they have to arrive shaped the way it reads them.
+  check("rows carry what the tree draws",
+        Model.moveTargets(views, "work", "inbox")[1],
+        { kind: "folder", key: "work:F-2024", alias: "work", id: "F-2024",
+          name: "2024", unread: 0, total: 12, depth: 1, color: "#7aa2f7",
+          short: "W", isInbox: false, selected: false, placeholder: false })
+})
+
 console.log(`\n${checks - failures}/${checks} passed`)
 process.exit(failures ? 1 : 0)

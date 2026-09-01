@@ -21,6 +21,7 @@ themselves were unusable, so the widget always has something to render.
 """
 
 import argparse
+import html
 import json
 import os
 import re
@@ -207,6 +208,9 @@ MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 # larger cap than the plain-text one - the same message should not come out
 # shorter just because it was asked for as HTML.
 HTML_BODY_CAP = 40000
+# The plain-text cap is on the text, before the links are put back: the markup
+# built from it is longer, and where it ends up is not a length worth guessing.
+TEXT_BODY_CAP = 8000
 
 
 def read_capped(response, limit=MAX_RESPONSE_BYTES):
@@ -1220,18 +1224,150 @@ def cmd_palette(_args):
 
 
 def tidy_body(text):
-    """Make Graph's HTML-to-text output readable in a small pane.
+    """Tidy Graph's HTML-to-text output, links left as they arrived.
 
-    It renders links as `[label]<https://very-long-safelink...>`, which buries
-    the words in tracking URLs. The label is what a preview wants; the full
-    thing is one Open click away.
+    Only whitespace: the runs of blank lines the conversion leaves behind, and
+    the trailing spaces. The links are `linkify`'s business, and it needs them
+    in the form Graph wrote them.
     """
     text = text.replace("\r\n", "\n")
-    text = re.sub(r"\[([^\]\n]{1,160})\]\s*<https?://[^>\n]+>", r"\1", text)
-    text = re.sub(r"<(https?://[^>\s]{0,200})>", r"\1", text)
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+# How long a link's visible text may get before it is shortened. Long enough to
+# keep a real path recognisable; short enough that one link cannot take three
+# lines of a narrow pane to itself.
+LINK_DISPLAY_MAX = 58
+
+# What the text conversion writes for a link, in the order these have to be
+# tried: a labelled one first, so its own address is never re-read as a bare
+# one sitting inside it.
+#
+# `[label]` alone is ordinary prose - a mailing-list tag, a [1] footnote - so
+# the address has to be there for the first of these to match anything.
+_TEXT_LINKS = re.compile(
+    r"""(?P<labelled>\[(?P<label>[^\]\n]{1,160})\]\s*<(?P<labelled_url>https?://[^>\s]+)>)"""
+    r"""|(?P<bracketed><(?P<bracketed_url>https?://[^>\s]+)>)"""
+    r"""|(?P<bare>(?<![\w@/<])(?P<bare_url>https?://[^\s<>"']+))"""
+)
+# Punctuation that ends the sentence rather than the address.
+_URL_TRAILING = ".,;:!?)]}'\"\u00ab\u00bb"
+
+
+def unwrap_safelink(url):
+    """The address an Outlook safelink stands for, or the safelink unchanged.
+
+    Defender rewrites every link in inbound mail into a redirect through
+    safelinks.protection.outlook.com, two hundred characters of tenant id and
+    signature with the real target percent-encoded inside it. Nobody can read
+    one, so the target is what gets shown - never what gets followed. The
+    safelink stays the address the link points at, so the tenant's own checking
+    still runs when it is opened.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.hostname or "safelinks.protection.outlook.com" not in parts.hostname.lower():
+        return url
+    target = urllib.parse.parse_qs(parts.query).get("url", [""])[0]
+    # Only a real address: the parameter is attacker-influenced text, and a
+    # javascript: or data: target must not be the thing shown to be clicked.
+    return target if target.startswith(("http://", "https://")) else url
+
+
+def shorten_url(url):
+    """A long address as something a person can read at a glance.
+
+    The scheme goes, then the middle of the path, keeping the host - which says
+    who it is - and the last segment, which says what it is. A query string is
+    dropped: it is the longest part and the least readable, and the address
+    that gets followed is the whole one either way.
+    """
+    shown = unwrap_safelink(url)
+    if len(shown) <= LINK_DISPLAY_MAX:
+        return shown
+
+    try:
+        parts = urllib.parse.urlsplit(shown)
+    except ValueError:
+        parts = None
+    if parts and parts.hostname:
+        host = parts.hostname
+        segments = [seg for seg in parts.path.split("/") if seg]
+        tail = urllib.parse.unquote(segments[-1]) if segments else ""
+        if tail:
+            candidate = host + ("/\u2026/" if len(segments) > 1 else "/") + tail
+            if len(candidate) <= LINK_DISPLAY_MAX:
+                return candidate
+        elif len(host) <= LINK_DISPLAY_MAX:
+            return host
+
+    # Nothing structural to cut, so cut the middle and keep both ends: the
+    # start says where it goes, the end is what distinguishes it from its
+    # neighbours.
+    keep = LINK_DISPLAY_MAX - 1
+    head = keep - keep // 3
+    return shown[:head] + "\u2026" + shown[len(shown) - (keep - head):]
+
+
+def _anchor(url, label):
+    """One link, as the markup the reading pane renders."""
+    return '<a href="%s">%s</a>' % (html.escape(url, quote=True), html.escape(label))
+
+
+def linkify(text):
+    """Plain-text mail as the small markup the reading pane can render.
+
+    Graph's HTML-to-text conversion keeps every link, in a form that cannot be
+    used: `[label]<url>` buries the words behind two hundred characters of
+    safelink, `Unsubscribe<url>` runs the two together, and none of it is
+    clickable because plain text has nothing to click. So the links go back in
+    as links - the words visible, the address behind them.
+
+    This needs no sanitising, unlike an HTML body. Every character that came
+    from the message is escaped before it goes in, so nothing a sender wrote
+    can become markup; the only tags here are the ones written above.
+    """
+    out_parts = []
+    at = 0
+
+    def gap(upto):
+        """The prose between two links, escaped, newlines kept."""
+        return html.escape(text[at:upto]).replace("\n", "<br>\n")
+
+    for match in _TEXT_LINKS.finditer(text):
+        prefix = suffix = ""
+        end = match.end()
+
+        if match.group("labelled") is not None:
+            url = match.group("labelled_url")
+            label = match.group("label").strip()
+        elif match.group("bracketed") is not None:
+            url = match.group("bracketed_url")
+            label = shorten_url(url)
+            # Written hard against the words it linked. Set it off rather than
+            # letting it run into them, which is what the old text did.
+            if match.start() > 0 and not text[match.start() - 1].isspace():
+                prefix, suffix = " (", ")"
+        else:
+            url = match.group("bare_url")
+            # A full stop after an address ends the sentence, not the address.
+            while url and url[-1] in _URL_TRAILING:
+                url = url[:-1]
+                end -= 1
+            if not url:
+                continue
+            label = shorten_url(url)
+
+        out_parts.append(gap(match.start()))
+        out_parts.append(prefix + _anchor(url, label or shorten_url(url)) + suffix)
+        at = end
+
+    out_parts.append(gap(len(text)))
+    return "".join(out_parts)
 
 
 # Everything that could make a mail body reach out of the pane. Qt's rich text
@@ -1331,12 +1467,21 @@ def cmd_message(args):
     # Graph answers with what it has, which is not always what was asked for -
     # a plain-text message stays plain text however the Prefer header is set.
     served_html = str((payload.get("body") or {}).get("contentType") or "").lower() == "html"
+    # Capped before anything is built from it, not after: cutting finished
+    # markup at a fixed length lands in the middle of a tag sooner or later.
     if want_html and served_html:
         body = sanitize_html(raw)
+        truncated = len(body) > HTML_BODY_CAP
+        body = body[:HTML_BODY_CAP]
         body_format = "html"
     else:
-        body = tidy_body(raw)
-        body_format = "text"
+        tidied = tidy_body(raw)
+        truncated = len(tidied) > TEXT_BODY_CAP
+        # Links go back in as links. The result is markup, but markup this
+        # file wrote out of escaped text rather than anything a sender sent,
+        # which is why it needs none of sanitize_html's work.
+        body = linkify(tidied[:TEXT_BODY_CAP])
+        body_format = "linked"
     out(
         {
             "ok": True,
@@ -1349,13 +1494,14 @@ def cmd_message(args):
             "received": payload.get("receivedDateTime", ""),
             "webLink": payload.get("webLink", ""),
             "hasAttachments": bool(payload.get("hasAttachments")),
-            # Capped: a preview pane cannot show a novel, and the Open button
-            # is one click away for the whole thing.
-            "body": body[:HTML_BODY_CAP if body_format == "html" else 8000],
-            "truncated": len(body) > (HTML_BODY_CAP if body_format == "html" else 8000),
-            # "html" or "text". The pane picks its text format from this rather
-            # than from the setting, so a plain-text message in an HTML-enabled
-            # widget still renders as what it is.
+            # Capped above: a preview pane cannot show a novel, and the Open
+            # button is one click away for the whole thing.
+            "body": body,
+            "truncated": truncated,
+            # "html" for the message's own markup, "linked" for markup built
+            # here from its plain text. The pane picks its text format from
+            # this rather than from the setting, so a plain-text message in an
+            # HTML-enabled widget still renders as what it is.
             "bodyFormat": body_format,
         }
     )
@@ -1404,6 +1550,37 @@ def cmd_delete(args):
     if status not in (200, 204):
         fail("delete_failed", graph_error(payload, "Could not delete this message"))
     out({"ok": True, "id": args.id, "deleted": True})
+
+
+def cmd_move(args):
+    """Move one message into another folder of the same mailbox.
+
+    A destination is a folder id from `folders`, or one of Graph's well-known
+    names - archive, junkemail, deleteditems. Graph answers with the message as
+    it now stands in the destination, and it has a *new* id: an id names a
+    message in a folder, so the one the caller was holding stops resolving the
+    moment this returns. The new one goes back with it, so anything that wants
+    to follow the message has something to follow.
+    """
+    token = writable_token(args.account)
+    destination = str(getattr(args, "folder", "") or "").strip()
+    if not destination:
+        fail("no_folder", "No folder to move this message to")
+    status, payload = http(
+        GRAPH + "/me/messages/" + urllib.parse.quote(args.id, safe="") + "/move",
+        method="POST",
+        json_body={"destinationId": destination},
+        headers={"Authorization": "Bearer " + token},
+    )
+    if status not in (200, 201, 204):
+        fail("move_failed", graph_error(payload, "Could not move this message"))
+    moved = payload if isinstance(payload, dict) else {}
+    out({
+        "ok": True,
+        "id": args.id,
+        "newId": str(moved.get("id") or ""),
+        "folder": destination,
+    })
 
 
 def cmd_folders(args):
@@ -1609,6 +1786,12 @@ def main():
     delete = with_account("delete", "move a message to Deleted Items")
     delete.add_argument("--id", required=True)
     delete.set_defaults(func=cmd_delete)
+
+    move = with_account("move", "move a message to another folder")
+    move.add_argument("--id", required=True)
+    move.add_argument("--folder", required=True,
+                      help="destination folder id from `folders`, or a well-known name such as archive")
+    move.set_defaults(func=cmd_move)
 
     compose = with_account("compose", "reply, reply all or forward a message")
     compose.add_argument("--id", required=True, help="message id from a fetch")

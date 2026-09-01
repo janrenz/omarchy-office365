@@ -66,10 +66,21 @@ BarWidget {
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
 
+  // The plugin's one shared store, which the shell builds because the manifest
+  // declares kind "service". Panels are handed theirs; a bar widget is not, so
+  // it asks. Null on a shell too old to know about service plugins, and the
+  // Service falls back to a private store of its own.
+  readonly property var sharedStore: {
+    if (!root.bar || !root.bar.shell) return null
+    if (typeof root.bar.shell.serviceFor !== "function") return null
+    return root.bar.shell.serviceFor(root.moduleName)
+  }
+
   Service {
     id: service
     settings: root.settings
     pluginDir: root.pluginDir
+    store: root.sharedStore
     // Account hues resolve against the theme; this is what they fall back to
     // before the palette has been read.
     fallbackColor: root.bar ? root.bar.foreground : "#7aa2f7"

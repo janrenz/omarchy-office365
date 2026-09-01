@@ -213,10 +213,34 @@ one. Click the message again, the ✕, or press Escape to go back to the agenda.
 Bodies are fetched one at a time, only when you open a message, and long ones
 scroll inside the pane rather than stretching the popup.
 
+### Links
+
+Graph hands a message over as plain text unless `htmlBody` is on, and its
+HTML-to-text conversion leaves every link in a form nothing can use: the words
+buried behind two hundred characters of Defender safelink, or run straight into
+the text in front of them. So the links go back in as links, built here out of
+the message's own escaped text - which is why this needs none of the
+sanitising an HTML body does; nothing a sender wrote can become markup.
+
+A link shows what it is rather than where it goes. A safelink is displayed as
+the address it really stands for, and a long one as its host and last segment -
+`contoso.sharepoint.com/…/Report.docx`. What gets **followed** is always the
+original, safelink included, so the tenant's own checking still runs. Hovering
+a link puts the whole address under the message, since the visible text is
+shortened and that is the only place to read it in full.
+
 **Mark read / unread** and **Delete** sit next to Open, but only for a mailbox
 that has granted permission to change mail - see below. Delete moves the
 message to Deleted Items, so it stays undoable from Outlook, and opens
 whichever message takes its place in the list so you can keep going down it.
+
+In the window there is a **Move…** button beside them, and `m` on any row does
+the same without opening it first. Both put this mailbox's folder tree over the
+window; pick one with the mouse or with `j`/`k` and `Enter`, and `Escape` files
+nothing. The folder the message is already in is not offered, and neither is
+another mailbox's tree - Graph moves a message within one mailbox, never
+between two. The row leaves the list the way a deleted one does, the next
+message opens in its place, and the header says where it went.
 
 ## Keyboard
 
@@ -269,6 +293,7 @@ including inside a message, which is the one place they used to do nothing.
 | `Ctrl-b` / `Ctrl-f` | A screen |
 | `g` / `G` | To the top / to the bottom |
 | `x` | Delete the message under the cursor |
+| `m` | Move it to another folder |
 | `u` / `f` | Only unread / only Focused |
 | `r` | Refresh |
 | `?` | This list |
@@ -296,8 +321,8 @@ Sign-in uses the OAuth 2.0 **device code** flow against Microsoft Graph and
 asks for **read-only** scopes: `Mail.Read`, `Calendars.Read`, `User.Read`.
 There is no password and no client secret anywhere.
 
-Marking mail read or unread, deleting it, and `markReadOnOpen` need more than
-that, so a mailbox only gets `Mail.ReadWrite` if you ask for it: **Allow
+Marking mail read or unread, moving it, deleting it, and `markReadOnOpen` need
+more than that, so a mailbox only gets `Mail.ReadWrite` if you ask for it: **Allow
 changes…**, on a message or on that mailbox's settings page, signs that one
 mailbox in again with the wider scope. Every other mailbox stays read-only,
 and a widget you never grant anything to can never change your mail.
@@ -334,7 +359,7 @@ for consent control, conditional access or auditing. Create one in Entra ID:
   personal Microsoft accounts, if any of your mailboxes are Outlook.com ones
 - **Allow public client flows:** enabled - device code will not work without it
 - **Delegated Graph permissions:** `User.Read`, `offline_access`, `Mail.Read`,
-  `Calendars.Read`, and `Mail.ReadWrite` as well if you want to mark or delete
+  `Calendars.Read`, and `Mail.ReadWrite` as well if you want to mark, move or delete
   mail from the panel
 - **No redirect URI and no client secret** - the device code flow uses neither
 

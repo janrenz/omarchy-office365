@@ -180,8 +180,54 @@ Item {
   // One line of the message, near enough, for j and k while reading.
   readonly property int lineStep: Math.max(Style.space(18), Style.font.bodySmall * 2)
 
+  // ---- filing a message ---------------------------------------------------
+  //
+  // The mailbox's folder tree again, over the window, with the message it
+  // would file named above it. A layer of its own rather than a mode of the
+  // sidebar: the sidebar picks what to read, and picking what to read is not
+  // what Enter should do while a message is waiting to be filed.
+  //
+  // The row is held rather than the id, because the row carries the mailbox -
+  // a folder id names a folder in one mailbox, so which mailbox is asking is
+  // half the question.
+  property var moveRow: null
+  readonly property bool moving: moveRow !== null
+
+  // Where it could go. Held here rather than read back off the picker: the
+  // sheet around the tree - whether to draw the empty note, how much room the
+  // list gets - is laid out from this, and laying an item out from a property
+  // of the item being laid out is a binding loop.
+  readonly property var moveTargets: moveRow ? mailView.moveTargetsFor(moveRow.alias) : []
+
+  function startMove(row) {
+    if (!row || !mailView.canWrite(row.alias)) return
+    moveRow = row
+  }
+
+  function cancelMove() {
+    moveRow = null
+  }
+
+  function moveToFolder(folderId, folderName) {
+    var row = moveRow
+    moveRow = null
+    if (!row) return
+    mailView.moveMail(row, folderId, folderName)
+  }
+
+  // What m acts on: the row under the cursor in the list, or the message being
+  // read when the cursor is somewhere else.
+  function moveAtCursor() {
+    if (moving) return
+    var rows = mailView.mail
+    if (pane === "mail" && mailCursor >= 0 && mailCursor < rows.length) startMove(rows[mailCursor])
+    else if (mailView.previewMail !== null) startMove(mailView.previewMail)
+  }
+
   // Which scroller the scroll keys act on: whichever pane has focus.
   function scrollTarget() {
+    // The picker is over everything else, so it is what the keys reach.
+    if (moving) return movePicker.item ? movePicker.item.scroller : null
     if (pane === "message" && mailView.previewMail !== null) return readerScroll
     if (pane === "folders") return folderDrawer ? drawerFolderScroll : folderScroll
     return listScroll
@@ -235,6 +281,7 @@ Item {
   }
 
   function moveCursor(step) {
+    if (moving) { if (movePicker.item) movePicker.item.tree.moveCursor(step); return }
     if (pane === "folders") { folderPane.moveCursor(step); return }
     // In the message, down and up scroll it rather than moving off it.
     if (pane === "message" && mailView.previewMail !== null) {
@@ -248,6 +295,7 @@ Item {
   }
 
   function activateCursor() {
+    if (moving) { if (movePicker.item) movePicker.item.tree.activateCursor(); return }
     if (pane === "folders") { folderPane.activateCursor(); return }
     if (pane === "message") return
     var rows = mailView.mail
@@ -260,7 +308,7 @@ Item {
   }
 
   function deleteAtCursor() {
-    if (pane !== "mail") return
+    if (moving || pane !== "mail") return
     var rows = mailView.mail
     if (mailCursor < 0 || mailCursor >= rows.length) return
     var row = rows[mailCursor]
@@ -271,6 +319,8 @@ Item {
   // once there is nothing left inside it to close.
   function dismiss() {
     if (showHelp) { showHelp = false; return }
+    // Over everything else, so it is the first layer Escape takes back.
+    if (moving) { cancelMove(); return }
     // Innermost first. A half-written reply is the last thing that should go
     // when someone reaches for Escape.
     if (mailView.composing) { mailView.cancelCompose(); return }
@@ -334,6 +384,103 @@ Item {
         event.accepted = true
       }
 
+      // Filing a message: this mailbox's folders, over the window, with what is
+      // being filed named above them. Under the help sheet, so ? still works.
+      //
+      // Built when it is wanted rather than kept hidden. A folder tree that is
+      // made visible after the fact lays its rows out again against widths
+      // that have not settled yet, and Qt reports that as a binding loop;
+      // built fresh, it lays out once. It also means the picker can never open
+      // holding the cursor position it was left at for another message.
+      Loader {
+        id: movePicker
+        anchors.fill: parent
+        active: root.moving
+        z: 110
+
+        sourceComponent: Rectangle {
+          // What the window drives from out here: the tree the keys move
+          // through, and the scroller the page keys act on.
+          property alias tree: pickerTree
+          property alias scroller: pickerScroll
+
+          color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.97)
+
+          // Clicking off it is the same as Escape: nothing is filed.
+          MouseArea { anchors.fill: parent; onClicked: root.cancelMove() }
+
+          Column {
+            id: movePane
+            anchors.centerIn: parent
+            width: Math.min(Style.space(440), parent.width - Style.spacing.xxl * 2)
+            height: Math.min(Style.space(520), parent.height - Style.spacing.xxl * 2)
+            spacing: Style.spacing.md
+
+            Text {
+              width: parent.width
+              text: "Move to folder"
+              textFormat: Text.PlainText
+              color: Color.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+            }
+
+            // Which message, because m can be pressed on a row that is not the
+            // one open in the reading pane.
+            Text {
+              width: parent.width
+              text: root.moveRow ? String(root.moveRow.subject || "(no subject)") : ""
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              color: Qt.darker(Color.foreground, 1.5)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              width: parent.width
+              visible: root.moveTargets.length === 0
+              text: mailView.loading
+                ? "Still reading this mailbox\u2019s folders\u2026"
+                : "This mailbox has nowhere else to put it."
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              color: Qt.darker(Color.foreground, 1.8)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+            }
+
+            ScrollView {
+              id: pickerScroll
+              width: parent.width
+              height: parent.height - y
+              visible: root.moveTargets.length > 0
+              clip: true
+
+              FolderList {
+                id: pickerTree
+                // Sized from the column, not from the scroller: a ScrollView
+                // takes its implicit width from its content, so handing the
+                // content that width back would be a loop.
+                width: movePane.width
+                rows: root.moveTargets
+                // Straight onto the first folder, unlike the sidebar: this
+                // list is opened to pick from, and has nothing already
+                // selected in it to start from.
+                cursorIndex: 0
+                fg: Color.foreground
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onPicked: function(alias, folderId) {
+                  root.moveToFolder(folderId, pickerTree.nameFor(folderId))
+                }
+              }
+            }
+          }
+        }
+      }
+
       // The keyboard, listed. ? works from anywhere in the window.
       Item {
         anchors.fill: parent
@@ -363,6 +510,8 @@ Item {
         blocked: mailView.composing
         onMoveRequested: function(dx, dy) {
           if (dy !== 0) { root.moveCursor(dy); return }
+          // Nothing to step between: the picker is the whole window.
+          if (root.moving) return
           // Left steps back towards the folders, right steps in towards the
           // message, one rung per press.
           if (dx < 0) root.focusPane(root.pane === "message" ? "mail" : "folders")
@@ -380,9 +529,18 @@ Item {
         // opening, and this stays put for hours.
         onTextKey: function(text) {
           var view = root.scrollTarget()
+          // While the picker is up the only letters that mean anything are the
+          // ones that move in it, which the catcher has already dealt with.
+          // f, u and r would act on the list behind it, invisibly.
+          if (root.moving) {
+            if (text === "g") root.scrollToEnd(view, false)
+            else if (text === "G") root.scrollToEnd(view, true)
+            return
+          }
           if (text === "f") mailView.focusedOnly = !mailView.focusedOnly
           else if (text === "u") mailView.unreadOnly = !mailView.unreadOnly
           else if (text === "r") mailView.refresh()
+          else if (text === "m") root.moveAtCursor()
           else if (text === "?") root.showHelp = !root.showHelp
           else if (text === "g") root.scrollToEnd(view, false)
           else if (text === "G") root.scrollToEnd(view, true)
@@ -419,6 +577,20 @@ Item {
                 text: "loading…"
                 textFormat: Text.PlainText
                 color: Qt.darker(Color.foreground, 1.5)
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+
+              // Where a moved message went. The one action with nothing left on
+              // screen to show for itself: the row is gone, and the folder it
+              // landed in is somewhere else entirely.
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: mailView.actionNotice !== ""
+                text: mailView.actionNotice
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                color: Color.accent
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
               }
@@ -697,8 +869,10 @@ Item {
                   accent: Color.accent
                   fontFamily: Style.font.family
                   canWrite: !!mailView.previewMail && mailView.canWrite(mailView.previewMail.alias)
-                  // Only here: the bar dropdown has nowhere to type.
+                  // Only here: the bar dropdown has nowhere to type, and no
+                  // room to hold a folder tree open over itself either.
                   canCompose: true
+                  canMove: true
                   actionRunning: mailView.actionRunning
                   actionError: mailView.actionError
                   onLinkActivated: function(url) {
@@ -711,6 +885,7 @@ Item {
                   onOpenRequested: mailView.openPreviewed()
                   onMarkRequested: function(read) { mailView.markPreviewed(read) }
                   onDeleteRequested: mailView.deletePreviewed()
+                  onMoveRequested: root.startMove(mailView.previewMail)
                   onWriteAccessRequested: {
                     if (mailView.previewMail) mailView.startLogin(mailView.previewMail.alias, true)
                   }

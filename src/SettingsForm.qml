@@ -34,6 +34,7 @@ Item {
   property int vMails: 5
   property int vRefresh: 180
   property bool vTint: true
+  property bool vNotify: true
   property bool vMarkRead: false
   property bool vPreviewLine: true
   property bool vFocusedDefault: false
@@ -85,6 +86,7 @@ Item {
     vMails = parseInt(String(setting("mails", 5)), 10) || 5
     vRefresh = parseInt(String(setting("refreshIntervalSec", 180)), 10) || 180
     vTint = setting("tintOnUnread", true) !== false
+    vNotify = setting("notify", true) !== false
     vMarkRead = setting("markReadOnOpen", false) === true
     vPreviewLine = setting("previewLine", true) !== false
     vFocusedDefault = setting("focusedByDefault", false) === true
@@ -210,6 +212,7 @@ Item {
       mails: vMails,
       refreshIntervalSec: vRefresh,
       tintOnUnread: vTint,
+      notify: vNotify,
       markReadOnOpen: vMarkRead,
       previewLine: vPreviewLine,
       focusedByDefault: vFocusedDefault,
@@ -482,6 +485,42 @@ Item {
           width: parent.width
           wrapMode: Text.WordWrap
           text: "Colours the bar icon while any mailbox here has unread mail, so it stands out without showing a number."
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(notifyLabel.implicitHeight, notifySwitch.implicitHeight)
+
+          Text {
+            textFormat: Text.PlainText
+            id: notifyLabel
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Notify on new mail"
+            color: root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          ToggleSwitch {
+            id: notifySwitch
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            checked: root.vNotify
+            foreground: root.fg
+            accent: root.accent
+            onToggled: root.vNotify = !root.vNotify
+          }
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.WordWrap
+          text: "A desktop notification for each message that arrives from now on. What was already unread when the shell started is not announced."
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

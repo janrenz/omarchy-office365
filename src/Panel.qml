@@ -333,8 +333,14 @@ Panel {
               onClicked: {
                 var instance = String(root.setting("instance", "")).trim()
                 var payload = instance !== "" ? JSON.stringify({ instance: instance }) : "{}"
-                Quickshell.execDetached(["omarchy-shell", "shell", "summon",
-                                         "caseonline.omarchy.office365", payload])
+                console.warn("office365: open-in-window clicked; payload=" + payload)
+                try {
+                  Quickshell.execDetached(["omarchy-shell", "shell", "summon",
+                                           "caseonline.omarchy.office365", payload])
+                  console.warn("office365: summon dispatched")
+                } catch (e) {
+                  console.warn("office365: summon threw: " + e)
+                }
                 // The dropdown has served its purpose the moment the window is
                 // up; leaving it open would put the same mail on screen twice.
                 root.close()

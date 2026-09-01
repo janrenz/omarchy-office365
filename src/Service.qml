@@ -3,16 +3,60 @@ import Quickshell
 import Quickshell.Io
 import "Model.js" as Model
 
-// One instance per bar widget. Owns every mailbox the widget carries: their
-// merged data, the refresh timer, and one sign-in state machine that works on
-// a single account at a time. Everything runs through graph.py, which is the
-// only thing that ever holds a token.
+// One host's view of the mailboxes: the bar widget has one, the window has
+// another, and a bar surface per monitor means one more of these each.
+//
+// The data itself is not here. It lives in Store.qml, one per plugin for the
+// whole shell, and this registers what it needs and reads the answers back
+// out - so several hosts on the same mailbox share one fetch and one optimistic
+// overlay instead of each polling Graph on a timer of its own.
+//
+// What stays here is what belongs to one host: which widget's settings it is
+// working from, the filters, the folder each mailbox is showing, the message
+// being read, and a reply being written. Two hosts looking at different
+// folders, or one filtered and one not, is the point rather than a problem.
+//
+// Everything a host's UI touches is still on this object, under the names it
+// always had. That the fetching moved is not something Panel.qml or the window
+// has to know.
 Item {
   id: root
 
   property var settings: ({})
   property string pluginDir: ""
   property color fallbackColor: "#7aa2f7"
+
+  // ---- the shared store -----------------------------------------------
+  //
+  // Handed in by the host: the window gets it from the shell's service loader,
+  // the bar widget asks `bar.shell` for it. A shell too old to know about
+  // service plugins hands over nothing, and then this makes a private one and
+  // behaves exactly as it did before there was anything to share.
+  property var store: null
+  property var localStore: null
+  readonly property var hub: store ? store : localStore
+
+  Component {
+    id: storeComponent
+    Store {}
+  }
+
+  Timer {
+    // Not immediately: the host injects the shared store a beat after this is
+    // built, and a private store made in that gap would fetch everything once
+    // for nothing before being thrown away.
+    id: fallbackDelay
+    interval: 1200
+    repeat: false
+    running: !root.store && !root.localStore
+    onTriggered: if (!root.store && !root.localStore) root.localStore = storeComponent.createObject(root)
+  }
+
+  onStoreChanged: {
+    if (!store || !localStore) return
+    localStore.destroy()
+    localStore = null
+  }
 
   // ---- configuration --------------------------------------------------
 
@@ -42,9 +86,19 @@ Item {
     }]
   }
 
+  readonly property var aliases: {
+    var list = []
+    for (var i = 0; i < accountConfigs.length; i++) {
+      var alias = String(accountConfigs[i].account || "").trim()
+      if (alias !== "") list.push(alias)
+    }
+    return list
+  }
+
   readonly property int mails: intSetting("mails", 5, 1, 25)
   readonly property string calendarMode: String(setting("calendar", "3day"))
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 180, 60, 3600)
+  readonly property bool notifyOnNew: setting("notify", true) !== false
   readonly property bool dedupeEvents: setting("dedupeEvents", true) !== false
   // Off unless asked for: turning it on is what makes the plugin want
   // permission to change mail, and the default stays read-only.
@@ -65,21 +119,100 @@ Item {
   readonly property int dayStartMinutes: Model.minutesFromClock(setting("dayStart", "07:00"), 7 * 60)
   readonly property int dayEndMinutes: Model.minutesFromClock(setting("dayEnd", "22:00"), 22 * 60)
   readonly property bool showWeekends: setting("showWeekends", true) !== false
+  readonly property bool demo: setting("demo", false) === true
   readonly property bool configured: accountConfigs.length > 0
   readonly property bool combined: accountConfigs.length > 1
 
+  // ---- subscription ---------------------------------------------------
+  //
+  // What this host wants fetched. The store merges it with every other host's
+  // and asks Graph once for the union.
+
+  property string token: ""
+
+  readonly property var request: ({
+    aliases: aliases,
+    folders: selectedFolders,
+    mails: mails,
+    days: Model.calendarDays(calendarMode),
+    demo: demo,
+    intervalSec: refreshIntervalSec,
+    // Asked for per host, answered once by the store: the widget and the
+    // window watching the same inbox share one fetch, so they must also share
+    // one announcement of what that fetch found.
+    notify: notifyOnNew
+  })
+
+  function syncRequest() {
+    if (!hub) return
+    if (token === "") token = hub.claim()
+    hub.put(token, configured ? request : null)
+  }
+
+  onRequestChanged: syncRequest()
+  onHubChanged: {
+    // A store this host has not registered with yet, so the old token means
+    // nothing to it.
+    token = ""
+    syncRequest()
+  }
+
+  Component.onDestruction: if (hub && token !== "") hub.release(token)
+
   // ---- state ----------------------------------------------------------
 
-  // Last successful snapshot. Kept across failures so a flaky network shows
-  // stale data rather than an empty panel.
-  property var snapshot: null
+  // The mailboxes this host is showing, in the folder it is showing them in,
+  // shaped as the snapshot the model has always been given. Null until the
+  // first of them answers, so a first load still reads as loading rather than
+  // as a set of empty mailboxes.
+  readonly property var snapshot: {
+    if (!hub) return null
+    var accounts = []
+    var answered = false
+    for (var i = 0; i < aliases.length; i++) {
+      var data = hub.dataFor(aliases[i], folderIdFor(aliases[i]))
+      if (!data) continue
+      accounts.push(data)
+      answered = true
+    }
+    return answered ? { ok: true, accounts: accounts } : null
+  }
+
   // The theme's named colours, for resolving a mailbox's "blue" or "magenta".
   // Not called `palette`: this is an Item, and QQuickItem has a palette of its
   // own that a property of that name would shadow.
-  property var themePalette: ({})
-  property bool loading: false
-  property string errorCode: ""
-  property string errorMessage: ""
+  readonly property var themePalette: hub ? hub.themePalette : ({})
+
+  readonly property bool loading: {
+    if (!hub) return false
+    for (var i = 0; i < aliases.length; i++)
+      if (hub.loadingFor(aliases[i], folderIdFor(aliases[i]))) return true
+    return false
+  }
+
+  // The helper itself having failed, as opposed to a mailbox answering with a
+  // problem of its own - those live inside the snapshot and are drawn per
+  // mailbox. The first one is enough: the panel shows one line either way.
+  readonly property var fetchError: {
+    if (!hub) return null
+    for (var i = 0; i < aliases.length; i++) {
+      var problem = hub.errorFor(aliases[i], folderIdFor(aliases[i]))
+      if (problem) return problem
+    }
+    return null
+  }
+
+  // A sign-in that failed says so here too, since it is the same banner.
+  readonly property string errorCode: {
+    if (hub && hub.loginErrorCode !== "") return hub.loginErrorCode
+    return fetchError ? String(fetchError.code) : ""
+  }
+
+  readonly property string errorMessage: {
+    if (hub && hub.loginErrorCode !== "") return hub.loginErrorMessage
+    return fetchError ? String(fetchError.message) : ""
+  }
+
   property bool saving: false
   property string saveError: ""
   signal settingsSaved()
@@ -87,14 +220,7 @@ Item {
   // Mailboxes whose sign-in just landed and whose first fetch is still in
   // flight. They are signed in but have no data yet, which is neither of the
   // states the panel would otherwise show.
-  property var busy: ({})
-
-  // Sign-in runs for one mailbox at a time.
-  property string loginAlias: ""
-  property bool loggingIn: false
-  property string userCode: ""
-  property string verificationUri: ""
-  property string loginMessage: ""
+  readonly property var busy: hub ? hub.busy : ({})
 
   // ---- derived --------------------------------------------------------
 
@@ -128,18 +254,25 @@ Item {
     expandedStart = -1
     expandedEnd = -1
     closePreview()
-    mailState = ({ read: ({}), deleted: ({}), held: ({}) })
+    // Only what this host was holding open. The read and deleted overrides are
+    // shared with every other host now, and are retired against the server as
+    // each fetch lands rather than by anyone closing a panel.
+    held = ({})
   }
 
   // ---- reading pane ---------------------------------------------------
 
   // The message being read, its fetched body, and the state of getting it.
   // Bodies are far too big to carry in the list fetch, so one is pulled only
-  // when a message is opened.
+  // when a message is opened - by the store, which keeps it, so opening the
+  // same message in the window that was just read in the bar costs nothing.
   property var previewMail: null
   property var previewDetail: null
   property bool previewLoading: false
   property string previewError: ""
+  // The body this host is waiting for, so an answer to somebody else's request
+  // - or to one this host has since moved on from - is ignored.
+  property string previewKey: ""
 
   function showPreview(mail) {
     if (!mail || !mail.id) return
@@ -153,15 +286,13 @@ Item {
     holdOnly(mail.id)
     previewDetail = null
     previewError = ""
+    if (!hub) {
+      previewLoading = false
+      previewError = "Nothing to read this message with yet"
+      return
+    }
     previewLoading = true
-    if (messageProc.running) messageProc.running = false
-    var command = ["python3", helper(), "message", "--account", String(mail.alias), "--id", String(mail.id)]
-    // Demo mode has to reach the reading pane too, or opening a synthetic row
-    // asks Graph about an id it has never seen.
-    if (setting("demo", false) === true) command.push("--demo")
-    if (htmlBody) command.push("--html")
-    messageProc.command = command
-    messageProc.running = true
+    previewKey = hub.requestBody(mail.alias, mail.id, htmlBody, demo)
   }
 
   function closePreview() {
@@ -170,33 +301,46 @@ Item {
     previewDetail = null
     previewError = ""
     previewLoading = false
+    previewKey = ""
   }
 
-  property string actionError: ""
-  // Marks are queued rather than dropped while one is in flight: opening the
-  // next message before the previous mark returned must still mark both.
-  property var markQueue: []
-  readonly property bool actionRunning: markProc.running || deleteProc.running || markQueue.length > 0
+  Connections {
+    target: root.hub
+
+    function onBodyReady(cacheKey, detail) {
+      if (cacheKey !== root.previewKey) return
+      root.previewLoading = false
+      root.previewDetail = detail
+      root.previewError = ""
+      // Only after the message really opened, and only where it was asked for
+      // and permitted.
+      if (root.markReadOnOpen && root.previewMail && root.previewMail.read !== true
+          && root.canWrite(root.previewMail.alias))
+        root.markMessage(root.previewMail.id, root.previewMail.alias, true)
+    }
+
+    function onBodyFailed(cacheKey, message) {
+      if (cacheKey !== root.previewKey) return
+      root.previewLoading = false
+      root.previewError = message
+    }
+
+    function onMessageDeleted(id, alias) {
+      root.afterRemoval(id)
+    }
+
+    function onMessageMoved(id, alias) {
+      root.afterRemoval(id)
+    }
+  }
+
+  readonly property string actionError: hub ? hub.actionError : ""
+  readonly property string actionNotice: hub ? hub.actionNotice : ""
+  readonly property bool actionRunning: hub ? hub.actionRunning : false
 
   function markMessage(id, alias, read) {
-    if (!id || !canWrite(alias)) return
-    actionError = ""
-    // Show it at once; the queue catches up and a failure puts it back.
-    withState("read", id, read === true)
-    var queued = markQueue.slice()
-    queued.push({ id: String(id), alias: String(alias), read: read === true })
-    markQueue = queued
-    pumpMarks()
-  }
-
-  function pumpMarks() {
-    if (markProc.running || markQueue.length === 0) return
-    var next = markQueue[0]
-    markProc.command = ["python3", helper(), "mark",
-                        "--account", next.alias,
-                        "--id", next.id,
-                        next.read ? "--read" : "--unread"]
-    markProc.running = true
+    if (!id || !hub || !canWrite(alias)) return
+    hub.markMessage(id, alias, read)
   }
 
   function markPreviewed(read) {
@@ -212,20 +356,47 @@ Item {
   // Deleting works on any row, not only the one being read: the list offers
   // it directly, and so does the keyboard.
   function deleteMail(row) {
-    if (!row || deleteProc.running || !canWrite(row.alias)) return
-    actionError = ""
-    // Remembered now, while the row is still in the list, so the message that
-    // takes its place can be opened once it is gone.
-    deleteProc.targetIndex = indexOfMail(row.id)
-    deleteProc.wasReading = !!previewMail && String(previewMail.id) === String(row.id)
-    deleteProc.command = ["python3", helper(), "delete",
-                          "--account", String(row.alias),
-                          "--id", String(row.id)]
-    deleteProc.running = true
+    if (!row || !hub || !canWrite(row.alias)) return
+    hub.deleteMessage(row.alias, row.id)
   }
 
   function deletePreviewed() {
     deleteMail(previewMail)
+  }
+
+  // Filing a message somewhere else. Like deleting, this works on any row
+  // rather than only on the one being read.
+  function moveMail(row, folderId, folderName) {
+    if (!row || !hub || !canWrite(row.alias)) return
+    hub.moveMessage(row.alias, row.id, folderId, folderName)
+  }
+
+  function movePreviewed(folderId, folderName) {
+    moveMail(previewMail, folderId, folderName)
+  }
+
+  // Where a message in this mailbox could go: its own folder tree, less the
+  // folder it is already in.
+  function moveTargetsFor(alias) {
+    return Model.moveTargets(views, String(alias || ""), folderIdFor(alias))
+  }
+
+  // Every host hears about every message that leaves the folder it is reading,
+  // deleted or moved, including the one that asked for it. Carry on down the
+  // list rather than dropping back to the agenda - but only where the message
+  // that left was the one being read here. A row deleted in the window while
+  // the bar was reading something else must not move the bar's pane.
+  function afterRemoval(id) {
+    if (!previewMail || String(previewMail.id) !== String(id)) return
+    // The row is still listed at this moment; the store hides it as soon as
+    // this returns. The message that takes its place is then the one at the
+    // index this one is leaving.
+    var at = indexOfMail(id)
+    Qt.callLater(function() {
+      var next = Model.nextAfterRemoval(root.mail, at)
+      if (next) root.showPreview(next)
+      else root.closePreview()
+    })
   }
 
   function openPreviewed() {
@@ -241,10 +412,20 @@ Item {
     return kept
   }
 
+  // Exactly one message is held in the unread view at a time: the one open
+  // here. Unlike the read and deleted overrides this is not shared, because
+  // which message a host is reading is the host's own business.
+  property var held: ({})
+
   // What the user has done that the server has not confirmed yet, keyed by
-  // message id. Keyed by id rather than by whatever is open, so a slow reply
-  // about one message can never land on another.
-  property var mailState: ({ read: ({}), deleted: ({}), held: ({}) })
+  // message id - the shared read and deleted overrides, plus this host's held
+  // row. Keyed by id rather than by whatever is open, so a slow reply about
+  // one message can never land on another.
+  readonly property var mailState: ({
+    read: hub ? hub.overrides.read : ({}),
+    deleted: hub ? hub.overrides.deleted : ({}),
+    held: held
+  })
 
   // The state the list is actually built from: the pending changes above, plus
   // the row being read so it keeps its place in the list.
@@ -255,20 +436,10 @@ Item {
     pinned: previewMail
   })
 
-  function withState(field, id, value) {
-    var next = { read: ({}), deleted: ({}), held: ({}) }
-    for (var group in mailState) for (var key in mailState[group]) next[group][key] = mailState[group][key]
-    if (value === undefined) delete next[field][String(id)]
-    else next[field][String(id)] = value
-    mailState = next
-  }
-
-  // Exactly one message is held in the unread view at a time: the one open.
   function holdOnly(id) {
-    var next = { read: ({}), deleted: ({}), held: ({}) }
-    for (var group in mailState) if (group !== "held") for (var key in mailState[group]) next[group][key] = mailState[group][key]
-    if (id) next.held[String(id)] = true
-    mailState = next
+    var next = {}
+    if (id) next[String(id)] = true
+    held = next
   }
 
   // ---- composing ------------------------------------------------------
@@ -383,14 +554,25 @@ Item {
   // something is picked and why "inbox" is removed rather than stored.
   //
   // Kept per mailbox because a folder id names a folder in one mailbox only:
-  // there is no single id that could mean "Archive" across several.
+  // there is no single id that could mean "Archive" across several. Kept per
+  // host too: the window reading Archive is not a reason for the bar to stop
+  // showing the inbox.
   property var selectedFolders: ({})
 
-  // True from the moment a folder is picked until the fetch answering that
-  // pick lands. The rows still in hand belong to the folder being left, so
-  // anything drawing them has to stand something else in their place rather
+  // The mailbox whose folder was last picked here, until the fetch answering
+  // that pick lands. The rows still in hand belong to the folder being left,
+  // so anything drawing them has to stand something else in their place rather
   // than leave the old folder's mail sitting under the new folder's name.
-  property bool switchingFolder: false
+  //
+  // A folder read before is already in the store, and switching back to it
+  // shows its rows at once rather than a pulse of placeholders.
+  property string awaitingFolderFor: ""
+
+  readonly property bool switchingFolder: {
+    if (!hub || awaitingFolderFor === "") return false
+    var folder = folderIdFor(awaitingFolderFor)
+    return !hub.dataFor(awaitingFolderFor, folder) && !hub.errorFor(awaitingFolderFor, folder)
+  }
 
   readonly property var folderRows: Model.folderRows(views, selectedFolders)
 
@@ -417,12 +599,14 @@ Item {
     // Read, deleted and held overrides name messages in the folder being left,
     // and the reading pane is showing one of them. Both would otherwise be
     // applied to whatever lands in their place.
-    mailState = ({ read: ({}), deleted: ({}), held: ({}) })
+    if (hub) {
+      hub.forgetOverrides(key)
+      // "Moved to Archive" said over Archive reads as though it just happened
+      // here. The notice belonged to the folder being left.
+      hub.actionNotice = ""
+    }
     closePreview()
-    switchingFolder = true
-
-    if (fetchProc.running) queueRefresh()
-    else refresh()
+    awaitingFolderFor = key
   }
 
   readonly property var mail: Model.mergeMail(filteredViews, unreadOnly, mails, listState, focusedOnly)
@@ -512,36 +696,18 @@ Item {
     return !!view && view.write === true
   }
 
-  function markBusy(alias) {
-    var next = {}
-    for (var key in busy) next[key] = busy[key]
-    next[alias] = true
-    busy = next
-  }
-
   // ---- fetching -------------------------------------------------------
+  //
+  // The store owns the timers and the processes. What is left here is asking
+  // it for a fresh look at this host's own mailboxes.
 
   function refresh() {
-    if (!configured || fetchProc.running || pluginDir === "") return
-    loading = true
-    var command = ["python3", helper(), "fetch",
-                   "--mails", String(mails),
-                   "--days", String(Model.calendarDays(calendarMode))]
-    for (var i = 0; i < accountConfigs.length; i++) {
-      var alias = String(accountConfigs[i].account).trim()
-      command = command.concat(["--account", alias])
-      // Only a folder that was actually picked. Leaving the default off keeps
-      // the command line the same as it was for anyone reading their inbox.
-      var chosen = String(selectedFolders[alias] || "")
-      if (chosen !== "" && chosen !== "inbox")
-        command = command.concat(["--folder", alias + "=" + chosen])
-    }
-    // "demo": true in shell.json fills the widget with synthetic data, for
-    // working on the layout without every mailbox being signed in.
-    if (setting("demo", false) === true) command.push("--demo")
-    fetchProc.command = command
-    fetchProc.running = true
-    loadPalette()
+    if (!configured || !hub) return
+    hub.refresh(aliases)
+  }
+
+  function loadPalette() {
+    if (hub) hub.loadPalette()
   }
 
   // A refresh asked for that could not be started yet.
@@ -549,8 +715,7 @@ Item {
   // Saving settings is the case this exists for. The write finishing means
   // shell.json is on disk, not that the shell has noticed and handed the new
   // values to this object - so refreshing there fetches the accounts and range
-  // being replaced. It can also be dropped outright, since refresh() gives way
-  // to a fetch already in flight. Both are waited out here.
+  // being replaced. Both are waited out here.
   property bool refreshQueued: false
 
   function queueRefresh() {
@@ -563,7 +728,7 @@ Item {
   }
 
   function runQueuedRefresh() {
-    if (!refreshQueued || !configured || fetchProc.running || pluginDir === "") return
+    if (!refreshQueued || !configured || !hub) return
     refreshQueued = false
     refreshDeadline.stop()
     refresh()
@@ -576,64 +741,26 @@ Item {
   Timer {
     id: refreshDeadline
     interval: 2000
-    // If a fetch is still running this does nothing, and fetchProc picks the
-    // queued refresh up when it exits.
     onTriggered: root.runQueuedRefresh()
   }
 
-  // Theme colours, which the settings form needs before anything is
-  // configured - the colour swatches on the very first mailbox would
-  // otherwise all be grey.
-  function loadPalette() {
-    if (paletteProc.running || pluginDir === "") return
-    paletteProc.command = ["python3", helper(), "palette"]
-    paletteProc.running = true
-  }
-
-  function applyFetch(raw) {
-    var parsed = Model.parseJson(raw, null)
-    if (!parsed) {
-      errorCode = "bad_output"
-      errorMessage = "Could not read the helper's response"
-      return
-    }
-    if (parsed.ok === false) {
-      var error = parsed.error || {}
-      errorCode = String(error.code || "error")
-      errorMessage = String(error.message || "Something went wrong")
-      return
-    }
-    // Per-account failures live inside the snapshot; the instance itself is
-    // only in error when the whole fetch failed.
-    snapshot = parsed
-    // Every fetch covers every mailbox, so whatever was waiting on one now has
-    // its real state - including a folder switch, whose new rows are in here.
-    busy = ({})
-    switchingFolder = false
-    mailState = Model.pruneOverrides(views, mailState)
-    errorCode = ""
-    errorMessage = ""
-  }
-
   // ---- sign-in --------------------------------------------------------
+  //
+  // Run by the store, one mailbox at a time for the whole shell, so two hosts
+  // cannot start competing device-code flows for the same mailbox. Surfaced
+  // here because the buttons and the code live in the panel.
+
+  readonly property string loginAlias: hub ? hub.loginAlias : ""
+  readonly property bool loggingIn: hub ? hub.loggingIn : false
+  readonly property string userCode: hub ? hub.userCode : ""
+  readonly property string verificationUri: hub ? hub.verificationUri : ""
+  readonly property string loginMessage: hub ? hub.loginMessage : ""
 
   function startLogin(alias, wantWrite) {
-    if (!configured || loginStartProc.running) return
+    if (!configured || !hub) return
     var config = configFor(alias)
     if (!config) return
-    loginAlias = alias
-    loggingIn = true
-    userCode = ""
-    verificationUri = ""
-    loginMessage = "Starting sign-in…"
-    var command = ["python3", helper(), "login-start", "--account", alias]
-    if (wantWrite === true) command.push("--write")
-    var clientId = String(config.clientId || "").trim()
-    var authority = String(config.authority || "").trim()
-    if (clientId !== "") command = command.concat(["--client-id", clientId])
-    if (authority !== "") command = command.concat(["--authority", authority])
-    loginStartProc.command = command
-    loginStartProc.running = true
+    hub.startLogin(alias, wantWrite, config)
   }
 
   function configFor(alias) {
@@ -643,32 +770,15 @@ Item {
   }
 
   function cancelLogin() {
-    if (loginNotifyId > 0) {
-      notify("Sign-in cancelled", "No changes were made", false)
-      loginNotifyId = 0
-    }
-    loggingIn = false
-    loginAlias = ""
-    userCode = ""
-    verificationUri = ""
-    loginMessage = ""
-    loginPollTimer.running = false
+    if (hub) hub.cancelLogin()
   }
 
-  // Opening the sign-in page with the mailbox's own browser profile is what
-  // stops the browser handing back whichever account it was already signed
-  // into - the page arrives already knowing who this should be.
   function openVerificationPage() {
-    if (verificationUri === "") return
-    var config = configFor(loginAlias)
-    var command = config ? config.openCommand : ""
-    Quickshell.execDetached(Model.openArgv(command, verificationUri))
+    if (hub) hub.openVerificationPage()
   }
 
   function signOut(alias) {
-    if (removeProc.running) return
-    removeProc.command = ["python3", helper(), "remove", "--account", alias]
-    removeProc.running = true
+    if (hub) hub.signOut(alias)
   }
 
   // ---- actions --------------------------------------------------------
@@ -677,28 +787,6 @@ Item {
     if (!url) return
     var config = alias ? configFor(alias) : (accountConfigs.length > 0 ? accountConfigs[0] : null)
     Quickshell.execDetached(Model.openArgv(config ? config.openCommand : "", String(url)))
-  }
-
-  // Opening the browser takes focus, which dismisses the popup and takes the
-  // device code with it. A notification outlives the panel; make it critical
-  // so it stays put until dismissed, since the code expires in 15 minutes and
-  // there is no way back to it once the panel is gone.
-  function notify(summary, body, critical) {
-    var command = ["notify-send", "-a", "Office 365"]
-    if (critical === true) command = command.concat(["-u", "critical"])
-    // Replace the code notification rather than stacking on it, so finishing
-    // a sign-in clears the code that is no longer needed.
-    if (loginNotifyId > 0) command = command.concat(["-r", String(loginNotifyId)])
-    Quickshell.execDetached(command.concat([String(summary), String(body)]))
-  }
-
-  // Id of the standing device-code notification, so it can be replaced.
-  property int loginNotifyId: 0
-
-  function notifyCode(summary, body) {
-    notifyProc.command = ["notify-send", "-a", "Office 365", "-u", "critical", "-p",
-                          String(summary), String(body)]
-    notifyProc.running = true
   }
 
   // Bring a mailbox's own Outlook window forward when it has a match
@@ -719,6 +807,11 @@ Item {
     Quickshell.execDetached(["omarchy-launch-or-focus", match, launch])
   }
 
+  // ---- settings -------------------------------------------------------
+  //
+  // Stays here rather than in the store: a save names one widget's entry in
+  // shell.json, and which widget that is only this host knows.
+
   // Starts a save, and says whether it started: writing shell.json is another
   // process, so a caller that wants to know the outcome has to wait for
   // settingsSaved or saveError rather than for this to return.
@@ -736,228 +829,6 @@ Item {
                         "--set", JSON.stringify(patch || {})]
     saveProc.running = true
     return true
-  }
-
-  onConfiguredChanged: if (configured) refresh()
-  onPluginDirChanged: {
-    loadPalette()
-    if (configured) refresh()
-  }
-
-  Timer {
-    id: refreshTimer
-    interval: root.refreshIntervalSec * 1000
-    repeat: true
-    running: root.configured
-    triggeredOnStart: true
-    onTriggered: root.refresh()
-  }
-
-  Timer {
-    // Retry sooner than the normal cadence after a transient failure, so a
-    // laptop coming back from suspend refills the panel quickly.
-    id: retryTimer
-    interval: 20000
-    repeat: false
-    onTriggered: root.refresh()
-  }
-
-  Timer {
-    id: loginPollTimer
-    interval: 5000
-    repeat: true
-    running: false
-    onTriggered: {
-      if (loginPollProc.running || root.loginAlias === "") return
-      loginPollProc.command = ["python3", root.helper(), "login-poll", "--account", root.loginAlias]
-      loginPollProc.running = true
-    }
-  }
-
-  Process {
-    id: fetchProc
-    running: false
-    stdout: StdioCollector { id: fetchOut; waitForEnd: true }
-    stderr: StdioCollector { id: fetchErr; waitForEnd: true }
-    onExited: function(exitCode) {
-      root.loading = false
-      if (exitCode === 0) root.applyFetch(fetchOut.text)
-      else {
-        root.errorCode = "helper_failed"
-        root.errorMessage = Model.oneLine(fetchErr.text || "The helper could not be run", 160)
-        // A switch that failed still has to stop waiting, or the placeholder
-        // rows pulse over the old folder's mail until the retry happens to
-        // work.
-        root.switchingFolder = false
-      }
-      if (root.errorCode !== "") retryTimer.restart()
-      // A refresh that had to give way to this one.
-      root.runQueuedRefresh()
-    }
-  }
-
-  Process {
-    id: messageProc
-    running: false
-    stdout: StdioCollector { id: messageOut; waitForEnd: true }
-    stderr: StdioCollector { id: messageErr; waitForEnd: true }
-    onExited: function(exitCode) {
-      root.previewLoading = false
-      var parsed = Model.parseJson(messageOut.text, null)
-      if (exitCode !== 0 || !parsed || parsed.ok === false) {
-        root.previewError = parsed && parsed.error
-          ? String(parsed.error.message)
-          : Model.oneLine(messageErr.text || "Could not open this message", 160)
-        return
-      }
-      root.previewDetail = parsed
-      root.previewError = ""
-      // Only after the message really opened, and only where it was asked for
-      // and permitted.
-      if (root.markReadOnOpen && root.previewMail && root.previewMail.read !== true
-          && root.canWrite(root.previewMail.alias))
-        root.markMessage(root.previewMail.id, root.previewMail.alias, true)
-    }
-  }
-
-  Process {
-    id: notifyProc
-    running: false
-    stdout: StdioCollector { id: notifyOut; waitForEnd: true }
-    onExited: {
-      var id = parseInt(String(notifyOut.text || "").trim(), 10)
-      root.loginNotifyId = isFinite(id) && id > 0 ? id : 0
-    }
-  }
-
-  Process {
-    id: markProc
-    running: false
-    stdout: StdioCollector { id: markOut; waitForEnd: true }
-    onExited: function(exitCode) {
-      var done = root.markQueue.length > 0 ? root.markQueue[0] : null
-      root.markQueue = root.markQueue.slice(1)
-      var parsed = Model.parseJson(markOut.text, null)
-      if (exitCode !== 0 || !parsed || parsed.ok === false) {
-        root.actionError = parsed && parsed.error ? String(parsed.error.message) : "Could not change this message"
-        // Put the row back the way it was, for that message specifically.
-        if (done) root.withState("read", done.id, !done.read)
-      }
-      root.pumpMarks()
-      if (root.markQueue.length === 0) root.refresh()
-    }
-  }
-
-  Process {
-    id: deleteProc
-    running: false
-    stdout: StdioCollector { id: deleteOut; waitForEnd: true }
-    property int targetIndex: -1
-    property bool wasReading: false
-    onExited: function(exitCode) {
-      var parsed = Model.parseJson(deleteOut.text, null)
-      if (exitCode !== 0 || !parsed || parsed.ok === false) {
-        root.actionError = parsed && parsed.error ? String(parsed.error.message) : "Could not delete this message"
-        return
-      }
-      // Hide it now; the next fetch simply stops returning it. Reading `mail`
-      // after this sees the list without it.
-      if (parsed.id) root.withState("deleted", parsed.id, true)
-
-      // Carry on down the list rather than dropping back to the agenda -
-      // but only when the message deleted was the one being read. Deleting
-      // some other row from the list must not move the pane.
-      if (deleteProc.wasReading) {
-        var next = Model.nextAfterRemoval(root.mail, deleteProc.targetIndex)
-        if (next) root.showPreview(next)
-        else root.closePreview()
-      }
-      deleteProc.targetIndex = -1
-      deleteProc.wasReading = false
-      root.refresh()
-    }
-  }
-
-  Process {
-    id: paletteProc
-    running: false
-    stdout: StdioCollector { id: paletteOut; waitForEnd: true }
-    onExited: function(exitCode) {
-      var parsed = Model.parseJson(paletteOut.text, null)
-      if (exitCode === 0 && parsed && parsed.colors) root.themePalette = parsed.colors
-    }
-  }
-
-  Process {
-    id: loginStartProc
-    running: false
-    stdout: StdioCollector { id: loginStartOut; waitForEnd: true }
-    stderr: StdioCollector { id: loginStartErr; waitForEnd: true }
-    onExited: function(exitCode) {
-      var parsed = Model.parseJson(loginStartOut.text, null)
-      if (exitCode !== 0 || !parsed || parsed.ok === false) {
-        root.loggingIn = false
-        root.loginAlias = ""
-        root.loginMessage = ""
-        root.errorCode = "login_failed"
-        root.errorMessage = parsed && parsed.error
-          ? String(parsed.error.message)
-          : Model.oneLine(loginStartErr.text || "Could not start sign-in", 160)
-        return
-      }
-      root.userCode = String(parsed.userCode || "")
-      root.verificationUri = String(parsed.verificationUri || "https://microsoft.com/devicelogin")
-      root.loginMessage = "Waiting for you to finish signing in…"
-      loginPollTimer.interval = Math.max(3, Number(parsed.interval || 5)) * 1000
-      loginPollTimer.running = true
-      // Clipboard first, so the code is already there to paste by the time the
-      // browser has focus.
-      Quickshell.clipboardText = root.userCode
-      root.notifyCode("Sign in to " + root.loginAlias,
-                      "Code " + root.userCode + " - copied, paste it in the browser")
-      root.openVerificationPage()
-    }
-  }
-
-  Process {
-    id: loginPollProc
-    running: false
-    stdout: StdioCollector { id: loginPollOut; waitForEnd: true }
-    onExited: function() {
-      var parsed = Model.parseJson(loginPollOut.text, null)
-      if (!parsed) return
-      if (parsed.ok === false) {
-        loginPollTimer.running = false
-        root.loggingIn = false
-        root.loginAlias = ""
-        root.loginMessage = ""
-        root.errorCode = String((parsed.error || {}).code || "login_failed")
-        root.errorMessage = String((parsed.error || {}).message || "Sign-in failed")
-        return
-      }
-      if (parsed.status === "pending") {
-        // The endpoint asks us to back off when we poll too eagerly.
-        if (parsed.slowDown === true) loginPollTimer.interval += 5000
-        return
-      }
-      loginPollTimer.running = false
-      // The panel is usually closed by now, so say which account actually
-      // arrived - that is the moment a wrong account is worth catching.
-      var who = String(parsed.username || "")
-      root.notify("Signed in" + (root.loginAlias !== "" ? " · " + root.loginAlias : ""),
-                  who !== "" ? who : "Mailbox is signed in", false)
-      root.loginNotifyId = 0
-      // Hold this mailbox in a "signed in, loading" state until its first
-      // fetch returns, rather than letting it fall back to "sign in".
-      if (root.loginAlias !== "") root.markBusy(root.loginAlias)
-      root.loggingIn = false
-      root.loginAlias = ""
-      root.userCode = ""
-      root.loginMessage = ""
-      root.errorCode = ""
-      root.errorMessage = ""
-      root.refresh()
-    }
   }
 
   Process {
@@ -980,11 +851,5 @@ Item {
       // reached this object yet.
       root.queueRefresh()
     }
-  }
-
-  Process {
-    id: removeProc
-    running: false
-    onExited: root.refresh()
   }
 }

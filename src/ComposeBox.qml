@@ -47,6 +47,31 @@ Column {
 
   function focusBody() { body.forceActiveFocus() }
 
+  // The window's key catcher stands down while a reply is open - it claims
+  // bare letters to move a cursor, and would eat them out of the text. So the
+  // keys that get out of a reply have to be here: without them Escape does
+  // nothing and the only way out of a half-written reply is the mouse.
+  //
+  // Enter is a newline. Shift+Enter and Ctrl+Enter post it - as Send where the
+  // mailbox may send, and as the draft it would otherwise have to be.
+  function handleKey(event) {
+    if (event.key === Qt.Key_Escape) {
+      root.cancelRequested()
+      event.accepted = true
+      return
+    }
+    if (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter) return
+    if (!(event.modifiers & (Qt.ShiftModifier | Qt.ControlModifier))) return
+    event.accepted = true
+    if (root.running) return
+    if (root.canSend) root.sendRequested()
+    else root.draftRequested()
+  }
+
+  // Escape typed in the recipients field, which the body's own handler below
+  // never sees.
+  Keys.onPressed: function(event) { root.handleKey(event) }
+
   Text {
     width: parent.width
     text: root.subject === "" ? root.title : (root.title + " · " + root.subject)
@@ -92,6 +117,9 @@ Column {
         font.pixelSize: Style.font.body
         background: null
         onTextChanged: root.bodyEdited(text)
+        // Before the TextArea itself, which would otherwise swallow Return as
+        // a newline before anything here could look at the modifiers.
+        Keys.onPressed: function(event) { root.handleKey(event) }
       }
     }
   }

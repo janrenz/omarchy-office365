@@ -410,12 +410,186 @@ class FolderPaths(unittest.TestCase):
         self.assertEqual(graph.messages_path(""), "/me/mailFolders/inbox/messages")
 
 
+SAFELINK = ("https://eur03.safelinks.protection.outlook.com/?url="
+            "https%3A%2F%2Fcontoso.sharepoint.com%2Fsites%2Fteam%2FReport.docx"
+            "&data=05%7C02%7Cjan%40example.com&sdata=Zm9v%3D&reserved=0")
+
+
+class Linkify(unittest.TestCase):
+    """Plain-text mail, with its links put back.
+
+    Graph's HTML-to-text conversion keeps every link in a form nothing can use:
+    two hundred characters of safelink behind the words, or run straight into
+    them. These are the shapes it actually writes.
+    """
+
+    def render(self, text):
+        return graph.linkify(graph.tidy_body(text))
+
+    def test_a_labelled_link_keeps_its_words_and_gains_its_address(self):
+        out = self.render("Here: [Open the report]<%s>" % SAFELINK)
+        self.assertIn(">Open the report</a>", out)
+        # The safelink is what gets followed, so the tenant's own checking
+        # still runs. Only the display is unwrapped.
+        self.assertIn('href="https://eur03.safelinks', out)
+
+    def test_a_link_run_into_the_words_before_it_is_set_off(self):
+        """The bug this fixes: `Unsubscribe<url>` came out as one word."""
+        out = self.render("Unsubscribe<https://short.example/u>")
+        self.assertIn("Unsubscribe (", out)
+        self.assertNotIn("Unsubscribehttps", out)
+
+    def test_one_that_was_already_spaced_is_left_alone(self):
+        out = self.render("Raw link: <https://short.example/u>")
+        self.assertNotIn("(", out)
+
+    def test_a_safelink_is_shown_as_where_it_really_goes(self):
+        out = self.render("See %s for it." % SAFELINK)
+        self.assertIn(">https://contoso.sharepoint.com/sites/team/Report.docx<", out)
+        self.assertIn('href="https://eur03.safelinks', out)
+
+    def test_a_long_address_is_shortened_to_host_and_tail(self):
+        long_url = "https://contoso.sharepoint.com/sites/team/docs/2026/q1/Report.docx?web=1&x=" + "y" * 80
+        out = self.render("Raw: <%s>" % long_url)
+        self.assertIn(">contoso.sharepoint.com/\u2026/Report.docx<", out)
+        # Shortened for reading only - the whole thing is still what opens.
+        self.assertIn(long_url.replace("&", "&amp;"), out)
+
+    def test_a_short_address_is_left_whole(self):
+        out = self.render("Go to https://example.com/a/b")
+        self.assertIn(">https://example.com/a/b<", out)
+
+    def test_a_full_stop_ends_the_sentence_not_the_address(self):
+        out = self.render("Go to https://example.com/a.")
+        self.assertIn('href="https://example.com/a"', out)
+        self.assertTrue(out.endswith("</a>."), out)
+
+    def test_brackets_that_are_not_a_link_are_left_as_prose(self):
+        out = self.render("Re: [EXTERNAL] the [1] footnote")
+        self.assertEqual(out, "Re: [EXTERNAL] the [1] footnote")
+
+    def test_an_address_is_not_mistaken_for_a_link(self):
+        out = self.render("Write to jan@example.com")
+        self.assertNotIn("<a ", out)
+
+    def test_what_the_sender_wrote_can_never_become_markup(self):
+        """The whole reason this needs no sanitiser: every character out of the
+        message is escaped, so the only tags present are the ones built here."""
+        out = self.render("Beware <script>alert(1)</script> and 5 < 6 & 7 > 2")
+        self.assertNotIn("<script", out)
+        self.assertIn("&lt;script&gt;", out)
+        self.assertIn("5 &lt; 6 &amp; 7 &gt; 2", out)
+
+    def test_a_javascript_target_inside_a_safelink_is_not_offered(self):
+        """The url parameter is text an attacker can choose. Unwrapping it to
+        something that is not an address must show the safelink instead."""
+        bad = ("https://eur03.safelinks.protection.outlook.com/"
+               "?url=javascript%3Aalert(1)&data=x")
+        self.assertEqual(graph.unwrap_safelink(bad), bad)
+
+    def test_line_breaks_survive_the_crossing(self):
+        self.assertEqual(self.render("One\n\nTwo"), "One<br>\n<br>\nTwo")
+
+    def test_an_ordinary_host_is_not_treated_as_a_safelink(self):
+        plain = "https://example.com/?url=https%3A%2F%2Felsewhere.example"
+        self.assertEqual(graph.unwrap_safelink(plain), plain)
+
+
 class Emitted(Exception):
     """graph.out() reached, carrying what it was about to print."""
 
     def __init__(self, payload):
         super().__init__("emitted")
         self.payload = payload
+
+
+class MoveArgs:
+    account = "work"
+    id = "MSG-1"
+    folder = "FOLDER-ARCHIVE"
+
+
+class Move(unittest.TestCase):
+    """Filing a message in another folder.
+
+    The move is a write, so a read-only mailbox has to be turned away before
+    the request rather than after a 403 - and Graph hands back a *new* id for
+    the message in its new home, which the window needs to be told about.
+    """
+
+    def run_move(self, write=True, response=(201, {"id": "MSG-1-IN-ARCHIVE"}), **overrides):
+        self.calls = []
+
+        def http(url, method="GET", data=None, json_body=None, headers=None, timeout=20):
+            self.calls.append({"url": url, "method": method, "body": json_body})
+            return response
+
+        args = MoveArgs()
+        for key, value in overrides.items():
+            setattr(args, key, value)
+
+        patched = {
+            "read_json": lambda *a, **k: {"write": write, "scopes": "Mail.ReadWrite"},
+            "access_token": lambda alias, account: ("token", account),
+            "http": http,
+            "out": lambda payload: (_ for _ in ()).throw(Emitted(payload)),
+        }
+        original = {name: getattr(graph, name) for name in patched}
+        for name, stub in patched.items():
+            setattr(graph, name, stub)
+        try:
+            graph.cmd_move(args)
+        except Emitted as emitted:
+            return emitted.payload
+        finally:
+            for name, value in original.items():
+                setattr(graph, name, value)
+        raise AssertionError("cmd_move emitted nothing")
+
+    def test_the_destination_goes_to_the_move_endpoint(self):
+        result = self.run_move()
+        self.assertTrue(result["ok"])
+        self.assertTrue(self.calls[0]["url"].endswith("/messages/MSG-1/move"))
+        self.assertEqual(self.calls[0]["method"], "POST")
+        self.assertEqual(self.calls[0]["body"], {"destinationId": "FOLDER-ARCHIVE"})
+
+    def test_the_new_id_comes_back_with_the_old_one(self):
+        """An id names a message in a folder, so the move changes it. A caller
+        that wants to follow the message needs both."""
+        result = self.run_move()
+        self.assertEqual(result["id"], "MSG-1")
+        self.assertEqual(result["newId"], "MSG-1-IN-ARCHIVE")
+        self.assertEqual(result["folder"], "FOLDER-ARCHIVE")
+
+    def test_an_id_with_punctuation_is_escaped_into_the_path(self):
+        self.run_move(id="AA/BB+CC==")
+        self.assertTrue(self.calls[0]["url"].endswith("/messages/AA%2FBB%2BCC%3D%3D/move"))
+
+    def test_a_read_only_mailbox_is_refused_before_the_request(self):
+        result = self.run_move(write=False)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "write_required")
+        self.assertEqual(self.calls, [])
+
+    def test_no_destination_is_refused_rather_than_sent(self):
+        result = self.run_move(folder="   ")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "no_folder")
+        self.assertEqual(self.calls, [])
+
+    def test_a_refused_move_is_reported_as_itself(self):
+        result = self.run_move(
+            response=(403, {"error": {"message": "Access is denied"}}))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "move_failed")
+        self.assertIn("Access is denied", result["error"]["message"])
+
+    def test_a_no_content_answer_is_still_a_move(self):
+        """Graph normally returns the moved message; 204 with nothing in it is
+        not a failure, only a move with no new id to report."""
+        result = self.run_move(response=(204, None))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["newId"], "")
 
 
 class ComposeArgs:
