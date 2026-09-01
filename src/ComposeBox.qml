@@ -232,61 +232,39 @@ Column {
       decodeURIComponent(String(selectedFile).replace(/^file:\/\//, "")))
   }
 
-  Row {
-    spacing: Style.spacing.sm
+  // Measured at 488px against a reading column that is about 515px at the
+  // window's default size - it fit, and stopped fitting the moment the window
+  // was narrowed or the sidebar opened. ActionBar keeps whatever fits and puts
+  // the rest one press away. Send leads: it is the one this box exists for.
+  ActionBar {
+    width: parent.width
+    fg: root.fg
+    dim: root.dim
+    accent: root.accent
+    fontFamily: root.fontFamily
+    fontSize: Style.font.caption
 
-    Button {
-      enabled: !root.running
-      text: "Attach"
-      tooltipText: "A file to send with this - up to 3 MB in total, which is what one request to Outlook can carry"
-      bordered: true
-      foreground: root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: attachDialog.open()
-    }
+    actions: [
+      { text: root.running ? "Sending\u2026" : "Send",
+        visible: root.canSend, enabled: !root.running, danger: true,
+        trigger: function() { root.sendRequested() } },
 
-    Button {
-      visible: root.canSend
-      enabled: !root.running
-      text: root.running ? "Sending…" : "Send"
-      bordered: true
-      foreground: root.accent
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.sendRequested()
-    }
+      { text: "Attach",
+        tooltip: "A file to send with this - up to 3 MB in total, which is what one request to Outlook can carry",
+        enabled: !root.running,
+        trigger: function() { attachDialog.open() } },
 
-    Button {
-      enabled: !root.running
-      text: "Save as draft"
-      tooltipText: "Builds it in Outlook and opens it there"
-      bordered: true
-      foreground: root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.draftRequested()
-    }
+      { text: "Save as draft", tooltip: "Builds it in Outlook and opens it there",
+        enabled: !root.running,
+        trigger: function() { root.draftRequested() } },
 
-    Button {
-      visible: !root.canSend || root.sendBlocked
-      text: "Allow sending…"
-      tooltipText: "Sign in again to let this widget send mail"
-      bordered: true
-      foreground: root.dim
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.permissionRequested()
-    }
+      { text: "Allow sending\u2026", muted: true,
+        tooltip: "Sign in again to let this widget send mail",
+        visible: !root.canSend || root.sendBlocked,
+        trigger: function() { root.permissionRequested() } },
 
-    Button {
-      enabled: !root.running
-      text: "Cancel"
-      bordered: true
-      foreground: root.dim
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.cancelRequested()
-    }
+      { text: "Cancel", enabled: !root.running, muted: true,
+        trigger: function() { root.cancelRequested() } }
+    ]
   }
 }

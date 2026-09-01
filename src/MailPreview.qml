@@ -42,6 +42,9 @@ Column {
   // leaves composing off.
   signal moveRequested()
   signal writeAccessRequested()
+  // Go and get the pictures this message points at elsewhere. Only raised by
+  // the button below, and only for the message being read.
+  signal loadImagesRequested()
   // Answering a message. Offered only where there is somewhere to type: the
   // window sets canCompose, the bar dropdown leaves it off, since a popup that
   // closes the moment you click away is no place to write a reply.
@@ -53,6 +56,12 @@ Column {
 
   readonly property string subject: detail && detail.subject ? detail.subject
                                     : (mail && mail.subject ? mail.subject : "")
+
+  // How many pictures were left out because fetching them would have told the
+  // sender the message was open. Zero on a plain-text body, and zero once they
+  // have been fetched, which is what takes the button away again.
+  readonly property int blockedImages: detail && detail.blockedImages
+                                       ? Number(detail.blockedImages) : 0
 
   function people(list) {
     var names = []
@@ -290,130 +299,85 @@ Column {
     font.pixelSize: Style.font.caption
   }
 
-  Row {
-    spacing: Style.spacing.sm
+  // Every action the pane offers, as data rather than as ten Buttons in a Row
+  // that does not wrap. ActionBar measures them against the width it is given
+  // and puts what will not fit behind a button that reveals it, which is what
+  // makes this usable in the bar's popup as well as in the window.
+  //
+  // Order is priority: what is listed first is what survives on one line.
+  // Open leads because it is the one action that is always available, and
+  // Delete trails because reaching past a "+3 more" for it is a feature.
+  ActionBar {
+    width: parent.width
+    fg: root.fg
+    dim: root.dim
+    accent: root.accent
+    fontFamily: root.fontFamily
+    fontSize: Style.font.caption
 
-    Button {
-      text: "Open"
-      bordered: true
-      foreground: root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.openRequested()
-    }
+    actions: [
+      { text: "Open", trigger: function() { root.openRequested() } },
 
-    // Writing needs the same Mail.ReadWrite that marking does - even a draft
-    // is a write - so these keep company with the buttons above rather than
-    // appearing on a read-only mailbox and failing.
-    Button {
-      visible: root.canCompose && root.canWrite
-      enabled: !root.actionRunning
-      text: "Reply"
-      bordered: true
-      foreground: root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.replyRequested()
-    }
+      // Only where there is something to load, and gone again once it is
+      // loaded. Says how many, because "load 14 images" and "load 1 image"
+      // are different decisions about how much of this the sender learns.
+      { text: root.blockedImages === 1 ? "Load 1 image"
+                                       : ("Load " + root.blockedImages + " images"),
+        tooltip: "Fetches them from the sender's servers, which tells them the "
+                 + "message was opened. Pictures it carries itself are already shown.",
+        visible: root.blockedImages > 0,
+        enabled: !root.loading,
+        trigger: function() { root.loadImagesRequested() } },
 
-    Button {
-      visible: root.canCompose && root.canWrite
-      enabled: !root.actionRunning
-      text: "Reply all"
-      bordered: true
-      foreground: root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.replyAllRequested()
-    }
+      // Writing needs the same Mail.ReadWrite that marking does - even a draft
+      // is a write - so these are absent on a read-only mailbox rather than
+      // present and failing.
+      { text: "Reply", visible: root.canCompose && root.canWrite,
+        enabled: !root.actionRunning,
+        trigger: function() { root.replyRequested() } },
+      { text: "Reply all", visible: root.canCompose && root.canWrite,
+        enabled: !root.actionRunning,
+        trigger: function() { root.replyAllRequested() } },
 
-    Button {
-      visible: root.canCompose && root.canWrite
-      enabled: !root.actionRunning
-      text: "Forward"
-      bordered: true
-      foreground: root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.forwardRequested()
-    }
+      // Changing mail needs permission this plugin does not ask for by
+      // default, so these appear only once a mailbox has granted it.
+      { text: root.mail && root.mail.read ? "Mark unread" : "Mark read",
+        visible: root.canWrite,
+        trigger: function() { root.markRequested(!(root.mail && root.mail.read)) } },
 
-    // Reading does not need write access and neither does asking about it, so
-    // this one keeps company with Open rather than with Reply.
-    Button {
-      visible: root.canAgent
-      text: "Ask agent"
-      tooltipText: "Open your coding agent on this message"
-      bordered: true
-      foreground: root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.agentRequested()
-    }
+      // The follow-up flag Outlook shows in its own column. Separate from read
+      // state on purpose: flagging is "come back to this", which is most often
+      // what one wants for a message one has just read.
+      { text: root.mail && root.mail.flagged ? "Unflag" : "Flag",
+        tooltip: root.mail && root.mail.flagged
+                 ? "Clear the follow-up flag"
+                 : "Flag it for follow-up, in Outlook too",
+        visible: root.canWrite, enabled: !root.actionRunning,
+        danger: !!(root.mail && root.mail.flagged),
+        trigger: function() { root.flagRequested(!(root.mail && root.mail.flagged)) } },
 
-    // Changing mail needs permission this plugin does not ask for by
-    // default, so these appear only once a mailbox has granted it.
-    Button {
-      visible: root.canWrite
-      text: root.mail && root.mail.read ? "Mark unread" : "Mark read"
-      bordered: true
-      foreground: root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.markRequested(!(root.mail && root.mail.read))
-    }
+      { text: "Forward", visible: root.canCompose && root.canWrite,
+        enabled: !root.actionRunning,
+        trigger: function() { root.forwardRequested() } },
 
-    // The follow-up flag Outlook shows in its own column. Separate from read
-    // state on purpose: flagging is "come back to this", which is most often
-    // what one wants for a message one has just read.
-    Button {
-      visible: root.canWrite
-      enabled: !root.actionRunning
-      text: root.mail && root.mail.flagged ? "Unflag" : "Flag"
-      tooltipText: root.mail && root.mail.flagged
-                   ? "Clear the follow-up flag"
-                   : "Flag it for follow-up, in Outlook too"
-      bordered: true
-      foreground: root.mail && root.mail.flagged ? root.accent : root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.flagRequested(!(root.mail && root.mail.flagged))
-    }
+      // Reading does not need write access and neither does asking about it,
+      // so this one keeps company with Open rather than with Reply.
+      { text: "Ask agent", tooltip: "Open your coding agent on this message",
+        visible: root.canAgent,
+        trigger: function() { root.agentRequested() } },
 
-    Button {
-      visible: root.canMove && root.canWrite
-      enabled: !root.actionRunning
-      text: "Move…"
-      tooltipText: "File it in another folder of this mailbox"
-      bordered: true
-      foreground: root.fg
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.moveRequested()
-    }
+      { text: "Move\u2026", tooltip: "File it in another folder of this mailbox",
+        visible: root.canMove && root.canWrite, enabled: !root.actionRunning,
+        trigger: function() { root.moveRequested() } },
 
-    Button {
-      visible: root.canWrite
-      enabled: !root.actionRunning
-      text: "Delete"
+      { text: "Delete", tooltip: "Moves it to Deleted Items",
+        visible: root.canWrite, enabled: !root.actionRunning, danger: true,
+        trigger: function() { root.deleteRequested() } },
 
-      tooltipText: "Moves it to Deleted Items"
-      bordered: true
-      foreground: root.accent
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.deleteRequested()
-    }
-
-    Button {
-      visible: !root.canWrite
-      text: "Allow changes…"
-      tooltipText: "Sign in again to let this widget mark, move and delete mail"
-      bordered: true
-      foreground: root.dim
-      fontFamily: root.fontFamily
-      fontSize: Style.font.caption
-      onClicked: root.writeAccessRequested()
-    }
+      { text: "Allow changes\u2026", muted: true,
+        tooltip: "Sign in again to let this widget mark, move and delete mail",
+        visible: !root.canWrite,
+        trigger: function() { root.writeAccessRequested() } }
+    ]
   }
 }

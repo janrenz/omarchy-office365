@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "caseonline.omarchy.office365",
   "name": "Office 365 Mail & Calendar",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "author": "Kees Schollaart",
   "license": "MIT",
   "description": "Unread Outlook mail and your agenda in the Omarchy bar. One widget can carry several mailboxes, or add one per mailbox. Needs python3 (standard library only) and talks to Microsoft Graph, nothing else.",
@@ -139,7 +139,7 @@
         "key": "htmlBody",
         "type": "boolean",
         "label": "Keep the message's own formatting",
-        "description": "Render headings, lists, tables and links instead of flattening to text. Images and anything else remote are stripped out before rendering, so nothing in a message can phone home.",
+        "description": "Render headings, lists, tables, links and pictures instead of flattening to text. A picture the message carries itself is shown; one held on the sender's servers is left out and counted, because fetching it would tell them the message was opened. The reading pane offers to load those per message.",
         "defaultValue": false
       },
       {

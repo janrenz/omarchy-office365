@@ -785,6 +785,7 @@ Panel {
               if (root.service && root.service.previewMail)
                 root.service.startLogin(String(root.service.previewMail.alias), true)
             }
+            onLoadImagesRequested: if (root.service) root.service.loadPreviewImages()
           }
         }
 

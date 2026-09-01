@@ -1490,6 +1490,7 @@ Item {
                   onWriteAccessRequested: {
                     if (mailView.previewMail) mailView.startLogin(mailView.previewMail.alias, true)
                   }
+                  onLoadImagesRequested: mailView.loadPreviewImages()
                 }
               }
 

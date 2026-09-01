@@ -337,6 +337,9 @@ Item {
   // The body this host is waiting for, so an answer to somebody else's request
   // - or to one this host has since moved on from - is ignored.
   property string previewKey: ""
+  // Whether the pictures on the sender's servers were asked for, for the one
+  // message being read. Reset by every other way into the pane.
+  property bool previewImages: false
 
   function showPreview(mail) {
     if (!mail || !mail.id) return
@@ -355,11 +358,26 @@ Item {
       previewError = "Nothing to read this message with yet"
       return
     }
+    previewImages = false
     previewLoading = true
-    previewKey = hub.requestBody(mail.alias, mail.id, htmlBody, demo)
+    previewKey = hub.requestBody(mail.alias, mail.id, htmlBody, demo, false)
+  }
+
+  // Go back for the pictures this message points at on somebody else's server.
+  //
+  // Per message and never remembered: the reader decides about this sender,
+  // this once. Anything stickier would be a setting, and a setting that says
+  // "tell every mailing list when I open their mail" is not one this offers.
+  function loadPreviewImages() {
+    if (!previewMail || !hub || previewImages) return
+    previewImages = true
+    previewLoading = true
+    previewError = ""
+    previewKey = hub.requestBody(previewMail.alias, previewMail.id, htmlBody, demo, true)
   }
 
   function closePreview() {
+    previewImages = false
     holdOnly("")
     previewMail = null
     previewDetail = null

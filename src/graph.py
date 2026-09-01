@@ -27,6 +27,7 @@ import json
 import os
 import re
 import stat
+import struct
 import sys
 import time
 import urllib.error
@@ -730,6 +731,41 @@ def graph_collect(token, path, params, extra_headers=None, cap=500):
             break
         status, payload = graph_get_url(token, next_link, extra_headers)
     return status, items[:cap], payload, complete and len(items) <= cap
+
+
+def graph_inline_images(token, message_id, markup):
+    """Content-ID -> bytes for the pictures a Graph message carries itself.
+
+    Only asked for when the body actually points at one. An extra request per
+    message read would be a poor trade for the mail that has no logo in it,
+    and most does not - so the markup is searched for a `cid:` first, and the
+    attachment list is fetched only if it finds one.
+
+    This talks to Microsoft, which the widget is already talking to, and not to
+    whoever sent the message. It is the same request the paperclip would make.
+    """
+    if "cid:" not in str(markup or "").lower():
+        return {}
+    status, items, payload, complete = graph_collect(
+        token,
+        "/me/messages/" + urllib.parse.quote(message_id, safe="") + "/attachments",
+        {"$select": "contentId,contentType,contentBytes,isInline,size"},
+        cap=IMAGE_MAX_COUNT,
+    )
+    if status != 200:
+        return {}
+    found = {}
+    for item in items:
+        identifier = str(item.get("contentId") or "").strip().strip("<>")
+        if identifier == "" or identifier in found:
+            continue
+        if not str(item.get("contentType") or "").lower().startswith("image/"):
+            continue
+        try:
+            found[identifier] = base64.b64decode(item.get("contentBytes") or "")
+        except (ValueError, base64.binascii.Error):
+            continue
+    return found
 
 
 def graph_error(payload, fallback):
@@ -1727,25 +1763,267 @@ _HTML_BAD_HREF = re.compile(
 )
 
 
-def sanitize_html(markup):
-    """A mail body safe to hand to Qt's rich text.
+# Images in a body, once somebody has asked for them.
+#
+# They arrive as data: URIs rather than as files on disk. Qt's rich text takes
+# one - measured, it draws the bitmap exactly as it draws a file - and that
+# leaves no cache directory to create, permission to get right, or stale
+# picture to clean up later. The cost is that base64 is a third larger than the
+# bytes, which is what the budgets below are for.
+IMAGE_MAX_BYTES = 512 * 1024
+IMAGE_TOTAL_BYTES = 4 * 1024 * 1024
+IMAGE_MAX_COUNT = 40
+# Wide enough for a mail banner, narrow enough for the reading pane. A rich
+# text document cannot be told "no wider than the page", so anything larger is
+# given an explicit size here instead of being clipped by the pane.
+IMAGE_MAX_WIDTH = 560
+IMAGE_FETCH_TIMEOUT = 10
+
+# What the bytes actually are, rather than what a header claimed. A Content-Type
+# is written by whoever served the file, and the point of fetching a remote
+# image at all is that somebody else chose it.
+#
+# SVG is refused even though Qt can draw it: it is a document, not a bitmap,
+# and it can carry its own references out to the network - the one thing this
+# whole path exists to keep out.
+_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"BM", "image/bmp"),
+)
+
+
+def image_kind(data):
+    """The image type of these bytes, or "" for anything that is not one."""
+    raw = bytes(data or b"")
+    for magic, kind in _IMAGE_MAGIC:
+        if raw.startswith(magic):
+            return kind
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def image_size(data, kind):
+    """(width, height) in pixels, or None when it cannot be read cheaply.
+
+    Enough of each header to find the two numbers, because the alternative is a
+    dependency and there is none of those here. A format this cannot read is
+    not an error - the image is simply drawn at whatever size it is.
+    """
+    raw = bytes(data or b"")
+    try:
+        if kind == "image/png" and len(raw) >= 24:
+            width, height = struct.unpack(">II", raw[16:24])
+            return (width, height)
+        if kind == "image/gif" and len(raw) >= 10:
+            width, height = struct.unpack("<HH", raw[6:10])
+            return (width, height)
+        if kind == "image/bmp" and len(raw) >= 26:
+            width, height = struct.unpack("<ii", raw[18:26])
+            return (abs(width), abs(height))
+        if kind == "image/jpeg":
+            # Walk the segments to the frame header, which is the only place
+            # the size is written. Everything before it is a length-prefixed
+            # segment to be stepped over.
+            at = 2
+            while at + 9 < len(raw):
+                if raw[at] != 0xFF:
+                    return None
+                marker = raw[at + 1]
+                if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                    at += 2
+                    continue
+                length = struct.unpack(">H", raw[at + 2:at + 4])[0]
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    height, width = struct.unpack(">HH", raw[at + 5:at + 9])
+                    return (width, height)
+                at += 2 + length
+        if kind == "image/webp" and len(raw) >= 30 and raw[12:16] == b"VP8X":
+            width = int.from_bytes(raw[24:27], "little") + 1
+            height = int.from_bytes(raw[27:30], "little") + 1
+            return (width, height)
+    except (struct.error, ValueError, IndexError):
+        return None
+    return None
+
+
+class ImagePolicy:
+    """What an <img> in this body is allowed to become.
+
+    One per message, because the budgets are per message: forty images and four
+    megabytes is a generous newsletter and an absurd one, and a body that runs
+    past either stops embedding rather than growing without limit.
+
+    `inline` holds what already came with the message, keyed by Content-ID with
+    the angle brackets off - those cost nothing to show, since the bytes are
+    already here and no request is made for them. `fetch_remote` is the button
+    the reader pressed: without it a remote image is counted and dropped, which
+    is what lets the pane offer to load them.
+    """
+
+    def __init__(self, inline=None, fetch_remote=False):
+        self.inline = dict(inline or {})
+        self.fetch_remote = bool(fetch_remote)
+        self.shown = 0
+        self.blocked = 0
+        self.budget = IMAGE_TOTAL_BYTES
+
+    def _embed(self, data):
+        """One image as an <img>, or "" when it is not one or will not fit."""
+        raw = bytes(data or b"")
+        kind = image_kind(raw)
+        if kind == "" or len(raw) > IMAGE_MAX_BYTES:
+            return ""
+        if len(raw) > self.budget or self.shown >= IMAGE_MAX_COUNT:
+            return ""
+        self.budget -= len(raw)
+        self.shown += 1
+
+        sizing = ""
+        size = image_size(raw, kind)
+        if size and size[0] > IMAGE_MAX_WIDTH and size[0] > 0:
+            scaled = max(1, int(round(size[1] * IMAGE_MAX_WIDTH / float(size[0]))))
+            sizing = ' width="%d" height="%d"' % (IMAGE_MAX_WIDTH, scaled)
+        return '<img src="data:%s;base64,%s"%s>' % (
+            kind, base64.b64encode(raw).decode("ascii"), sizing)
+
+    def fetch(self, url):
+        """A remote image, or None. Never raises - a picture is not worth an error."""
+        try:
+            request = urllib.request.Request(url, headers={
+                # No cookie, no referrer, and a name that says what this is.
+                # A tracking pixel counts the request either way; what it must
+                # not get is who was reading, or which message it was in.
+                "User-Agent": "omarchy-office365",
+                "Accept": "image/*",
+            })
+            with urllib.request.urlopen(request, timeout=IMAGE_FETCH_TIMEOUT) as response:
+                if getattr(response, "status", 200) not in (200, None):
+                    return None
+                return response.read(IMAGE_MAX_BYTES + 1)
+        except Exception:
+            # Deliberately everything: a socket error, a redirect loop, a TLS
+            # failure and a malformed URL all mean the same thing here, and a
+            # body that renders without one picture beats one that does not
+            # render at all.
+            return None
+
+    def resolve(self, source):
+        """What this img's src becomes: an <img> of its own, or nothing."""
+        url = str(source or "").strip()
+        low = url.lower()
+
+        if low.startswith("cid:"):
+            found = self.inline.get(url[4:].strip().strip("<>"))
+            return self._embed(found) if found else ""
+
+        if low.startswith("data:"):
+            # Already carried by the message; the only question is whether it
+            # is really an image, which _embed answers from the bytes.
+            head, _, encoded = url.partition(",")
+            if "base64" not in head.lower():
+                return ""
+            try:
+                return self._embed(base64.b64decode(encoded, validate=False))
+            except (ValueError, base64.binascii.Error):
+                return ""
+
+        if low.startswith(("http://", "https://")):
+            if not self.fetch_remote:
+                self.blocked += 1
+                return ""
+            data = self.fetch(url)
+            if data is None or len(data) > IMAGE_MAX_BYTES:
+                self.blocked += 1
+                return ""
+            shown = self._embed(data)
+            if shown == "":
+                self.blocked += 1
+            return shown
+
+        # file:, javascript:, anything else somebody thought to try.
+        return ""
+
+
+# An <img>'s src, whichever way it was quoted.
+_HTML_IMG_SRC = re.compile(
+    r'''(?is)\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))''')
+# Where an image the policy allowed waits out the attribute strip below.
+_PARKED_IMAGE = re.compile("\x00i(\\d+)\x00")
+
+
+def sanitize_html(markup, policy=None):
+    """The sanitised body, uncapped. See `sanitized` for what the pane gets."""
+    return sanitized(markup, policy)[0]
+
+
+def sanitized(markup, policy=None, cap=None):
+    """(body, truncated) - a mail body safe to hand to Qt's rich text.
 
     Not a general-purpose sanitiser and not trying to be: Qt renders a small
     subset of HTML, so this only has to remove what that subset would act on.
-    What it removes is everything that fetches (images, styles, frames),
-    everything that runs (script, event handlers, javascript: links), and
-    everything that could submit. What survives is text, structure and links.
+    What it removes is everything that runs (script, event handlers,
+    javascript: links) and everything that could submit. What survives is text,
+    structure and links.
+
+    Images are the exception, and `policy` is the exception's shape. Without
+    one they are dropped whole, which is what this always did and what a
+    message with no reader watching still gets: a remote <img> is a tracking
+    pixel that fires from the reader's own address whether or not anybody meant
+    to load it. With one, an image the policy will vouch for comes back as its
+    own bytes - so it is still true that nothing in the rendered body reaches
+    out to anybody. See ImagePolicy for who is allowed to fetch what.
+
+    `cap` is a limit on the *markup*, applied while the images are still
+    standing in as markers. Applying it afterwards would count a photograph's
+    own bytes against a budget meant for tags and words, and one embedded image
+    would swallow the whole message.
     """
     text = str(markup or "")
     text = _HTML_COMMENT.sub("", text)
     text = _HTML_DROP_BLOCKS.sub("", text)
-    text = _HTML_IMAGES.sub("", text)
+
+    kept = []
+    if policy is None:
+        text = _HTML_IMAGES.sub("", text)
+    else:
+        # The replacement cannot be written in yet. `_HTML_REMOTE_ATTRS` below
+        # takes `src` off every tag it finds, and it has no way to know this
+        # one is bytes rather than an address - so the image leaves a marker
+        # and returns once there is nothing left to strip. NULs go first, so
+        # nothing in the message can be wearing a marker of its own.
+        text = text.replace("\x00", "")
+
+        def park(match):
+            found = _HTML_IMG_SRC.search(match.group(0))
+            source = "" if not found else (found.group(1) or found.group(2) or found.group(3) or "")
+            shown = policy.resolve(source)
+            if shown == "":
+                return ""
+            kept.append(shown)
+            return "\x00i%d\x00" % (len(kept) - 1)
+
+        text = _HTML_IMAGES.sub(park, text)
+
     text = _HTML_DROP_TAGS.sub("", text)
     text = _HTML_EVENT_ATTRS.sub("", text)
     text = _HTML_REMOTE_ATTRS.sub("", text)
     text = _HTML_CSS_URL.sub("none", text)
     text = _HTML_BAD_HREF.sub("", text)
-    return text.strip()
+
+    truncated = cap is not None and len(text) > cap
+    if truncated:
+        text = text[:cap]
+    if kept:
+        # A marker the cut landed inside no longer matches, so its image is
+        # simply not restored. That is the right way round: a marker holds no
+        # angle brackets, so half of one is inert text rather than a broken tag.
+        text = _PARKED_IMAGE.sub(lambda m: kept[int(m.group(1))], text)
+        text = _PARKED_IMAGE.sub("", text)
+    return text.strip(), truncated
 
 
 def recipients(values):
@@ -1756,15 +2034,14 @@ def recipients(values):
     return people
 
 
-def render_body(raw, served_html, want_html):
+def render_body(raw, served_html, want_html, policy=None):
     """(body, truncated, format) for a pane, from whichever transport read it.
 
     Capped before anything is built from it, not after: cutting finished markup
     at a fixed length lands in the middle of a tag sooner or later.
     """
     if want_html and served_html:
-        body = sanitize_html(raw)
-        return body[:HTML_BODY_CAP], len(body) > HTML_BODY_CAP, "html"
+        return sanitized(raw, policy, HTML_BODY_CAP) + ("html",)
     tidied = tidy_body(raw)
     # Links go back in as links. The result is markup, but markup this file
     # wrote out of escaped text rather than anything a sender sent, which is
@@ -1794,6 +2071,9 @@ def cmd_message(args):
 
     timezone_name = local_timezone()
     want_html = bool(getattr(args, "html", False))
+    # Remote images are a per-message decision the reader makes, not a setting:
+    # the pane counts what it left out and offers to go and get them.
+    load_images = bool(getattr(args, "load_images", False))
 
     if transport_of(account) == TRANSPORT_IMAP:
         message = imap_run(need_imap().message, account, token, args.id, want_html)
@@ -1811,7 +2091,8 @@ def cmd_message(args):
             # somewhere else, which is the thing this pane exists to avoid.
             raw = need_imap().strip_markup(raw, keep_links=True)
             served_html = False
-        body, truncated, body_format = render_body(raw, served_html, want_html)
+        policy = ImagePolicy(message.get("inlineImages"), load_images) if want_html else None
+        body, truncated, body_format = render_body(raw, served_html, want_html, policy)
         out(dict(ok=True, id=message["id"], subject=message["subject"], **{
             "from": message["from"],
             "fromAddress": message["fromAddress"],
@@ -1823,6 +2104,8 @@ def cmd_message(args):
             "body": body,
             "truncated": truncated,
             "bodyFormat": body_format,
+            "images": policy.shown if policy else 0,
+            "blockedImages": policy.blocked if policy else 0,
         }))
         return
 
@@ -1843,7 +2126,10 @@ def cmd_message(args):
     served_html = str((payload.get("body") or {}).get("contentType") or "").lower() == "html"
     # Capped before anything is built from it, not after: cutting finished
     # markup at a fixed length lands in the middle of a tag sooner or later.
-    body, truncated, body_format = render_body(raw, served_html, want_html)
+    policy = None
+    if want_html and served_html:
+        policy = ImagePolicy(graph_inline_images(token, args.id, raw), load_images)
+    body, truncated, body_format = render_body(raw, served_html, want_html, policy)
     out(
         {
             "ok": True,
@@ -1860,6 +2146,8 @@ def cmd_message(args):
             # button is one click away for the whole thing.
             "body": body,
             "truncated": truncated,
+            "images": policy.shown if policy else 0,
+            "blockedImages": policy.blocked if policy else 0,
             # "html" for the message's own markup, "linked" for markup built
             # here from its plain text. The pane picks its text format from
             # this rather than from the setting, so a plain-text message in an
@@ -2437,6 +2725,10 @@ def main():
     message.add_argument("--demo", action="store_true", help="synthetic body, matching --demo fetch")
     message.add_argument("--html", action="store_true",
                          help="keep the message's own formatting, with everything remote stripped out")
+    message.add_argument("--load-images", action="store_true",
+                         help="also fetch the images this message points at on the sender's "
+                              "servers, which tells them it was read. Pictures it carries "
+                              "itself are shown either way.")
     message.set_defaults(func=cmd_message)
 
     mark = with_account("mark", "mark a message read or unread")

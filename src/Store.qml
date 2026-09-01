@@ -258,12 +258,16 @@ Item {
   signal bodyReady(string cacheKey, var detail)
   signal bodyFailed(string cacheKey, string message)
 
-  function bodyKey(id, wantHtml) {
+  // Images are part of the key, not a flag beside it: a body fetched without
+  // them and the same body with them are two different documents, and caching
+  // them under one name is how pressing the button would appear to do nothing.
+  function bodyKey(id, wantHtml, withImages) {
     return String(id) + (wantHtml === true ? "|html" : "|text")
+           + (withImages === true ? "|img" : "")
   }
 
-  function cachedBody(id, wantHtml) {
-    return bodies[bodyKey(id, wantHtml)] || null
+  function cachedBody(id, wantHtml, withImages) {
+    return bodies[bodyKey(id, wantHtml, withImages)] || null
   }
 
   function rememberBody(key, detail) {
@@ -284,8 +288,8 @@ Item {
   property var bodyPending: ({})
   property var bodyQueue: []
 
-  function requestBody(alias, id, wantHtml, demo) {
-    var key = bodyKey(id, wantHtml)
+  function requestBody(alias, id, wantHtml, demo, withImages) {
+    var key = bodyKey(id, wantHtml, withImages)
     var cached = bodies[key]
     if (cached) {
       // Still asynchronous, so a caller that sets its loading flag after this
@@ -299,7 +303,8 @@ Item {
     next[key] = true
     bodyPending = next
     var queued = bodyQueue.slice()
-    queued.push({ key: key, alias: String(alias), id: String(id), html: wantHtml === true, demo: demo === true })
+    queued.push({ key: key, alias: String(alias), id: String(id), html: wantHtml === true,
+                  demo: demo === true, images: withImages === true })
     bodyQueue = queued
     pumpBodies()
     return key
@@ -313,6 +318,8 @@ Item {
     // asks Graph about an id it has never seen.
     if (next.demo) command.push("--demo")
     if (next.html) command.push("--html")
+    // Only ever set by the reader pressing the button on this one message.
+    if (next.images) command.push("--load-images")
     messageProc.command = command
     messageProc.running = true
   }

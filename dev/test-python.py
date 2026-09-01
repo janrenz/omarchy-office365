@@ -1295,6 +1295,202 @@ class SanitizeHtml(unittest.TestCase):
         self.assertEqual(graph.sanitize_html(""), "")
 
 
+
+def tiny_png(width=20, height=10, rgb=(0, 200, 0)):
+    """A real PNG, so the sniffing and the sizing are exercised on real bytes."""
+    import zlib, struct
+    raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+    def chunk(tag, data):
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b""))
+
+
+class ImageSniffing(unittest.TestCase):
+    """What the bytes are, rather than what a header said they were."""
+
+    def test_a_png_is_recognised_and_measured(self):
+        data = tiny_png(20, 10)
+        self.assertEqual(graph.image_kind(data), "image/png")
+        self.assertEqual(graph.image_size(data, "image/png"), (20, 10))
+
+    def test_a_gif_is_recognised(self):
+        self.assertEqual(graph.image_kind(b"GIF89a" + b"\x20\x00\x10\x00" + b"x" * 20), "image/gif")
+
+    def test_html_pretending_to_be_a_picture_is_not_one(self):
+        self.assertEqual(graph.image_kind(b"<html>gotcha</html>"), "")
+
+    def test_an_svg_is_refused_though_qt_could_draw_it(self):
+        """It is a document that can carry its own references out to the
+        network, which is the one thing this path exists to keep out."""
+        self.assertEqual(graph.image_kind(b"<svg xmlns='http://www.w3.org/2000/svg'></svg>"), "")
+
+    def test_nothing_is_not_an_image(self):
+        self.assertEqual(graph.image_kind(b""), "")
+        self.assertEqual(graph.image_kind(None), "")
+
+    def test_a_size_it_cannot_read_is_not_guessed_at(self):
+        self.assertIsNone(graph.image_size(b"RIFF0000WEBP", "image/webp"))
+
+
+class InlineImages(unittest.TestCase):
+    """Pictures the message brought with it cost nothing to show."""
+
+    def setUp(self):
+        self.png = tiny_png()
+
+    def render(self, markup, policy):
+        return graph.sanitized(markup, policy, graph.HTML_BODY_CAP)[0]
+
+    def test_a_cid_image_is_embedded_from_the_message_itself(self):
+        policy = graph.ImagePolicy({"logo": self.png})
+        out = self.render('<img src="cid:logo">', policy)
+        self.assertIn("<img src=\"data:image/png;base64,", out)
+        self.assertEqual((policy.shown, policy.blocked), (1, 0))
+
+    def test_the_angle_brackets_of_a_content_id_header_are_not_part_of_the_id(self):
+        """A Content-ID is written <logo@host>; the cid: in the markup is not.
+        The map is keyed the way the markup writes it."""
+        import email.message, imapmail
+        outer = email.message.EmailMessage()
+        outer.make_related()
+        outer.add_alternative('<img src="cid:logo@host">', subtype="html")
+        outer.get_payload()[0].add_related(self.png, maintype="image", subtype="png",
+                                           cid="<logo@host>")
+        found = imapmail.inline_images(outer)
+        self.assertIn("logo@host", found)
+        self.assertIn("data:image/png",
+                      self.render('<img src="cid:logo@host">', graph.ImagePolicy(found)))
+
+    def test_a_part_that_is_not_an_image_is_not_offered_as_one(self):
+        import email.message, imapmail
+        outer = email.message.EmailMessage()
+        outer.make_related()
+        outer.add_alternative("hello", subtype="plain")
+        outer.get_payload()[0].add_related(b"MZ not a picture", maintype="application",
+                                           subtype="octet-stream", cid="<thing>")
+        self.assertEqual(imapmail.inline_images(outer), {})
+
+    def test_a_cid_with_no_part_behind_it_leaves_nothing(self):
+        policy = graph.ImagePolicy({})
+        self.assertEqual(self.render('<img src="cid:missing">', policy), "")
+        # Not counted as blocked: nothing was withheld, the message is broken.
+        self.assertEqual(policy.blocked, 0)
+
+    def test_a_data_uri_that_is_really_an_image_survives(self):
+        encoded = base64.b64encode(self.png).decode()
+        policy = graph.ImagePolicy()
+        self.assertIn("data:image/png", self.render('<img src="data:image/png;base64,%s">' % encoded, policy))
+
+    def test_a_data_uri_that_is_not_an_image_does_not(self):
+        encoded = base64.b64encode(b"<html>nope</html>").decode()
+        policy = graph.ImagePolicy()
+        self.assertEqual(self.render('<img src="data:image/png;base64,%s">' % encoded, policy), "")
+
+    def test_a_picture_wider_than_the_pane_is_given_a_size_that_fits(self):
+        policy = graph.ImagePolicy({"wide": tiny_png(1200, 300)})
+        out = self.render('<img src="cid:wide">', policy)
+        self.assertIn('width="560" height="140"', out)
+
+    def test_one_that_already_fits_is_left_at_its_own_size(self):
+        policy = graph.ImagePolicy({"small": self.png})
+        self.assertNotIn("width=", self.render('<img src="cid:small">', policy))
+
+    def test_a_scheme_nobody_asked_for_is_dropped(self):
+        policy = graph.ImagePolicy()
+        for source in ("file:///etc/passwd", "javascript:alert(1)", "ftp://x/y.png"):
+            self.assertEqual(self.render('<img src="%s">' % source, policy), "")
+
+    def test_the_count_stops_at_the_cap(self):
+        policy = graph.ImagePolicy({"a": self.png})
+        markup = '<img src="cid:a">' * (graph.IMAGE_MAX_COUNT + 5)
+        self.render(markup, policy)
+        self.assertEqual(policy.shown, graph.IMAGE_MAX_COUNT)
+
+    def test_the_total_budget_stops_it_too(self):
+        policy = graph.ImagePolicy({"a": self.png})
+        policy.budget = len(self.png)
+        self.render('<img src="cid:a"><img src="cid:a">', policy)
+        self.assertEqual(policy.shown, 1)
+
+
+class RemoteImages(unittest.TestCase):
+    """A remote image is a request from the reader's own address, so it is a
+    decision rather than a default."""
+
+    def render(self, markup, policy):
+        return graph.sanitized(markup, policy, graph.HTML_BODY_CAP)[0]
+
+    def test_a_remote_image_is_counted_and_left_out(self):
+        policy = graph.ImagePolicy()
+        out = self.render('<p>hi</p><img src="https://tracker.example/pixel.gif">', policy)
+        self.assertNotIn("tracker.example", out)
+        self.assertNotIn("<img", out)
+        self.assertEqual(policy.blocked, 1)
+
+    def test_nothing_is_fetched_while_it_is_left_out(self):
+        """The property the whole default rests on: not merely that the picture
+        is absent from the markup, but that nobody was asked for it."""
+        asked = []
+        policy = graph.ImagePolicy()
+        policy.fetch = lambda url: asked.append(url)
+        self.render('<img src="https://tracker.example/p.gif">', policy)
+        self.assertEqual(asked, [])
+
+    def test_pressing_the_button_is_what_makes_the_request(self):
+        asked = []
+        png = tiny_png()
+        policy = graph.ImagePolicy(fetch_remote=True)
+        policy.fetch = lambda url: (asked.append(url), png)[1]
+        out = self.render('<img src="https://cdn.example/a.png">', policy)
+        self.assertEqual(asked, ["https://cdn.example/a.png"])
+        self.assertIn("data:image/png", out)
+
+    def test_a_fetch_that_fails_is_counted_rather_than_raised(self):
+        policy = graph.ImagePolicy(fetch_remote=True)
+        policy.fetch = lambda url: None
+        self.assertEqual(self.render('<img src="https://cdn.example/a.png">', policy), "")
+        self.assertEqual(policy.blocked, 1)
+
+    def test_what_comes_back_is_believed_only_if_it_is_an_image(self):
+        policy = graph.ImagePolicy(fetch_remote=True)
+        policy.fetch = lambda url: b"<html>not a picture</html>"
+        out = self.render('<img src="https://cdn.example/a.png">', policy)
+        self.assertNotIn("not a picture", out)
+        self.assertEqual(policy.blocked, 1)
+
+
+class ImagesAndTheRestOfTheSanitiser(unittest.TestCase):
+    """The images have to survive the pass that strips every other src."""
+
+    def test_an_embedded_image_is_not_eaten_by_the_attribute_strip(self):
+        """_HTML_REMOTE_ATTRS takes src off every tag and cannot know this one
+        is bytes - which is why the image is parked and put back afterwards."""
+        policy = graph.ImagePolicy({"logo": tiny_png()})
+        out = graph.sanitized('<img src="cid:logo">', policy, graph.HTML_BODY_CAP)[0]
+        self.assertIn("src=\"data:image/png", out)
+
+    def test_a_marker_a_sender_planted_cannot_forge_an_image(self):
+        policy = graph.ImagePolicy({"logo": tiny_png()})
+        out = graph.sanitized('\x00i0\x00<img src="cid:logo">', policy, graph.HTML_BODY_CAP)[0]
+        self.assertEqual(out.count("data:image/png"), 1)
+
+    def test_the_cap_counts_the_markup_and_not_the_photograph(self):
+        """A body of a few hundred characters plus one large picture is not a
+        truncated body - the cap is there to bound tags and words."""
+        policy = graph.ImagePolicy({"a": tiny_png(400, 400)})
+        body, truncated = graph.sanitized("<p>short</p>" + '<img src="cid:a">', policy, 200)
+        self.assertFalse(truncated)
+        self.assertIn("data:image/png", body)
+
+    def test_without_a_policy_every_image_still_goes(self):
+        self.assertNotIn("<img", graph.sanitize_html('<img src="cid:logo">'))
+        self.assertNotIn("<img", graph.sanitize_html('<img src="https://tracker/x.gif">'))
+
+
 class CalendarWindow(unittest.TestCase):
     """The window is midnight to midnight, and on two days a year those are not
     24 hours apart. A fixed offset taken from today gets the far end wrong."""

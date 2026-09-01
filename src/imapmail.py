@@ -708,6 +708,33 @@ def _body_for_order(message, order):
     return content, is_html
 
 
+def inline_images(message):
+    """Content-ID -> bytes, for the pictures the message brought with it.
+
+    An HTML mail that shows a logo or a signature image carries it as another
+    MIME part and points at it with `cid:`. Those cost nothing to display -
+    the bytes are already here, and showing them asks nobody for anything - so
+    they are handed up whether or not remote images were asked for.
+
+    The id is stored without its angle brackets, which is how the `cid:` in the
+    markup writes it.
+    """
+    found = {}
+    for part in message.walk():
+        identifier = str(part.get("Content-ID") or "").strip().strip("<>")
+        if identifier == "" or identifier in found:
+            continue
+        if not str(part.get_content_type() or "").lower().startswith("image/"):
+            continue
+        try:
+            payload = part.get_payload(decode=True)
+        except (ValueError, TypeError, AssertionError):
+            continue
+        if payload:
+            found[identifier] = payload
+    return found
+
+
 def body_of(message, want_html):
     """(text, is_html) for the part worth showing, or ("", False).
 
@@ -969,6 +996,7 @@ def message(account, token, message_id, want_html):
             ),
             "raw": raw,
             "isHtml": is_html,
+            "inlineImages": inline_images(parsed),
         }
     finally:
         close(client)

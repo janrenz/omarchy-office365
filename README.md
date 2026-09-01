@@ -660,6 +660,31 @@ journalctl --user -f | grep -i office365
 
 ## Changelog
 
+### 1.2.0 — 2026-09-01
+
+- **A message can show its pictures, without leaving for Outlook.** With
+  **Keep the message's own formatting** on, a picture the message carries with
+  it - a logo, a signature image - is now drawn. It costs nothing to show:
+  the bytes already arrived with the mail, so displaying one asks nobody for
+  anything. A picture held on the sender's servers is a different thing, and is
+  still left out: fetching it tells them the message was opened, from the
+  reader's own address. Those are counted, and the reading pane offers a **Load
+  3 images** button that goes and gets them for that one message. The decision
+  is never remembered, because "tell every mailing list when I open their mail"
+  is not a setting this plugin is going to grow.
+  Images arrive as data inside the body rather than as files, so there is no
+  cache to clean up; anything that is not really a picture is refused on its
+  own bytes rather than on the type its server claimed, SVG included; and one
+  wider than the reading pane is given a size that fits instead of being
+  clipped. Forty images and four megabytes a message, half a megabyte each.
+- **Buttons that do not fit are one press away instead of off the edge.** The
+  reading pane had grown to ten actions in a row that does not wrap, so on the
+  bar's popup - and on the window at its default size, where the pane is about
+  515 pixels against 720 of buttons - the last of them simply could not be
+  reached with a pointer. The row now measures itself and puts what will not
+  fit behind a **+3 more** button that opens a second line. The reply box got
+  the same treatment, at 488 pixels against the same 515.
+
 ### 1.1.2 — 2026-09-01
 
 - **The folder actions are in the window, not only under the keys.** New,
