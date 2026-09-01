@@ -8,6 +8,7 @@ wrong widget entry to save into, or letting two aliases share one mailbox's
 tokens. Both would look like the plugin working.
 """
 
+import base64
 import contextlib
 import re
 import io
@@ -696,6 +697,194 @@ class ComposeArgs:
     comment = "Thanks - will do."
     to = ""
     draft = False
+
+
+class Attachments(unittest.TestCase):
+    """Files on a reply, which Graph cannot do in the one request a reply is."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.file = os.path.join(self.dir, "quote.pdf")
+        with open(self.file, "wb") as handle:
+            handle.write(b"%PDF-1.4 not really")
+
+    def run_compose(self, responses=None, attach=None, draft=False, **overrides):
+        self.calls = []
+        queue = list(responses or [(201, {"id": "DRAFT-1"}), (201, {}), (202, {})])
+
+        def http(url, method="GET", data=None, json_body=None, headers=None, timeout=20):
+            self.calls.append({"url": url, "method": method, "body": json_body})
+            return queue.pop(0) if queue else (202, {})
+
+        args = ComposeArgs()
+        args.attach = [self.file] if attach is None else attach
+        args.draft = draft
+        for key, value in overrides.items():
+            setattr(args, key, value)
+
+        patched = {
+            "read_json": lambda *a, **k: {"write": True, "scopes": "Mail.ReadWrite Mail.Send"},
+            "access_token": lambda alias, account: ("token", account),
+            "http": http,
+            "out": lambda payload: (_ for _ in ()).throw(Emitted(payload)),
+        }
+        original = {name: getattr(graph, name) for name in patched}
+        for name, stub in patched.items():
+            setattr(graph, name, stub)
+        try:
+            graph.cmd_compose(args)
+        except Emitted as emitted:
+            return emitted.payload
+        finally:
+            for name, value in original.items():
+                setattr(graph, name, value)
+        raise AssertionError("cmd_compose emitted nothing")
+
+    def test_a_reply_with_a_file_goes_through_a_draft_because_reply_cannot_carry_one(self):
+        result = self.run_compose()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["attached"], ["quote.pdf"])
+        urls = [call["url"] for call in self.calls]
+        self.assertTrue(urls[0].endswith("/createReply"))
+        self.assertTrue(urls[1].endswith("/attachments"))
+        self.assertTrue(urls[2].endswith("/send"))
+        # And never the one-shot endpoint, which would drop the attachment.
+        self.assertFalse(any(url.endswith("/reply") for url in urls))
+
+    def test_the_file_goes_as_a_base64_fileAttachment_under_its_own_name(self):
+        self.run_compose()
+        body = self.calls[1]["body"]
+        self.assertEqual(body["@odata.type"], "#microsoft.graph.fileAttachment")
+        self.assertEqual(body["name"], "quote.pdf")
+        self.assertEqual(base64.b64decode(body["contentBytes"]), b"%PDF-1.4 not really")
+
+    def test_a_forward_with_a_file_is_addressed_before_it_is_sent(self):
+        self.run_compose(mode="forward", to="her@example.com",
+                         responses=[(201, {"id": "D1"}), (200, {}), (201, {}), (202, {})])
+        self.assertEqual(self.calls[1]["method"], "PATCH")
+        self.assertEqual(self.calls[1]["body"],
+                         {"toRecipients": [{"emailAddress": {"address": "her@example.com"}}]})
+
+    def test_a_draft_gets_the_file_too(self):
+        result = self.run_compose(draft=True, responses=[(201, {"id": "D1", "webLink": "x"}), (201, {})])
+        self.assertTrue(result["drafted"])
+        self.assertTrue(self.calls[1]["url"].endswith("/attachments"))
+
+    def test_a_file_that_would_not_attach_says_where_the_message_is(self):
+        result = self.run_compose(responses=[(201, {"id": "D1"}),
+                                            (413, {"error": {"message": "too big"}})])
+        self.assertEqual(result["error"]["code"], "attach_failed")
+        self.assertIn("waiting in your drafts", result["error"]["message"])
+
+    def test_a_missing_file_is_refused_before_anything_is_asked_of_outlook(self):
+        result = self.run_compose(attach=["/does/not/exist"])
+        self.assertEqual(result["error"]["code"], "no_file")
+        self.assertEqual(self.calls, [])
+
+    def test_an_empty_file_is_refused(self):
+        empty = os.path.join(self.dir, "empty.txt")
+        open(empty, "wb").close()
+        result = self.run_compose(attach=[empty])
+        self.assertEqual(result["error"]["code"], "empty_file")
+
+    def test_the_cap_is_about_what_one_request_can_carry(self):
+        big = os.path.join(self.dir, "big.bin")
+        with open(big, "wb") as handle:
+            handle.truncate(graph.ATTACH_CAP + 1)
+        result = self.run_compose(attach=[big])
+        self.assertEqual(result["error"]["code"], "too_large")
+
+    def test_several_files_are_capped_together_not_one_by_one(self):
+        paths = []
+        for index in range(3):
+            path = os.path.join(self.dir, "part%d.bin" % index)
+            with open(path, "wb") as handle:
+                handle.truncate(graph.ATTACH_CAP // 2)
+            paths.append(path)
+        result = self.run_compose(attach=paths)
+        self.assertEqual(result["error"]["code"], "too_large")
+
+    def test_nothing_attached_still_takes_the_one_request_path(self):
+        result = self.run_compose(attach=[], responses=[(202, {})])
+        self.assertTrue(result["ok"])
+        self.assertTrue(self.calls[0]["url"].endswith("/reply"))
+        self.assertNotIn("attached", result)
+
+
+class ImapAttachments(unittest.TestCase):
+    """The same files over SMTP, where the MIME has to be assembled here."""
+
+    def build(self, attachments):
+        import imapmail
+        sent = {}
+
+        def fake_message(account, token, message_id, want_html=False):
+            return {"subject": "Rechnung", "fromAddress": "her@example.com",
+                    "to": [], "cc": [], "messageId": "<abc@example.com>",
+                    "body": "the original", "received": ""}
+
+        class FakeSMTP:
+            def __init__(self, *a, **k):
+                pass
+
+            def ehlo(self):
+                pass
+
+            def starttls(self):
+                pass
+
+            def auth(self, *a, **k):
+                pass
+
+            def send_message(self, note):
+                sent["note"] = note
+
+            def quit(self):
+                pass
+
+        original = (imapmail.message, imapmail.smtplib.SMTP, imapmail.connect)
+        imapmail.message = fake_message
+        imapmail.smtplib.SMTP = FakeSMTP
+        # Filing a copy in Sent Items is best effort; refusing the connection
+        # here exercises the warning rather than the failure.
+        imapmail.connect = lambda *a, **k: (_ for _ in ()).throw(OSError("no imap"))
+        try:
+            result = imapmail.compose({"username": "me@example.com"}, "token", "1",
+                                      "reply", "here you go", [], False, attachments)
+        finally:
+            imapmail.message, imapmail.smtplib.SMTP, imapmail.connect = original
+        return result, sent.get("note")
+
+    def test_a_file_becomes_a_multipart_part_with_its_name_and_type(self):
+        result, note = self.build([("quote.pdf", b"%PDF-1.4")])
+        self.assertTrue(result["ok"])
+        self.assertTrue(note.is_multipart())
+        parts = [part for part in note.walk() if part.get_filename()]
+        self.assertEqual([part.get_filename() for part in parts], ["quote.pdf"])
+        self.assertEqual(parts[0].get_content_type(), "application/pdf")
+        self.assertEqual(parts[0].get_payload(decode=True), b"%PDF-1.4")
+
+    def test_an_unguessable_type_falls_back_to_octet_stream(self):
+        _result, note = self.build([("thing.zzz", b"xx")])
+        parts = [part for part in note.walk() if part.get_filename()]
+        self.assertEqual(parts[0].get_content_type(), "application/octet-stream")
+
+    def test_the_reply_is_still_a_reply_with_a_file_on_it(self):
+        _result, note = self.build([("quote.pdf", b"%PDF-1.4")])
+        self.assertEqual(note["Subject"], "Re: Rechnung")
+        self.assertEqual(note["In-Reply-To"], "<abc@example.com>")
+        self.assertIn("here you go", note.get_body(("plain",)).get_content())
+
+    def test_no_attachments_leaves_it_a_plain_message(self):
+        _result, note = self.build([])
+        self.assertFalse(note.is_multipart())
+
+    def test_the_message_id_carries_the_mailbox_domain_not_this_machines_name(self):
+        # make_msgid() with no domain calls socket.getfqdn(): five seconds of
+        # waiting on a resolver here, and the machine's hostname written into a
+        # header the recipient reads. Both were real.
+        _result, note = self.build([])
+        self.assertTrue(note["Message-ID"].endswith("@example.com>"), note["Message-ID"])
 
 
 class Compose(unittest.TestCase):

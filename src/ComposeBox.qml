@@ -1,7 +1,7 @@
 import QtQuick
+import QtCore
 import QtQuick.Controls
-import qs.Commons
-import qs.Ui
+import QtQuick.Dialogs
 
 // Writing a reply, a reply to everyone, or a forward.
 //
@@ -30,6 +30,12 @@ Column {
   property color accent: Color.accent
   property string fontFamily: Style.font.family
 
+  // Files to go with it, as paths. The host owns the list; this draws it and
+  // says what was asked for.
+  property var attachments: []
+
+  signal attachRequested(string path)
+  signal detachRequested(int index)
   signal sendRequested()
   signal draftRequested()
   signal cancelRequested()
@@ -135,8 +141,97 @@ Column {
     font.pixelSize: Style.font.caption
   }
 
+  // What is attached, and a way to take one off again. Only there when there
+  // is something: an empty row of nothing is worse than no row.
+  Flow {
+    width: parent.width
+    visible: root.attachments.length > 0
+    spacing: Style.spacing.sm
+
+    Repeater {
+      model: root.attachments
+
+      Rectangle {
+        id: chip
+        required property string modelData
+        required property int index
+        // The name, not the path: where it came from is not what anybody needs
+        // to read back, and a long path pushes the rest off the row.
+        readonly property string fileName: String(chip.modelData).split("/").pop()
+
+        radius: Style.space(4)
+        color: Util.alpha(root.accent, 0.12)
+        implicitWidth: chipRow.implicitWidth + Style.spacing.md
+        implicitHeight: chipRow.implicitHeight + Style.spacing.sm
+
+        Row {
+          id: chipRow
+          anchors.centerIn: parent
+          spacing: Style.spacing.xs
+
+          // The same glyph the list draws on a message that has one.
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: "󰏢"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: root.accent
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: chip.fileName
+            textFormat: Text.PlainText
+            color: root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: "✕"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+
+            MouseArea {
+              anchors.fill: parent
+              // Bigger than the glyph: a 6-pixel target is a target nobody
+              // hits on the first try.
+              anchors.margins: -Style.spacing.xs
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.detachRequested(chip.index)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  FileDialog {
+    id: attachDialog
+    title: "Attach a file"
+    fileMode: FileDialog.OpenFile
+    currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+    onAccepted: root.attachRequested(
+      decodeURIComponent(String(selectedFile).replace(/^file:\/\//, "")))
+  }
+
   Row {
     spacing: Style.spacing.sm
+
+    Button {
+      enabled: !root.running
+      text: "Attach"
+      tooltipText: "A file to send with this - up to 3 MB in total, which is what one request to Outlook can carry"
+      bordered: true
+      foreground: root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: attachDialog.open()
+    }
 
     Button {
       visible: root.canSend

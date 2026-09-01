@@ -256,6 +256,29 @@ been read. A collapsed conversation wears one if any message in it does.
 Flagging is a write, so it needs the same permission marking and moving do -
 see [Sign-in and your data](#sign-in-and-your-data).
 
+### Sending a file with a reply
+
+**Attach** in the reply box picks a file, and what is attached shows as a chip
+above the buttons with an ✕ to take it off again. It works on a reply, a reply
+to all and a forward, on both transports, and on a draft as much as on a send -
+a draft finished in Outlook opens with the files already on it.
+
+Up to 3 MB in total, and that number is not arbitrary: Graph carries an
+attachment inside the request that creates it, the request may be 4 MB, and
+base64 costs a third on top. Past that the documented route is an upload session
+on an Outlook host this plugin does not talk to, so the refusal says so instead
+of failing at the wire. The same cap applies over IMAP, because a plugin that
+took 3 MB one way and twenty the other would be a worse promise than one number.
+
+There is one thing worth knowing about how it is sent over Graph. `/reply`,
+`/replyAll` and `/forward` take a comment and recipients and nothing else -
+there is nowhere to put a file. So a message with something attached is built as
+a draft, the files go onto it, and the draft is sent: three requests instead of
+one, and only for a message that needs it. If the attaching fails, the draft is
+left in Drafts with whatever did attach, and the error says so - it is somewhere
+you can finish it, which "could not send" would not have told you.
+
+
 ### Links
 
 Graph hands a message over as plain text unless `htmlBody` is on, and its

@@ -148,6 +148,19 @@ keeps using the old client id or authority.
   Every default in `PollGate.qml` therefore means "go ahead": a gate that failed
   closed would swallow the first fetch after every shell start, which is the one
   that fills an empty panel.
+- **An attachment cannot ride on `/reply`.** Those endpoints take a comment and
+  recipients and nothing else, so `compose --attach` builds the same draft the
+  `--draft` path builds, POSTs each file to `/attachments`, and sends the draft.
+  Three requests where there was one, and only when something is attached. The
+  cap - 3 MB in total, shared with the IMAP path - is what one request can
+  carry: base64 costs a third on top of a 4 MB request limit, and the route past
+  it is an upload session on an Outlook host this helper does not talk to.
+- **`make_msgid()` costs five seconds and leaks the hostname.** With no
+  `domain=` it calls `socket.getfqdn()`, which blocks until the resolver gives
+  up on a machine whose hostname does not resolve - five seconds on every IMAP
+  reply, measured here - and then writes that hostname into a header the
+  recipient reads. `imapmail.compose` passes the mailbox's own domain. Any new
+  header built from the local machine deserves the same suspicion.
 - **`compose` only replies, replies-all and forwards.** There is no "new
   message" — writing a fresh mail means leaving for Outlook, and the
   `--draft` path opens Outlook by design. That is the plugin's biggest hole, and

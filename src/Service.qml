@@ -495,12 +495,37 @@ Item {
     return !!view && view.send === true
   }
 
+  // Files to attach, as paths. Per host rather than in the store: two windows
+  // writing two replies are writing two different messages, and the store's
+  // job is what they must agree on.
+  property var composeAttachments: []
+
+  function attachToCompose(path) {
+    var file = String(path || "").trim()
+    if (!composing || file === "") return
+    // The same file twice is a mistake, not a request - Outlook would send it
+    // twice under the same name.
+    if (composeAttachments.indexOf(file) !== -1) return
+    var next = composeAttachments.slice()
+    next.push(file)
+    composeAttachments = next
+    composeError = ""
+  }
+
+  function detachFromCompose(index) {
+    if (index < 0 || index >= composeAttachments.length) return
+    var next = composeAttachments.slice()
+    next.splice(index, 1)
+    composeAttachments = next
+  }
+
   function startCompose(mode, mail) {
     if (!mail) return
     composeMode = String(mode || "reply")
     composeMail = mail
     composeTo = ""
     composeText = ""
+    composeAttachments = []
     composeError = ""
     composeNotice = ""
   }
@@ -510,6 +535,7 @@ Item {
     composeMail = null
     composeTo = ""
     composeText = ""
+    composeAttachments = []
     composeError = ""
   }
 
@@ -533,6 +559,8 @@ Item {
                    "--comment", composeText,
                    "--to", composeTo]
     if (asDraft === true) command.push("--draft")
+    for (var i = 0; i < composeAttachments.length; i++)
+      command = command.concat(["--attach", String(composeAttachments[i])])
     composeProc.command = command
     composeProc.running = true
   }

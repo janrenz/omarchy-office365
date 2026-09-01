@@ -34,6 +34,7 @@ import base64
 import email.policy
 import email.utils
 import imaplib
+import mimetypes
 import re
 import smtplib
 import time
@@ -1026,7 +1027,7 @@ def quote_original(original):
     return "On %s, %s wrote:\n%s" % (when, who, quoted_lines)
 
 
-def compose(account, token, message_id, mode, comment, to_addresses, draft):
+def compose(account, token, message_id, mode, comment, to_addresses, draft, attachments=None):
     """Reply, reply all or forward - sent over SMTP, or left as a draft.
 
     Graph builds the quoting, the recipients and the threading headers itself
@@ -1034,6 +1035,9 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft):
     A draft is an APPEND to the Drafts folder, which needs no SMTP permission
     at all - so a mailbox that consented to IMAP but not SMTP.Send can still
     write, and finish the message in Outlook.
+
+    `attachments` is [(name, bytes)], already read and size-checked by the
+    caller so that both transports refuse the same files for the same reasons.
     """
     original = message(account, token, message_id, want_html=False)
     me = username_of(account)
@@ -1062,13 +1066,30 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft):
     note["To"] = ", ".join(recipients)
     note["Subject"] = subject
     note["Date"] = email.utils.formatdate(localtime=True)
-    note["Message-ID"] = email.utils.make_msgid()
+    # domain= is not decoration. make_msgid() without it calls socket.getfqdn(),
+    # which on a machine whose hostname does not resolve blocks until the
+    # resolver gives up - five seconds, measured here, on every single reply -
+    # and then writes that hostname into a header the recipient can read. The
+    # mailbox's own domain is instant and is what a Message-ID should say
+    # anyway; the SMTP host is the fallback for an address without one.
+    note["Message-ID"] = email.utils.make_msgid(
+        domain=(me.rpartition("@")[2] or str(account.get("smtp_host") or DEFAULT_SMTP_HOST)))
     # Threading, so the reply lands in the conversation rather than beside it.
     original_id = str(original.get("messageId") or "").strip()
     if original_id:
         note["In-Reply-To"] = original_id
         note["References"] = original_id
     note.set_content("%s\n\n%s" % (str(comment or ""), quote_original(original)))
+
+    # add_attachment turns this into multipart/mixed, which is why set_content
+    # has to have run first. The type is guessed from the name and falls back to
+    # octet-stream: a wrong guess is a file the recipient has to open by hand, a
+    # missing one is a mail some servers refuse.
+    for name, body in (attachments or []):
+        guessed, _ = mimetypes.guess_type(name)
+        maintype, _, subtype = (guessed or "application/octet-stream").partition("/")
+        note.add_attachment(body, maintype=maintype, subtype=subtype or "octet-stream",
+                            filename=name)
 
     if draft:
         client = None

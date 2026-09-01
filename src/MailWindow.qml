@@ -979,6 +979,9 @@ Item {
                     fg: Color.foreground
                     accent: Color.accent
                     fontFamily: Style.font.family
+                    attachments: mailView.composeAttachments
+                    onAttachRequested: function(path) { mailView.attachToCompose(path) }
+                    onDetachRequested: function(index) { mailView.detachFromCompose(index) }
                     onToEdited: function(value) { mailView.composeTo = value }
                     onBodyEdited: function(value) { mailView.composeText = value }
                     onSendRequested: mailView.submitCompose(false)

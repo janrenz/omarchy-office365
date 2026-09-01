@@ -1984,6 +1984,63 @@ def cmd_folders(args):
 
 # The three shapes a written message can take, and what Graph calls each one.
 # The "create" endpoints make a draft and hand it back; the plain ones send.
+# What an attachment may weigh. Graph takes a fileAttachment inline up to a
+# 4 MB request, and base64 costs a third on top - past that the documented route
+# is an upload session, whose URL is on an Outlook host this helper does not
+# talk to. So the cap is what one request can carry, and the refusal says why
+# rather than failing at the wire. The IMAP path shares it: a mail plugin that
+# takes 3 MB over one transport and 20 over the other would be a worse promise
+# than one number.
+ATTACH_CAP = 3 * 1024 * 1024
+ATTACH_TOTAL_CAP = 3 * 1024 * 1024
+
+
+def read_attachments(paths):
+    """[(name, bytes)] for the files to attach, or a refusal a person can act on."""
+    files = []
+    total = 0
+    for raw in paths or []:
+        path = os.path.expanduser(str(raw or "").strip())
+        if not path:
+            continue
+        if not os.path.isfile(path):
+            fail("no_file", "There is no file at %s" % path)
+        try:
+            size = os.path.getsize(path)
+        except OSError as error:
+            fail("unreadable", "Could not read %s: %s" % (path, error))
+        if size == 0:
+            fail("empty_file", "%s is empty" % os.path.basename(path))
+        total += size
+        if size > ATTACH_CAP or total > ATTACH_TOTAL_CAP:
+            fail("too_large",
+                 "Attachments have to fit in one request: up to %d MB in total. Send a link, "
+                 "or attach it in Outlook." % (ATTACH_TOTAL_CAP // 1048576))
+        try:
+            with open(path, "rb") as handle:
+                files.append((os.path.basename(path), handle.read(ATTACH_CAP + 1)))
+        except OSError as error:
+            fail("unreadable", "Could not read %s: %s" % (path, error))
+    return files
+
+
+def attach_to_draft(draft_id, files, headers):
+    """Put each file on a draft. Returns "" or what went wrong."""
+    for name, body in files:
+        status, payload = http(
+            GRAPH + "/me/messages/" + urllib.parse.quote(draft_id, safe="") + "/attachments",
+            method="POST",
+            json_body={
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": name,
+                "contentBytes": base64.b64encode(body).decode("ascii"),
+            },
+            headers=headers, timeout=120)
+        if status not in (200, 201):
+            return graph_error(payload, "Could not attach %s" % name)
+    return ""
+
+
 COMPOSE_MODES = {
     "reply": ("reply", "createReply"),
     "reply-all": ("replyAll", "createReplyAll"),
@@ -2030,6 +2087,10 @@ def cmd_compose(args):
     if args.mode == "forward" and not recipients:
         fail("no_recipient", "A forward needs somebody to forward it to")
 
+    # Read before the account is touched: a file that cannot be attached is
+    # worth saying so about before a token is refreshed for it.
+    files = read_attachments(getattr(args, "attach", None))
+
     account = read_json(state_path(args.account))
     if not account:
         fail("auth_required", "Not signed in")
@@ -2049,7 +2110,7 @@ def cmd_compose(args):
                  "This mailbox consented to IMAP but not to SMTP.Send. Save this as a draft, "
                  "or sign in again to allow sending.")
         out(imap_run(need_imap().compose, account, token, args.id, args.mode,
-                     str(args.comment or ""), addresses, bool(args.draft)))
+                     str(args.comment or ""), addresses, bool(args.draft), files))
         return
 
     base = GRAPH + "/me/messages/" + urllib.parse.quote(args.id, safe="")
@@ -2066,6 +2127,8 @@ def cmd_compose(args):
         # that could not be addressed is still a draft worth opening, so this
         # is a warning rather than a failure.
         warning = ""
+        if files and draft_id:
+            warning = attach_to_draft(draft_id, files, headers)
         if recipients and draft_id:
             patch_status, patch_payload = http(
                 GRAPH + "/me/messages/" + urllib.parse.quote(draft_id, safe=""),
@@ -2081,6 +2144,40 @@ def cmd_compose(args):
         fail("send_permission_required",
              "This mailbox is signed in without permission to send. Sign in again to allow it, "
              "or save this as a draft and finish it in Outlook.")
+
+    if files:
+        # /reply, /replyAll and /forward take a comment and recipients and
+        # nothing else - there is nowhere to put an attachment. So the same
+        # draft the --draft path builds is made here, the files go on it, and
+        # the draft is sent. Three requests instead of one, and only for a
+        # message that has something attached.
+        status, payload = http(base + "/" + draft_path, method="POST",
+                               json_body={"comment": comment}, headers=headers)
+        if status not in (200, 201):
+            fail("draft_failed", graph_error(payload, "Could not build the message"))
+        draft_id = str((payload or {}).get("id") or "")
+        if not draft_id:
+            fail("draft_failed", "Outlook built a draft but did not say which")
+        draft_base = GRAPH + "/me/messages/" + urllib.parse.quote(draft_id, safe="")
+        if recipients:
+            status, payload = http(draft_base, method="PATCH",
+                                   json_body={"toRecipients": recipients}, headers=headers)
+            if status not in (200, 204):
+                fail("send_failed", graph_error(payload, "Could not address the message"))
+        problem = attach_to_draft(draft_id, files, headers)
+        if problem:
+            # The draft is in Drafts with whatever did attach. Say so: it is
+            # somewhere the user can finish it, which "failed" does not suggest.
+            fail("attach_failed",
+                 problem + ". The message is waiting in your drafts with what did attach.")
+        status, payload = http(draft_base + "/send", method="POST", headers=headers)
+        if status == 403:
+            fail("send_permission_required",
+                 graph_error(payload, "This mailbox is not allowed to send."))
+        if status not in (200, 202, 204):
+            fail("send_failed", graph_error(payload, "Could not send this message"))
+        out({"ok": True, "mode": args.mode, "drafted": False, "id": args.id,
+             "attached": [name for name, _ in files]})
 
     body = {"comment": comment}
     if recipients:
@@ -2207,6 +2304,8 @@ def main():
     compose.add_argument("--mode", required=True, choices=sorted(COMPOSE_MODES), help="what to write")
     compose.add_argument("--comment", default="", help="what to say above the quoted message")
     compose.add_argument("--to", default="", help="recipients for a forward, comma separated")
+    compose.add_argument("--attach", action="append", default=[],
+                         help="a file to attach; repeat for more")
     compose.add_argument("--draft", action="store_true",
                          help="leave it as a draft in Outlook instead of sending it")
     compose.set_defaults(func=cmd_compose)
