@@ -82,7 +82,8 @@ Item {
       openCommand: setting("openCommand", ""),
       focusMatch: setting("focusMatch", ""),
       clientId: setting("clientId", ""),
-      authority: setting("authority", "")
+      authority: setting("authority", ""),
+      transport: setting("transport", "")
     }]
   }
 
@@ -113,6 +114,10 @@ Item {
   // The same for the unread filter, for a widget you keep as an inbox rather
   // than as a record of everything that arrived.
   readonly property bool unreadByDefault: setting("unreadByDefault", false) === true
+  // Group the list by conversation. A view rather than a setting: it is set by
+  // whichever host can draw it and left alone by the ones that cannot, so it
+  // is deliberately not read from the widget's configuration.
+  property bool threaded: false
   // The agenda as a day-grouped list or as a drawn time grid. The list is the
   // default until the grid has earned it.
   readonly property string agendaView: String(setting("agendaView", "list")) === "timeline" ? "timeline" : "list"
@@ -348,6 +353,17 @@ Item {
     markMessage(previewMail.id, previewMail.alias, read)
   }
 
+  // Flagging works on any row, the way deleting and moving do: the list offers
+  // it under the cursor and the reading pane offers it for what is open.
+  function flagMail(row, flagged) {
+    if (!row || !hub || !canWrite(row.alias)) return
+    hub.flagMessage(row.id, row.alias, flagged)
+  }
+
+  function flagPreviewed(flagged) {
+    flagMail(previewMail, flagged)
+  }
+
   function indexOfMail(id) {
     for (var i = 0; i < mail.length; i++) if (String(mail[i].id) === String(id)) return i
     return -1
@@ -418,11 +434,12 @@ Item {
   property var held: ({})
 
   // What the user has done that the server has not confirmed yet, keyed by
-  // message id - the shared read and deleted overrides, plus this host's held
-  // row. Keyed by id rather than by whatever is open, so a slow reply about
-  // one message can never land on another.
+  // message id - the shared read, flagged and deleted overrides, plus this
+  // host's held row. Keyed by id rather than by whatever is open, so a slow
+  // reply about one message can never land on another.
   readonly property var mailState: ({
     read: hub ? hub.overrides.read : ({}),
+    flagged: hub ? hub.overrides.flagged : ({}),
     deleted: hub ? hub.overrides.deleted : ({}),
     held: held
   })
@@ -431,6 +448,7 @@ Item {
   // the row being read so it keeps its place in the list.
   readonly property var listState: ({
     read: mailState.read,
+    flagged: mailState.flagged,
     deleted: mailState.deleted,
     held: mailState.held,
     pinned: previewMail
@@ -609,7 +627,25 @@ Item {
     awaitingFolderFor = key
   }
 
-  readonly property var mail: Model.mergeMail(filteredViews, unreadOnly, mails, listState, focusedOnly)
+  // Everything that was fetched and passes the filters, before the cap. The
+  // flat list takes the newest `mails` of these; the threaded one groups all
+  // of them and takes the newest `mails` conversations, which is why the cap
+  // cannot be applied before the grouping.
+  readonly property var mailAll: Model.mergeMailAll(filteredViews, unreadOnly, listState, focusedOnly)
+
+  // Empty unless the list is threaded, so nothing is grouped for a host that
+  // will not draw it - the bar dropdown has no room to expand a conversation.
+  readonly property var threads: threaded
+    ? Model.groupThreads(mailAll, mails, listState)
+    : []
+
+  // The messages on offer, in the order they are drawn. Grouping moves rows
+  // around; it never hides a message, so the keyboard can keep walking this
+  // one list either way.
+  readonly property var mail: threaded
+    ? Model.threadMessages(threads)
+    : Model.capMail(mailAll, mails, listState)
+
   readonly property var agenda: Model.mergeEvents(filteredViews, new Date(), 20, dedupeEvents)
 
   // ---- timeline -------------------------------------------------------
@@ -768,11 +804,11 @@ Item {
   readonly property string verificationUri: hub ? hub.verificationUri : ""
   readonly property string loginMessage: hub ? hub.loginMessage : ""
 
-  function startLogin(alias, wantWrite) {
+  function startLogin(alias, wantWrite, calendar) {
     if (!configured || !hub) return
     var config = configFor(alias)
     if (!config) return
-    hub.startLogin(alias, wantWrite, config)
+    hub.startLogin(alias, wantWrite, config, calendar)
   }
 
   function configFor(alias) {

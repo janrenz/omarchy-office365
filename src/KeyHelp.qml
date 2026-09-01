@@ -32,8 +32,10 @@ Column {
 
     ["x", "Delete the message under the cursor", "Doing"],
     ["m", "Move it to another folder", "Doing"],
+    ["F", "Flag it for follow-up, or clear the flag", "Doing"],
     ["u", "Show only unread mail", "Doing"],
     ["f", "Show only Focused mail", "Doing"],
+    ["t", "Group the list by conversation", "Doing"],
     ["r", "Refresh", "Doing"],
     ["?", "This list", "Doing"]
   ]

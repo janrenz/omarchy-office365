@@ -104,6 +104,7 @@ Item {
         color: String(configs[i].color || ""),
         clientId: String(configs[i].clientId || ""),
         authority: String(configs[i].authority || ""),
+        transport: String(configs[i].transport || ""),
         webUrl: String(configs[i].webUrl || ""),
         // Not editable here - a command with arguments does not survive a
         // single text field - but carried through so saving never drops it.
@@ -132,7 +133,7 @@ Item {
 
   function addRow() {
     var copy = rows.slice()
-    copy.push({ account: "", short: "", color: "", clientId: "", authority: "", webUrl: "", openCommand: [], focusMatch: "" })
+    copy.push({ account: "", short: "", color: "", clientId: "", authority: "", transport: "", webUrl: "", openCommand: [], focusMatch: "" })
     rows = copy
     editing = copy.length - 1
   }
@@ -191,6 +192,7 @@ Item {
       if (String(row.color).trim() !== "") entry.color = String(row.color).trim()
       if (String(row.clientId).trim() !== "") entry.clientId = String(row.clientId).trim()
       if (String(row.authority).trim() !== "") entry.authority = String(row.authority).trim()
+      if (String(row.transport).trim() !== "") entry.transport = String(row.transport).trim()
       if (String(row.webUrl).trim() !== "") entry.webUrl = String(row.webUrl).trim()
       if (String(row.focusMatch).trim() !== "") entry.focusMatch = String(row.focusMatch).trim()
       if (row.openCommand && row.openCommand.length > 0) entry.openCommand = row.openCommand
@@ -216,7 +218,7 @@ Item {
       markReadOnOpen: vMarkRead,
       previewLine: vPreviewLine,
       focusedByDefault: vFocusedDefault,
-      account: "", short: "", color: "", clientId: "", authority: "", webUrl: "", focusMatch: ""
+      account: "", short: "", color: "", clientId: "", authority: "", transport: "", webUrl: "", focusMatch: ""
     })
     // Closed by onSettingsSaved, or not at all if the write failed. A second
     // press while the first is still running must not clear this.
@@ -1143,6 +1145,43 @@ Item {
             }
           }
 
+          // IMAP carries no calendar, and the mail token cannot be exchanged
+          // for one - EWS is a separate resource with its own consent. So a
+          // calendar is a second sign-in added to the mailbox, and only an
+          // IMAP mailbox has anything to gain from it.
+          Item {
+            width: parent.width
+            visible: String(page.modelData.transport || "") === "imap"
+            implicitHeight: Math.max(calendarLabel.implicitHeight, calendarButton.implicitHeight)
+
+            Text {
+              textFormat: Text.PlainText
+              id: calendarLabel
+              anchors.left: parent.left
+              anchors.right: calendarButton.left
+              anchors.rightMargin: Style.spacing.sm
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Calendar"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+
+            Button {
+              id: calendarButton
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Add calendar…"
+              tooltipText: "Signs in for this mailbox's calendar and adds it, leaving the mail sign-in alone"
+              bordered: true
+              foreground: root.dim
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              onClicked: if (root.service) root.service.startLogin(String(page.modelData.account).trim(), false, true)
+            }
+          }
+
           LabeledField {
             width: parent.width
             label: "Alias"
@@ -1263,6 +1302,46 @@ Item {
               value: page.modelData.authority
               fg: root.fg; dim: root.dim; accent: root.accent; fontFamily: root.fontFamily
               onEdited: function(v) { root.updateRow(page.index, "authority", v) }
+            }
+
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(transportLabel.implicitHeight, transportSwitch.implicitHeight)
+
+              Text {
+                textFormat: Text.PlainText
+                id: transportLabel
+                anchors.left: parent.left
+                anchors.right: transportSwitch.left
+                anchors.rightMargin: Style.spacing.sm
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Sign in over IMAP"
+                color: root.fg
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                elide: Text.ElideRight
+              }
+
+              ToggleSwitch {
+                id: transportSwitch
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                checked: String(page.modelData.transport || "") === "imap"
+                foreground: root.fg
+                accent: root.accent
+                onToggled: root.updateRow(page.index, "transport",
+                                          String(page.modelData.transport || "") === "imap" ? "" : "imap")
+              }
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: "For a tenant that will not consent to Graph. Signs in as a desktop mail client for IMAP and SMTP, which is a client id such tenants have usually already approved - so the tenant sees that client's name, not this one. Leave the client id empty to use it. Changing this means signing in again."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
           }
 

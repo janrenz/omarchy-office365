@@ -21,6 +21,7 @@ themselves were unusable, so the widget always has something to render.
 """
 
 import argparse
+import base64
 import html
 import json
 import os
@@ -33,6 +34,22 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# The IMAP/SMTP transport, for tenants that will not consent to Graph. Optional
+# on purpose: a plugin directory without it still runs every Graph mailbox
+# rather than failing to start over a transport most mailboxes never use.
+try:
+    import imapmail
+except ImportError:
+    imapmail = None
+
+# The EWS calendar, for an IMAP mailbox whose tenant will not consent to
+# Graph. Optional for the same reason imapmail is: a mailbox can have mail
+# without ever having asked for a calendar, and most never will.
+try:
+    import ewscal
+except ImportError:
+    ewscal = None
 
 # Default app registration: "Omarchy Office 365 Mail & Calendar", in the
 # schollaart.net tenant. Multi-tenant and personal-account enabled, public
@@ -47,8 +64,38 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # shell.json.
 DEFAULT_CLIENT_ID = "1cebbbf2-9896-4381-b471-0b6740eb6748"
 
+# Mailboxes reached over IMAP instead of Graph. Some tenants let a user consent
+# only to "low impact" permissions - User.Read, openid, profile, email,
+# offline_access - which leaves Mail.Read behind an admin approval the user
+# cannot grant. Where the same tenant has already consented to a desktop mail
+# client's IMAP access, that is a way in that needs nobody's approval.
+TRANSPORT_IMAP = "imap"
+
+# Mozilla Thunderbird's registration, as published in Thunderbird's own source.
+# It is the default for an IMAP sign-in because it is the client such tenants
+# have usually already approved - which also means the tenant sees Thunderbird
+# where this widget is what connects. Set "clientId" per mailbox to sign in as a
+# registration of your own instead.
+IMAP_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+
+# One resource per token: these are Outlook's own scopes, not Graph's, and the
+# two cannot be asked for together. IMAP has no read-only scope to ask for -
+# IMAP.AccessAsUser.All is the whole mailbox - so unlike the Graph path, a
+# mailbox added for reading is held to that by this code rather than by the
+# token it carries.
+SCOPES_IMAP_READ = "offline_access https://outlook.office365.com/IMAP.AccessAsUser.All"
+SCOPES_IMAP_WRITE = (SCOPES_IMAP_READ + " https://outlook.office365.com/SMTP.Send")
+
 # "common" accepts both work/school and personal Microsoft accounts, so one
 # login button serves every account type.
+# The calendar of an IMAP mailbox. A third resource, so a third token: Entra
+# issues one per resource and refuses to mint this one from the mail refresh
+# token, which is why adding a calendar needs its own consent.
+SCOPES_EWS = "offline_access https://outlook.office365.com/EWS.AccessAsUser.All"
+# What a pending sign-in is for. An empty purpose is the ordinary one that
+# replaces the account; this one is added to a mailbox already signed in.
+PURPOSE_CALENDAR = "calendar"
+
 DEFAULT_AUTHORITY = "common"
 
 # Read-only by default. Write access is requested only when the user turns on
@@ -62,8 +109,48 @@ SCOPES_READ = "openid profile offline_access User.Read Mail.Read Calendars.Read"
 SCOPES_WRITE = "openid profile offline_access User.Read Mail.ReadWrite Mail.Send Calendars.Read"
 
 
-def scopes_for(write):
+def scopes_for(write, transport=""):
+    if transport == TRANSPORT_IMAP:
+        return SCOPES_IMAP_WRITE if write else SCOPES_IMAP_READ
     return SCOPES_WRITE if write else SCOPES_READ
+
+
+def transport_of(account):
+    """TRANSPORT_IMAP for a mailbox signed in over IMAP, "" for a Graph one."""
+    if str((account or {}).get("transport", "")).lower() == TRANSPORT_IMAP:
+        return TRANSPORT_IMAP
+    return ""
+
+
+def need_ews():
+    """The calendar module, or a clear failure instead of an AttributeError."""
+    if ewscal is None:
+        fail("no_calendar",
+             "This mailbox has a calendar signed in, but ewscal.py is missing from the "
+             "plugin directory.")
+    return ewscal
+
+
+def need_imap():
+    """The transport module, or a clear failure instead of an AttributeError."""
+    if imapmail is None:
+        fail("no_transport",
+             "This mailbox is signed in over IMAP, but imapmail.py is missing from the "
+             "plugin directory.")
+    return imapmail
+
+
+def imap_run(function, *arguments):
+    """Run a transport call, turning its failures into the widget's own."""
+    try:
+        return function(*arguments)
+    except need_imap().TransportError as error:
+        fail(error.code, error.message)
+
+
+# What each transport can answer, so the panel can hide what is absent instead
+# of showing an agenda that is always empty or a filter that never matches.
+GRAPH_CAPABILITIES = {"calendar": True, "focused": True, "webLinks": True}
 GRAPH = "https://graph.microsoft.com/v1.0"
 USER_AGENT = "omarchy-office365-plugin/1.0"
 
@@ -210,7 +297,7 @@ MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 HTML_BODY_CAP = 40000
 # The plain-text cap is on the text, before the links are put back: the markup
 # built from it is longer, and where it ends up is not a length worth guessing.
-TEXT_BODY_CAP = 8000
+TEXT_BODY_CAP = 40000
 
 
 def read_capped(response, limit=MAX_RESPONSE_BYTES):
@@ -285,6 +372,65 @@ def store_tokens(alias, account, token_response):
     return account
 
 
+def calendar_ready(account):
+    """Whether this mailbox ever consented to a calendar."""
+    return bool(((account or {}).get("calendar") or {}).get("refresh_token"))
+
+
+def store_calendar_tokens(alias, account, token_response):
+    """The calendar's tokens, kept beside the mailbox rather than replacing it.
+
+    A mailbox is signed in for mail first and gains a calendar afterwards, so
+    this must never touch the mail tokens sitting next to it.
+    """
+    account = dict(account)
+    calendar = dict(account.get("calendar") or {})
+    calendar["refresh_token"] = token_response.get(
+        "refresh_token", calendar.get("refresh_token", "")
+    )
+    calendar["access_token"] = token_response.get("access_token", "")
+    calendar["expires_at"] = time.time() + int(token_response.get("expires_in", 3600)) - 120
+    granted = token_response.get("scope")
+    if granted:
+        calendar["scopes"] = str(granted)
+    account["calendar"] = calendar
+    write_json(state_path(alias), account)
+    return account
+
+
+def calendar_token(alias, account):
+    """A valid EWS access token, refreshing the cached one when it is stale."""
+    calendar = account.get("calendar") or {}
+    if calendar.get("access_token") and time.time() < float(calendar.get("expires_at", 0)):
+        return calendar["access_token"], account
+
+    refresh_token = calendar.get("refresh_token")
+    if not refresh_token:
+        raise need_ews().CalendarError(
+            "calendar_auth_required", "This mailbox has no calendar signed in"
+        )
+
+    status, payload = http(
+        authority_base(account.get("authority")) + "/oauth2/v2.0/token",
+        method="POST",
+        data={
+            "client_id": account.get("client_id", DEFAULT_CLIENT_ID),
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "scope": SCOPES_EWS,
+        },
+    )
+    if status != 200:
+        # Consent withdrawn, password changed, conditional access - all of them
+        # need a person, so say so rather than retrying every refresh.
+        raise need_ews().CalendarError(
+            "calendar_auth_required",
+            payload.get("error_description", "The calendar needs signing in again").split("\r")[0],
+        )
+    account = store_calendar_tokens(alias, account, payload)
+    return account["calendar"]["access_token"], account
+
+
 def can_send(account):
     """Whether this mailbox consented to sending.
 
@@ -292,7 +438,30 @@ def can_send(account):
     has to mean no: offering Send and failing is worse than offering the draft
     path, which works either way.
     """
-    return "mail.send" in str((account or {}).get("scopes", "")).lower()
+    granted = str((account or {}).get("scopes", "")).lower()
+    if transport_of(account) == TRANSPORT_IMAP:
+        # Sending is a separate grant on this path too: a tenant can consent to
+        # IMAP and withhold SMTP, which leaves reading and the draft folder.
+        return "smtp.send" in granted
+    return "mail.send" in granted
+
+
+def token_claims(value):
+    """A JWT access token's payload, unverified.
+
+    Used for one thing: learning which mailbox just signed in. XOAUTH2 needs
+    that address in its SASL string, and an Outlook-resource token cannot ask
+    Graph's /me who it belongs to. Nothing is trusted on the strength of these
+    claims - the token came back from our own TLS call to Microsoft moments
+    earlier, and the worst a wrong one does is put the wrong name in the panel
+    and then fail to authenticate.
+    """
+    try:
+        payload = str(value or "").split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "replace"))
+    except (IndexError, ValueError, UnicodeDecodeError):
+        return {}
 
 
 def access_token(alias, account):
@@ -311,7 +480,7 @@ def access_token(alias, account):
             "client_id": account.get("client_id", DEFAULT_CLIENT_ID),
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-            "scope": scopes_for(account.get("write")),
+            "scope": scopes_for(account.get("write"), transport_of(account)),
         },
     )
     if status != 200:
@@ -332,12 +501,28 @@ def access_token(alias, account):
 
 
 def cmd_login_start(args):
-    client_id = args.client_id or DEFAULT_CLIENT_ID
-    authority = args.authority or DEFAULT_AUTHORITY
+    transport = TRANSPORT_IMAP if getattr(args, "transport", "") == TRANSPORT_IMAP else ""
+    calendar = bool(getattr(args, "calendar", False))
+    # A calendar is added to a mailbox, not a mailbox of its own: it reuses the
+    # registration and tenant the mail was signed in with, so that the person
+    # approving it sees the same client twice rather than two strangers.
+    existing = read_json(state_path(args.account)) if calendar else {}
+    if calendar and not existing:
+        fail("auth_required",
+             "Sign this mailbox in for mail first - a calendar is added to a mailbox.")
+    # An IMAP sign-in defaults to the client id such tenants have approved,
+    # rather than to this plugin's own registration - which is the whole reason
+    # to be on this path.
+    default_client = IMAP_CLIENT_ID if transport == TRANSPORT_IMAP else DEFAULT_CLIENT_ID
+    if calendar:
+        default_client = existing.get("client_id") or IMAP_CLIENT_ID
+    client_id = args.client_id or default_client
+    authority = args.authority or (existing.get("authority") if calendar else "") or DEFAULT_AUTHORITY
+    scope = SCOPES_EWS if calendar else scopes_for(args.write, transport)
     status, payload = http(
         authority_base(authority) + "/oauth2/v2.0/devicecode",
         method="POST",
-        data={"client_id": client_id, "scope": scopes_for(args.write)},
+        data={"client_id": client_id, "scope": scope},
     )
     if status != 200 or "device_code" not in payload:
         fail(
@@ -351,7 +536,9 @@ def cmd_login_start(args):
             "device_code": payload["device_code"],
             "client_id": client_id,
             "authority": authority,
+            "transport": transport,
             "write": bool(args.write),
+            "purpose": PURPOSE_CALENDAR if calendar else "",
             "interval": int(payload.get("interval", 5)),
             "expires_at": time.time() + int(payload.get("expires_in", 900)),
         },
@@ -399,12 +586,32 @@ def cmd_login_poll(args):
             fail("expired", "The sign-in code expired, start again")
         fail("login_failed", payload.get("error_description", error).split("\r")[0])
 
+    if str(pending.get("purpose", "")) == PURPOSE_CALENDAR:
+        # Merged into the mailbox, whose mail tokens must survive untouched.
+        existing = read_json(state_path(args.account))
+        if not existing:
+            os.unlink(pending_path)
+            fail("auth_required", "The mailbox this calendar belongs to is no longer signed in")
+        account = store_calendar_tokens(args.account, existing, payload)
+        os.unlink(pending_path)
+        out(
+            {
+                "ok": True,
+                "status": "signed-in",
+                "calendar": True,
+                "username": account.get("username", ""),
+                "displayName": account.get("displayName", ""),
+            }
+        )
+        return
+
     account = store_tokens(
         args.account,
         {
             "alias": args.account,
             "client_id": pending["client_id"],
             "authority": pending["authority"],
+            "transport": str(pending.get("transport", "") or ""),
             "write": bool(pending.get("write")),
         },
         payload,
@@ -412,15 +619,28 @@ def cmd_login_poll(args):
     os.unlink(pending_path)
 
     # Record who signed in, so the panel can show the mailbox address and the
-    # user can tell instances apart without opening Outlook.
-    status, me = http(
-        GRAPH + "/me?$select=displayName,userPrincipalName,mail",
-        headers={"Authorization": "Bearer " + account["access_token"]},
-    )
-    if status == 200:
-        account["username"] = me.get("mail") or me.get("userPrincipalName") or ""
-        account["displayName"] = me.get("displayName") or ""
+    # user can tell instances apart without opening Outlook. An IMAP token is
+    # for Outlook rather than Graph, so /me is not a question it can answer -
+    # and the address is not cosmetic there, it is half of the SASL exchange.
+    if transport_of(account) == TRANSPORT_IMAP:
+        claims = token_claims(account.get("access_token"))
+        account["username"] = (claims.get("preferred_username") or claims.get("upn")
+                               or claims.get("unique_name") or claims.get("email") or "")
+        account["displayName"] = claims.get("name") or ""
         write_json(state_path(args.account), account)
+        if not account["username"]:
+            fail("no_username",
+                 "Signed in, but the token does not say which mailbox it is for. Set the "
+                 "mailbox address in the widget's settings before fetching.")
+    else:
+        status, me = http(
+            GRAPH + "/me?$select=displayName,userPrincipalName,mail",
+            headers={"Authorization": "Bearer " + account["access_token"]},
+        )
+        if status == 200:
+            account["username"] = me.get("mail") or me.get("userPrincipalName") or ""
+            account["displayName"] = me.get("displayName") or ""
+            write_json(state_path(args.account), account)
 
     out(
         {
@@ -638,7 +858,7 @@ def fetch_messages(token, top, timezone_name, unread_only=False, focused_only=Fa
     showing the user an error we can avoid.
     """
     select = ("id,subject,from,receivedDateTime,bodyPreview,webLink,importance,"
-              "hasAttachments,isRead,inferenceClassification")
+              "hasAttachments,isRead,flag,inferenceClassification,conversationId")
     prefer = {"Prefer": f'outlook.timezone="{timezone_name}"'}
     base = {"$top": str(top), "$select": select}
     clauses = []
@@ -684,11 +904,25 @@ def message_row(message):
         "important": message.get("importance") == "high",
         "hasAttachments": bool(message.get("hasAttachments")),
         "read": bool(message.get("isRead")),
+        # Outlook's follow-up flag. Graph has three states and the third,
+        # "complete", is a flag that has been ticked off rather than one that is
+        # still standing - so only "flagged" counts here, which is what Outlook
+        # itself shows as a flag on the row.
+        "flagged": str((message.get("flag") or {}).get("flagStatus") or "") == "flagged",
         # Outlook's Focused Inbox split. Graph will filter on this or sort by
         # date, but not both - asking for both is a 400, and dropping the sort
         # returns the oldest mail first - so the split is applied in the panel
         # over what was fetched rather than server-side.
         "focused": message.get("inferenceClassification", "focused") != "other",
+        # Which conversation this belongs to. Graph keeps the thread itself, so
+        # there is nothing to work out here; the IMAP path has to rebuild the
+        # same relation from Message-ID headers, and both arrive in the panel
+        # as these three fields so the grouping never asks which transport
+        # answered. Graph needs no ids of its own, and says so with blanks
+        # rather than by leaving the keys out.
+        "thread": message.get("conversationId", "") or "",
+        "messageId": "",
+        "references": [],
     }
 
 
@@ -712,6 +946,71 @@ def online_provider(event):
     return provider
 
 
+def imap_fetch_account(alias, account, token, args, timezone_name):
+    """One IMAP mailbox, in the shape fetch_account returns for a Graph one.
+
+    IMAP carries mail and nothing else, so the agenda comes from EWS when the
+    mailbox has a calendar signed in and stays empty when it has not -
+    capabilities says which, so the panel can hide the column rather than draw
+    an empty one. A calendar that fails is a warning, never an empty pane: mail
+    arriving without an agenda is still worth showing.
+    """
+    top = max(1, min(args.mails, 25))
+    wanted = folder_choices(getattr(args, "folder", [])).get(alias, "")
+    try:
+        data = need_imap().snapshot(account, token, top, wanted)
+    except need_imap().TransportError as error:
+        # An AccountError rather than a fail(): one unreachable mailbox must
+        # not empty the others in the same fetch.
+        raise AccountError(error.code, error.message)
+
+    events = []
+    warnings = list(data["warnings"])
+    capabilities = dict(need_imap().capabilities())
+    if calendar_ready(account) and ewscal is None:
+        warnings.append(
+            {"scope": "calendar",
+             "message": "This mailbox has a calendar, but ewscal.py is missing from the "
+                        "plugin directory"}
+        )
+    elif calendar_ready(account):
+        try:
+            ews_token, account = calendar_token(alias, account)
+            events, clipped = ewscal.events(
+                ews_token,
+                args.days,
+                timezone_name,
+                bool(getattr(args, "from_now", False)),
+            )
+            capabilities.update(ewscal.capabilities())
+            if clipped:
+                warnings.append(
+                    {"scope": "calendar",
+                     "message": "Too many meetings to show them all - shorten the range"}
+                )
+        except ewscal.CalendarError as error:
+            warnings.append({"scope": "calendar", "message": error.message})
+
+    return {
+        "ok": True,
+        "alias": alias,
+        "username": account.get("username", ""),
+        "displayName": account.get("displayName", ""),
+        "write": bool(account.get("write")),
+        "send": can_send(account),
+        "transport": TRANSPORT_IMAP,
+        "capabilities": capabilities,
+        "mail": data["mail"],
+        "unreadCount": data["unreadCount"],
+        "unreadKnown": data["unreadKnown"],
+        "folders": data["folders"],
+        "folderId": data["folderId"],
+        "folderName": data["folderName"],
+        "events": events,
+        "warnings": warnings,
+    }
+
+
 def fetch_account(alias, args, timezone_name):
     """One mailbox's unread mail and calendar. Raises AccountError on failure."""
     account = read_json(state_path(alias))
@@ -719,6 +1018,9 @@ def fetch_account(alias, args, timezone_name):
         raise AccountError("auth_required", "Not signed in")
 
     token, account = access_token(alias, account)
+    if transport_of(account) == TRANSPORT_IMAP:
+        return imap_fetch_account(alias, account, token, args, timezone_name)
+
     result = {
         "ok": True,
         "alias": alias,
@@ -726,6 +1028,8 @@ def fetch_account(alias, args, timezone_name):
         "displayName": account.get("displayName", ""),
         "write": bool(account.get("write")),
         "send": can_send(account),
+        "transport": "",
+        "capabilities": GRAPH_CAPABILITIES,
         "mail": [],
         "unreadCount": 0,
         # Whether unreadCount is the inbox's own number or a floor taken from
@@ -1080,6 +1384,10 @@ def demo_account(alias, index, args):
                 "important": slot == 0 and index == 0,
                 "hasAttachments": "Invoice" in subject or "statement" in subject,
                 "read": read,
+                # One flagged row, so the flag column is visible in the demo
+                # layout and in the showcase images rather than only in a real
+                # mailbox that happens to have one.
+                "flagged": slot == 1,
                 "focused": focused,
             }
         )
@@ -1430,6 +1738,22 @@ def recipients(values):
     return people
 
 
+def render_body(raw, served_html, want_html):
+    """(body, truncated, format) for a pane, from whichever transport read it.
+
+    Capped before anything is built from it, not after: cutting finished markup
+    at a fixed length lands in the middle of a tag sooner or later.
+    """
+    if want_html and served_html:
+        body = sanitize_html(raw)
+        return body[:HTML_BODY_CAP], len(body) > HTML_BODY_CAP, "html"
+    tidied = tidy_body(raw)
+    # Links go back in as links. The result is markup, but markup this file
+    # wrote out of escaped text rather than anything a sender sent, which is
+    # why it needs none of sanitize_html's work.
+    return linkify(tidied[:TEXT_BODY_CAP]), len(tidied) > TEXT_BODY_CAP, "linked"
+
+
 def cmd_message(args):
     """One message with its body, fetched only when the user asks to read it.
 
@@ -1452,6 +1776,33 @@ def cmd_message(args):
 
     timezone_name = local_timezone()
     want_html = bool(getattr(args, "html", False))
+
+    if transport_of(account) == TRANSPORT_IMAP:
+        message = imap_run(need_imap().message, account, token, args.id, want_html)
+        raw, served_html = message["raw"], message["isHtml"]
+        # Graph converts HTML to text for us when the Prefer header asks for
+        # it; IMAP hands over the source and leaves the conversion here. Left
+        # undone, tidy_body escapes the markup into the pane and the reader
+        # gets <head> and a stylesheet where the message should be - and the
+        # body cap is spent long before the text starts.
+        if served_html and not want_html:
+            raw = need_imap().strip_markup(raw)
+            served_html = False
+        body, truncated, body_format = render_body(raw, served_html, want_html)
+        out(dict(ok=True, id=message["id"], subject=message["subject"], **{
+            "from": message["from"],
+            "fromAddress": message["fromAddress"],
+            "to": message["to"],
+            "cc": message["cc"],
+            "received": message["received"],
+            "webLink": message["webLink"],
+            "hasAttachments": message["hasAttachments"],
+            "body": body,
+            "truncated": truncated,
+            "bodyFormat": body_format,
+        }))
+        return
+
     status, payload = graph_get(
         token,
         "/me/messages/" + urllib.parse.quote(args.id, safe=""),
@@ -1469,19 +1820,7 @@ def cmd_message(args):
     served_html = str((payload.get("body") or {}).get("contentType") or "").lower() == "html"
     # Capped before anything is built from it, not after: cutting finished
     # markup at a fixed length lands in the middle of a tag sooner or later.
-    if want_html and served_html:
-        body = sanitize_html(raw)
-        truncated = len(body) > HTML_BODY_CAP
-        body = body[:HTML_BODY_CAP]
-        body_format = "html"
-    else:
-        tidied = tidy_body(raw)
-        truncated = len(tidied) > TEXT_BODY_CAP
-        # Links go back in as links. The result is markup, but markup this
-        # file wrote out of escaped text rather than anything a sender sent,
-        # which is why it needs none of sanitize_html's work.
-        body = linkify(tidied[:TEXT_BODY_CAP])
-        body_format = "linked"
+    body, truncated, body_format = render_body(raw, served_html, want_html)
     out(
         {
             "ok": True,
@@ -1507,22 +1846,27 @@ def cmd_message(args):
     )
 
 
-def writable_token(alias):
-    """A token that may change mail, or a clear reason why not."""
+def writable(alias):
+    """(token, account) for a mailbox that may change mail, or a clear reason
+    why not. The account comes back with it because which transport answers is
+    recorded there, and every caller needs to know."""
     account = read_json(state_path(alias))
     if not account:
         fail("auth_required", "Not signed in")
     if not account.get("write"):
         fail("write_required", "This mailbox is signed in for reading only")
     try:
-        return access_token(alias, account)[0]
+        return access_token(alias, account)[0], account
     except AccountError as error:
         fail(error.code, error.message)
 
 
 def cmd_mark(args):
     """Mark one message read or unread."""
-    token = writable_token(args.account)
+    token, account = writable(args.account)
+    if transport_of(account) == TRANSPORT_IMAP:
+        out(imap_run(need_imap().mark, account, token, args.id, args.read))
+        return
     status, payload = http(
         GRAPH + "/me/messages/" + urllib.parse.quote(args.id, safe=""),
         method="PATCH",
@@ -1534,6 +1878,29 @@ def cmd_mark(args):
     out({"ok": True, "id": args.id, "read": args.read})
 
 
+def cmd_flag(args):
+    """Raise or clear one message's follow-up flag.
+
+    The same thing Outlook's flag column does, and the same thing IMAP's
+    \\Flagged means, so a message flagged here is flagged in Outlook and on the
+    phone. Clearing sets notFlagged rather than complete: a flag taken off is
+    not a task finished, and "complete" would leave Outlook showing a tick.
+    """
+    token, account = writable(args.account)
+    if transport_of(account) == TRANSPORT_IMAP:
+        out(imap_run(need_imap().flag, account, token, args.id, args.flagged))
+        return
+    status, payload = http(
+        GRAPH + "/me/messages/" + urllib.parse.quote(args.id, safe=""),
+        method="PATCH",
+        json_body={"flag": {"flagStatus": "flagged" if args.flagged else "notFlagged"}},
+        headers={"Authorization": "Bearer " + token},
+    )
+    if status not in (200, 204):
+        fail("flag_failed", graph_error(payload, "Could not flag this message"))
+    out({"ok": True, "id": args.id, "flagged": bool(args.flagged)})
+
+
 def cmd_delete(args):
     """Move one message to Deleted Items.
 
@@ -1541,7 +1908,10 @@ def cmd_delete(args):
     than an erase, which is what makes a one-click button on a bar widget
     reasonable: it is undoable from Outlook.
     """
-    token = writable_token(args.account)
+    token, account = writable(args.account)
+    if transport_of(account) == TRANSPORT_IMAP:
+        out(imap_run(need_imap().delete, account, token, args.id))
+        return
     status, payload = http(
         GRAPH + "/me/messages/" + urllib.parse.quote(args.id, safe=""),
         method="DELETE",
@@ -1562,10 +1932,13 @@ def cmd_move(args):
     moment this returns. The new one goes back with it, so anything that wants
     to follow the message has something to follow.
     """
-    token = writable_token(args.account)
+    token, account = writable(args.account)
     destination = str(getattr(args, "folder", "") or "").strip()
     if not destination:
         fail("no_folder", "No folder to move this message to")
+    if transport_of(account) == TRANSPORT_IMAP:
+        out(imap_run(need_imap().move, account, token, args.id, destination))
+        return
     status, payload = http(
         GRAPH + "/me/messages/" + urllib.parse.quote(args.id, safe="") + "/move",
         method="POST",
@@ -1590,6 +1963,17 @@ def cmd_folders(args):
     if not account:
         raise AccountError("auth_required", "Not signed in")
     token, _ = access_token(args.account, account)
+    if transport_of(account) == TRANSPORT_IMAP:
+        client = None
+        try:
+            client = need_imap().connect(account, token)
+            folders, complete = need_imap().folder_rows(client)
+        except need_imap().TransportError as error:
+            fail(error.code, error.message)
+        finally:
+            need_imap().close(client)
+        out({"ok": True, "alias": args.account, "folders": folders, "complete": complete})
+        return
     status, payload = graph_get(token, "/me/mailFolders/inbox", {"$select": "id"})
     inbox_id = str(payload.get("id") or "") if status == 200 else ""
     folders, error, complete = fetch_folders(token, inbox_id)
@@ -1656,6 +2040,18 @@ def cmd_compose(args):
     except AccountError as error:
         fail(error.code, error.message)
 
+    if transport_of(account) == TRANSPORT_IMAP:
+        addresses = [entry["emailAddress"]["address"] for entry in recipients]
+        if not args.draft and not can_send(account):
+            # Said before the request rather than after SMTP refuses the
+            # sign-in, so the window can offer the draft instead.
+            fail("send_permission_required",
+                 "This mailbox consented to IMAP but not to SMTP.Send. Save this as a draft, "
+                 "or sign in again to allow sending.")
+        out(imap_run(need_imap().compose, account, token, args.id, args.mode,
+                     str(args.comment or ""), addresses, bool(args.draft)))
+        return
+
     base = GRAPH + "/me/messages/" + urllib.parse.quote(args.id, safe="")
     headers = {"Authorization": "Bearer " + token}
     comment = str(args.comment or "")
@@ -1716,6 +2112,7 @@ def cmd_list(_args):
                 "displayName": data.get("displayName", ""),
                 "clientId": data.get("client_id", ""),
                 "authority": data.get("authority", ""),
+                "transport": data.get("transport", ""),
             }
         )
     out({"ok": True, "accounts": accounts})
@@ -1743,7 +2140,13 @@ def main():
     start = with_account("login-start", "begin a device-code sign-in")
     start.add_argument("--client-id", default="")
     start.add_argument("--authority", default="", help="common, organizations, consumers, or a tenant id")
+    start.add_argument("--transport", default="", choices=["", TRANSPORT_IMAP],
+                       help="imap to sign in for IMAP/SMTP instead of Graph, for tenants that "
+                            "will not consent to Mail.Read")
     start.add_argument("--write", action="store_true", help="also ask for permission to change mail")
+    start.add_argument("--calendar", action="store_true",
+                       help="ask for the calendar (EWS) and add it to a mailbox already signed "
+                            "in over IMAP, which Graph's calendar scope cannot reach")
     start.set_defaults(func=cmd_login_start)
 
     with_account("login-poll", "poll a pending sign-in").set_defaults(func=cmd_login_poll)
@@ -1782,6 +2185,12 @@ def main():
     mark.add_argument("--read", dest="read", action="store_true")
     mark.add_argument("--unread", dest="read", action="store_false")
     mark.set_defaults(read=False, func=cmd_mark)
+
+    flag = with_account("flag", "raise or clear a message's follow-up flag")
+    flag.add_argument("--id", required=True)
+    flag.add_argument("--flag", dest="flagged", action="store_true")
+    flag.add_argument("--unflag", dest="flagged", action="store_false")
+    flag.set_defaults(flagged=True, func=cmd_flag)
 
     delete = with_account("delete", "move a message to Deleted Items")
     delete.add_argument("--id", required=True)

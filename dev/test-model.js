@@ -478,7 +478,7 @@ group("retiring the optimistic overlay", () => {
         Model.pruneOwnedOverrides(
           fetched("work", [msg("a", true)]),
           { read: { a: true }, deleted: {} }, { a: "work" }),
-        { overrides: { read: {}, deleted: {} }, owner: {} })
+        { overrides: { read: {}, flagged: {}, deleted: {} }, owner: {} })
 
   check("one it has not stays",
         Model.pruneOwnedOverrides(
@@ -506,7 +506,7 @@ group("retiring the optimistic overlay", () => {
         Model.pruneOwnedOverrides(
           fetched("work", [msg("b", false)]),
           { read: {}, deleted: { a: true } }, { a: "work" }),
-        { overrides: { read: {}, deleted: {} }, owner: {} })
+        { overrides: { read: {}, flagged: {}, deleted: {} }, owner: {} })
 
   check("one still being returned stays",
         Model.pruneOwnedOverrides(
@@ -524,7 +524,57 @@ group("retiring the optimistic overlay", () => {
         Model.pruneOwnedOverrides(
           fetched("work", [msg("a", true), msg("b", false)]),
           { read: { a: true, b: true }, deleted: {} }, { a: "work", b: "work" }),
-        { overrides: { read: { b: true }, deleted: {} }, owner: { b: "work" } })
+        { overrides: { read: { b: true }, flagged: {}, deleted: {} }, owner: { b: "work" } })
+})
+
+// The follow-up flag rides the same optimistic overlay the read mark does, so
+// flagging a row in the window flags it in the bar before the helper has
+// answered - and puts it back if the helper refuses.
+group("the follow-up flag", () => {
+  const view = (alias, mail) => ({ alias, short: alias[0].toUpperCase(), color: "#fff",
+                                   write: true, mail })
+  const msg = (id, flagged) => ({ id, subject: id, from: "A", fromAddress: "a@example.com",
+                                  received: "2026-09-01T09:00:00Z", preview: "", read: true,
+                                  flagged })
+  const flagsOf = (rows) => rows.map((r) => [r.id, r.flagged])
+
+  const rows = [view("work", [msg("a", true), msg("b", false)])]
+
+  check("what the server says, with no overlay",
+        flagsOf(Model.mergeMail(rows, false, 0, {}, false)),
+        [["a", true], ["b", false]])
+
+  check("an overlay wins over the server",
+        flagsOf(Model.mergeMail(rows, false, 0, { flagged: { b: true } }, false)),
+        [["a", true], ["b", true]])
+
+  check("and can clear one the server still calls flagged",
+        flagsOf(Model.mergeMail(rows, false, 0, { flagged: { a: false } }, false)),
+        [["a", false], ["b", false]])
+
+  // Retiring works the way the read mark's does: only once the fetch agrees.
+  check("an override the fetch has caught up with goes",
+        Model.pruneOwnedOverrides(
+          { ok: true, alias: "work", mail: [msg("a", true)] },
+          { read: {}, flagged: { a: true }, deleted: {} }, { a: "work" }),
+        { overrides: { read: {}, flagged: {}, deleted: {} }, owner: {} })
+
+  check("one it still disagrees with stays",
+        Model.pruneOwnedOverrides(
+          { ok: true, alias: "work", mail: [msg("a", false)] },
+          { read: {}, flagged: { a: true }, deleted: {} }, { a: "work" }),
+        null)
+
+  // A collapsed conversation stands for every message in it, so one flag in
+  // there is a flag on the row.
+  const thread = [view("work", [
+    { ...msg("a", false), thread: "t1" },
+    { ...msg("b", true), thread: "t1" }
+  ])]
+  check("a thread wears any flag inside it",
+        Model.groupThreads(Model.mergeMailAll(thread, false, {}, false), 0, {})
+             .map((g) => g.flagged),
+        [true])
 })
 
 group("where a message can be filed", () => {

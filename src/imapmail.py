@@ -1,0 +1,1134 @@
+#!/usr/bin/env python3
+"""IMAP and SMTP transport, for mailboxes whose tenant will not consent to Graph.
+
+Some tenants allow users to consent only to "low impact" delegated
+permissions - User.Read, openid, profile, email, offline_access. Mail.Read is
+not one of them, so on those tenants the Graph path in graph.py stops at an
+admin-approval wall that the user cannot clear themselves. Where the same
+tenant has already granted a desktop mail client access to IMAP, this module
+reads the mailbox over IMAP instead, with the same OAuth device-code sign-in.
+
+Two things about that are worth stating plainly rather than leaving in the
+git log:
+
+  * The client id used for an IMAP sign-in defaults to Mozilla Thunderbird's
+    (see IMAP_CLIENT_ID in graph.py). The tenant sees Thunderbird where this
+    widget is what actually connects. Set "clientId" per mailbox to use a
+    registration of your own where that matters.
+  * IMAP has no read-only scope. IMAP.AccessAsUser.All is full mailbox
+    access, so a mailbox added for reading holds permission to change and
+    delete mail even though nothing here will. On the Graph path, "signed in
+    for reading" is enforced by the token; here it is only enforced by this
+    code, and account["write"] is a local policy rather than a boundary.
+
+Stdlib only, like the rest of the plugin: imaplib, smtplib and email are all
+that this needs.
+
+The module speaks in the same shapes graph.py already builds for the QML side,
+so the panel cannot tell which transport answered - except where a protocol
+genuinely cannot answer, which is reported as a capability rather than faked:
+IMAP has no calendar, and Outlook's Focused/Other split lives in Graph alone.
+"""
+
+import base64
+import email.policy
+import email.utils
+import imaplib
+import re
+import smtplib
+import time
+from datetime import datetime, timezone
+from email.message import EmailMessage
+
+DEFAULT_IMAP_HOST = "outlook.office365.com"
+DEFAULT_SMTP_HOST = "smtp.office365.com"
+DEFAULT_SMTP_PORT = 587
+TIMEOUT = 30
+
+# A preview is two lines in a list; a couple of kilobytes of the body is more
+# than enough to find them, and asking for the whole body of every message in
+# the list would turn one fetch into a download.
+PREVIEW_BYTES = 3072
+PREVIEW_CHARS = 200
+# A reading pane cannot show a novel, and some mail carries megabytes of
+# attachment that BODY[] would drag over the wire before anything is drawn.
+MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+
+FOLDER_CAP = 200
+FOLDER_MAX_DEPTH = 3
+# One STATUS per folder is one round trip per folder. A mailbox with a hundred
+# of them would spend the whole refresh interval counting, so the counts stop
+# after this many and the rest list without them.
+FOLDER_COUNT_CAP = 60
+
+# Headers worth having for a list row. Content-Type and
+# Content-Transfer-Encoding are not for display: they are what makes the
+# separately fetched body text parseable as MIME (see preview_text).
+HEADER_FIELDS = ("SUBJECT FROM DATE TO CC MESSAGE-ID REFERENCES IN-REPLY-TO "
+                 "CONTENT-TYPE CONTENT-TRANSFER-ENCODING MIME-VERSION X-PRIORITY "
+                 "IMPORTANCE")
+LIST_ITEMS = "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (%s)])" % HEADER_FIELDS
+PREVIEW_ITEMS = "(UID BODY.PEEK[TEXT]<0.%d>)" % PREVIEW_BYTES
+
+# A Message-ID as RFC 5322 writes one. Deliberately loose about what may sit
+# inside the angle brackets - real mailers put spaces, slashes and unicode in
+# there - and strict only about the brackets, which is what separates one id
+# from the next in a folded References header.
+MESSAGE_ID = re.compile(r"<[^<>]+>")
+
+POLICY = email.policy.default
+
+# Exchange advertises neither SPECIAL-USE nor XLIST, so there is no flag on a
+# LIST reply saying which folder is the trash - and the names arrive in the
+# mailbox's own language. Matching by name is what is left. A mailbox whose
+# names are none of these says so and asks for the folder to be set, rather
+# than moving mail somewhere unintended.
+SPECIAL_FOLDERS = {
+    "trash": ("Deleted Items", "Gelöschte Elemente", "Gelöschte Objekte", "Trash", "Papierkorb",
+              "Éléments supprimés", "Elementos eliminados", "Verwijderde items", "Cestino",
+              "Usunięte", "Kosz", "Slettede elementer", "Borttagna objekt", "Poistetut"),
+    "archive": ("Archive", "Archiv", "Archief", "Arkiv", "Arkisto", "Archivio", "Archivo",
+                "Archives", "Archiwum"),
+    "junk": ("Junk Email", "Junk-E-Mail", "Junk", "Spam", "Ongewenste e-mail", "Courrier indésirable",
+             "Correo no deseado", "Posta indesiderata", "Wiadomości-śmieci", "Skräppost", "Roskaposti"),
+    "drafts": ("Drafts", "Entwürfe", "Concepten", "Brouillons", "Borradores", "Bozze", "Kladder",
+               "Utkast", "Luonnokset", "Wersje robocze", "Kladde"),
+    "sent": ("Sent Items", "Gesendete Elemente", "Gesendete Objekte", "Sent", "Verzonden items",
+             "Éléments envoyés", "Elementos enviados", "Posta inviata", "Skickat", "Lähetetyt",
+             "Elementy wysłane", "Sendte elementer"),
+}
+
+# Well-known destinations graph.py's `move` accepts, mapped onto the keys
+# above, so the window's Archive and Junk buttons mean the same thing whichever
+# transport is behind the mailbox.
+GRAPH_WELL_KNOWN = {
+    "deleteditems": "trash",
+    "trash": "trash",
+    "archive": "archive",
+    "junkemail": "junk",
+    "junk": "junk",
+    "drafts": "drafts",
+    "sentitems": "sent",
+}
+
+
+class TransportError(Exception):
+    """A failure that belongs to one mailbox. graph.py turns it into an
+    AccountError, so one unreachable mailbox does not empty the others."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+# --------------------------------------------------------------------------
+# modified UTF-7, RFC 3501 section 5.1.3
+# --------------------------------------------------------------------------
+#
+# IMAP mailbox names are ASCII on the wire, with everything else in a base64
+# dialect. German mailboxes hit this immediately - "Entwürfe" - and a name that
+# survives a round trip unchanged is the difference between selecting a folder
+# and creating one.
+
+
+def _mutf7_chunk(text):
+    raw = base64.b64encode(text.encode("utf-16-be")).decode("ascii")
+    return raw.rstrip("=").replace("/", ",")
+
+
+def encode_mutf7(name):
+    parts, run = [], []
+    for char in str(name):
+        if "\x20" <= char <= "\x7e":
+            if run:
+                parts.append("&" + _mutf7_chunk("".join(run)) + "-")
+                run = []
+            parts.append("&-" if char == "&" else char)
+        else:
+            run.append(char)
+    if run:
+        parts.append("&" + _mutf7_chunk("".join(run)) + "-")
+    return "".join(parts)
+
+
+def decode_mutf7(name):
+    text = name.decode("ascii", "replace") if isinstance(name, bytes) else str(name)
+    parts, index = [], 0
+    while index < len(text):
+        char = text[index]
+        if char != "&":
+            parts.append(char)
+            index += 1
+            continue
+        end = text.find("-", index + 1)
+        if end == -1:
+            # Unterminated shift: nothing good comes of guessing, so the rest
+            # is taken literally and the name stays readable.
+            parts.append(text[index:])
+            break
+        chunk = text[index + 1:end]
+        if chunk == "":
+            parts.append("&")
+        else:
+            padded = chunk.replace(",", "/")
+            padded += "=" * (-len(padded) % 4)
+            try:
+                parts.append(base64.b64decode(padded).decode("utf-16-be"))
+            except (ValueError, UnicodeDecodeError):
+                parts.append(text[index:end + 1])
+        index = end + 1
+    return "".join(parts)
+
+
+def quoted(name):
+    """A mailbox name as an IMAP quoted string."""
+    ascii_name = encode_mutf7(name)
+    return '"' + ascii_name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+# --------------------------------------------------------------------------
+# message ids
+# --------------------------------------------------------------------------
+#
+# Graph hands out an id that names a message wherever it is. An IMAP UID names
+# a message *in one mailbox*, and only for as long as that mailbox keeps its
+# UIDVALIDITY - so all three go into the id the panel carries around, and a
+# stale one is reported rather than resolved against whatever now holds that
+# number.
+
+ID_PREFIX = "imap"
+
+
+def make_id(mailbox, uidvalidity, uid):
+    from urllib.parse import quote
+    return "%s:%s:%s:%s" % (ID_PREFIX, quote(str(mailbox), safe=""), uidvalidity, uid)
+
+
+def parse_id(message_id):
+    from urllib.parse import unquote
+    parts = str(message_id or "").split(":")
+    if len(parts) != 4 or parts[0] != ID_PREFIX:
+        raise TransportError("bad_id", "That message id is not an IMAP one")
+    mailbox = unquote(parts[1])
+    if not parts[3].isdigit():
+        raise TransportError("bad_id", "That message id has no UID")
+    return mailbox, parts[2], parts[3]
+
+
+# --------------------------------------------------------------------------
+# connection
+# --------------------------------------------------------------------------
+
+
+def _sasl_xoauth2(username, token):
+    """SASL XOAUTH2, as imaplib and smtplib both want it: a callable that is
+    handed the server's challenge and answers with the bytes to base64.
+
+    A failed exchange comes back as a challenge carrying a JSON error blob and
+    the protocol expects an empty line before the NO, so the credentials are
+    offered once and every later challenge is answered with nothing. Resending
+    them would leave the connection waiting on a continuation that never ends.
+    """
+    state = {"offered": False}
+
+    def authobject(_challenge=None):
+        if state["offered"]:
+            return b""
+        state["offered"] = True
+        return ("user=%s\x01auth=Bearer %s\x01\x01" % (username, token)).encode()
+
+    return authobject
+
+
+def _text(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, (list, tuple)):
+        return " ".join(_text(item) for item in value)
+    return str(value)
+
+
+def _auth_failure(detail):
+    """Turn a rejected AUTHENTICATE into something a user can act on."""
+    lowered = detail.lower()
+    if "disabled" in lowered or "not enabled" in lowered:
+        return TransportError(
+            "imap_disabled",
+            "IMAP is switched off for this mailbox. The tenant consented to the "
+            "permission, but an admin has disabled the protocol.",
+        )
+    if "authenticationfailed" in lowered.replace(" ", "") or "invalid" in lowered:
+        return TransportError("auth_required", "IMAP rejected the sign-in: " + detail)
+    return TransportError("imap_error", "IMAP sign-in failed: " + detail)
+
+
+def username_of(account):
+    name = str((account or {}).get("username") or "").strip()
+    if not name:
+        raise TransportError(
+            "no_username",
+            "This mailbox has no address recorded, and XOAUTH2 needs one. Sign in again, "
+            "or set the mailbox address in the widget's settings.",
+        )
+    return name
+
+
+def connect(account, token):
+    """An authenticated IMAP connection. The caller closes it."""
+    username = username_of(account)
+    host = str(account.get("imap_host") or DEFAULT_IMAP_HOST)
+    try:
+        client = imaplib.IMAP4_SSL(host, 993, timeout=TIMEOUT)
+    except (OSError, imaplib.IMAP4.error) as error:
+        raise TransportError("network", "Could not reach %s: %s" % (host, error))
+    try:
+        client.authenticate("XOAUTH2", _sasl_xoauth2(username, token))
+    except imaplib.IMAP4.error as error:
+        try:
+            client.logout()
+        except (OSError, imaplib.IMAP4.error):
+            pass
+        raise _auth_failure(_text(error))
+    return client
+
+
+def close(client):
+    """Log out without letting a failing goodbye mask the work that succeeded."""
+    if client is None:
+        return
+    try:
+        client.logout()
+    except (OSError, imaplib.IMAP4.error):
+        pass
+
+
+def select(client, mailbox, readonly=True):
+    """SELECT or EXAMINE, returning (exists, uidvalidity)."""
+    try:
+        typ, data = client.select(quoted(mailbox), readonly=readonly)
+    except imaplib.IMAP4.error as error:
+        raise TransportError("select_failed", "Could not open %s: %s" % (mailbox, _text(error)))
+    if typ != "OK":
+        raise TransportError("select_failed", "Could not open %s: %s" % (mailbox, _text(data)))
+    exists = 0
+    try:
+        exists = int(_text(data[0]).strip() or 0)
+    except (ValueError, IndexError):
+        pass
+    # UIDVALIDITY arrives untagged during SELECT; imaplib keeps the last one.
+    validity = _text(client.untagged_responses.get("UIDVALIDITY", [b""])[0]).strip() or "0"
+    return exists, validity
+
+
+# --------------------------------------------------------------------------
+# folders
+# --------------------------------------------------------------------------
+
+LIST_LINE = re.compile(rb'^\((?P<flags>[^)]*)\)\s+(?:"(?P<delim>[^"]*)"|(?P<nil>NIL))\s+(?P<name>.*)$')
+
+
+def list_folders(client):
+    """[(name, delimiter, flags)] for every folder, names already decoded."""
+    try:
+        typ, data = client.list('""', '"*"')
+    except imaplib.IMAP4.error as error:
+        raise TransportError("list_failed", "Could not list folders: " + _text(error))
+    if typ != "OK":
+        raise TransportError("list_failed", "Could not list folders: " + _text(data))
+
+    folders = []
+    for line in data or []:
+        raw, literal = (line[0], line[1]) if isinstance(line, tuple) else (line, None)
+        if not raw:
+            continue
+        match = LIST_LINE.match(raw.strip())
+        if not match:
+            continue
+        flags = _text(match.group("flags")).split()
+        delimiter = _text(match.group("delim") or "/")
+        if literal is not None:
+            # A name the server chose to send as a literal; the trailing field
+            # of the line is then the length prefix rather than the name.
+            name = decode_mutf7(literal)
+        else:
+            name = _text(match.group("name")).strip()
+            if name.startswith('"') and name.endswith('"') and len(name) >= 2:
+                name = name[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            name = decode_mutf7(name)
+        if name:
+            folders.append((name, delimiter or "/", flags))
+    return folders
+
+
+def folder_rows(client, want_counts=True):
+    """The folder tree flattened parents-first, in graph.py's row shape.
+
+    Returns (rows, complete). Counts come from one STATUS per folder, which is
+    one round trip each - capped, and the cap is what `complete` reports.
+    """
+    folders = list_folders(client)
+    inbox = next((name for name, _, _ in folders if name.upper() == "INBOX"), "INBOX")
+
+    def sort_key(item):
+        name, delimiter, _flags = item
+        parts = name.split(delimiter) if delimiter else [name]
+        # The inbox leads. Below it, alphabetical within each level, with each
+        # level's key carrying the parent's so children follow their parent.
+        keyed = []
+        for index, part in enumerate(parts):
+            first = index == 0 and part.upper() == "INBOX"
+            keyed.append((0 if first else 1, part.lower()))
+        return keyed
+
+    truncated = False
+    rows, counted = [], 0
+    for name, delimiter, flags in sorted(folders, key=sort_key):
+        if len(rows) >= FOLDER_CAP:
+            truncated = True
+            break
+        parts = name.split(delimiter) if delimiter else [name]
+        depth = len(parts) - 1
+        if depth >= FOLDER_MAX_DEPTH:
+            truncated = True
+            continue
+        selectable = not any(flag.lower() == "\\noselect" for flag in flags)
+        unread = total = 0
+        if want_counts and selectable and counted < FOLDER_COUNT_CAP:
+            unread, total = folder_counts(client, name)
+            counted += 1
+        elif want_counts and selectable:
+            truncated = True
+        rows.append(
+            {
+                "id": name,
+                "name": parts[-1] or name,
+                "unread": unread,
+                "total": total,
+                # LIST says whether a folder has children; \HasChildren is
+                # advertised by Exchange, and the count itself is not
+                # something IMAP offers.
+                "childCount": 1 if any(f.lower() == "\\haschildren" for f in flags) else 0,
+                "parentId": delimiter.join(parts[:-1]) if depth else "",
+                "depth": depth,
+                "isInbox": name == inbox,
+            }
+        )
+    return rows, not truncated
+
+
+STATUS_COUNTS = re.compile(rb"MESSAGES\s+(\d+).*?UNSEEN\s+(\d+)|UNSEEN\s+(\d+).*?MESSAGES\s+(\d+)", re.S)
+
+
+def folder_counts(client, mailbox):
+    """(unread, total) for one folder, or (0, 0) if it will not say."""
+    try:
+        typ, data = client.status(quoted(mailbox), "(MESSAGES UNSEEN)")
+    except imaplib.IMAP4.error:
+        return 0, 0
+    if typ != "OK":
+        return 0, 0
+    blob = b" ".join(item for item in data if isinstance(item, bytes))
+    total = re.search(rb"MESSAGES\s+(\d+)", blob)
+    unread = re.search(rb"UNSEEN\s+(\d+)", blob)
+    return (int(unread.group(1)) if unread else 0, int(total.group(1)) if total else 0)
+
+
+def resolve_special(client, key, account=None):
+    """The mailbox behind "trash", "archive", "junk", "drafts" or "sent".
+
+    An explicit choice in the account's own settings wins; otherwise the folder
+    names are matched against the localized candidates. Nothing matching is an
+    error naming the setting to fix, because the alternative is moving somebody
+    else's mail into a folder this code guessed at.
+    """
+    override = str(((account or {}).get("imap_folders") or {}).get(key) or "").strip()
+    if override:
+        return override
+    names = [name for name, _, _ in list_folders(client)]
+    lowered = {name.lower(): name for name in names}
+    for candidate in SPECIAL_FOLDERS.get(key, ()):
+        found = lowered.get(candidate.lower())
+        if found:
+            return found
+    raise TransportError(
+        "no_such_folder",
+        "Could not find this mailbox's %s folder. Set it in the widget's settings "
+        "(imapFolders.%s) - the names are localized and this one is not among the "
+        "ones known here." % (key, key),
+    )
+
+
+# --------------------------------------------------------------------------
+# reading
+# --------------------------------------------------------------------------
+
+
+def fetch_items(data):
+    """imaplib's FETCH reply as [(prefix, literal)].
+
+    Every item asked for here carries exactly one literal, which keeps the
+    reply to a predictable shape: a tuple per message, plus the bare bytes that
+    close each one.
+    """
+    items = []
+    for element in data or []:
+        if isinstance(element, tuple) and len(element) >= 2 and element[1] is not None:
+            items.append((element[0] or b"", element[1]))
+    return items
+
+
+UID_RE = re.compile(rb"UID\s+(\d+)")
+
+
+def uid_of(prefix):
+    found = UID_RE.search(prefix or b"")
+    return found.group(1).decode("ascii") if found else ""
+
+
+def received_iso(prefix):
+    """INTERNALDATE as UTC ISO-8601 - the arrival time, which is what the
+    Graph path's receivedDateTime is too. The Date: header is the sender's
+    clock and is not always honest about it."""
+    try:
+        stamp = imaplib.Internaldate2tuple(prefix)
+    except (ValueError, TypeError):
+        stamp = None
+    if not stamp:
+        return ""
+    return datetime.fromtimestamp(time.mktime(stamp), timezone.utc).replace(microsecond=0).isoformat()
+
+
+def address_pair(header):
+    """(display name, address) from a From/To header, decoded."""
+    if header is None:
+        return "", ""
+    try:
+        addresses = getattr(header, "addresses", None)
+        if addresses:
+            first = addresses[0]
+            return str(first.display_name or ""), str(first.addr_spec or "")
+    except (AttributeError, IndexError, ValueError):
+        pass
+    name, address = email.utils.parseaddr(str(header))
+    return name, address
+
+
+def address_rows(header):
+    people = []
+    if header is None:
+        return people
+    try:
+        for address in getattr(header, "addresses", ()) or ():
+            people.append({"name": str(address.display_name or ""), "address": str(address.addr_spec or "")})
+        if people:
+            return people
+    except (AttributeError, ValueError):
+        pass
+    for name, address in email.utils.getaddresses([str(header)]):
+        if address:
+            people.append({"name": name, "address": address})
+    return people
+
+
+def parse_headers(blob):
+    try:
+        return email.message_from_bytes(blob, policy=POLICY)
+    except (ValueError, TypeError):
+        return email.message_from_bytes(b"", policy=POLICY)
+
+
+def header_str(message, name, default=""):
+    try:
+        value = message[name]
+    except (KeyError, ValueError, IndexError):
+        return default
+    if value is None:
+        return default
+    try:
+        return str(value)
+    except (ValueError, UnicodeDecodeError):
+        return default
+
+
+def reference_ids(message):
+    """Every Message-ID this message names, oldest first.
+
+    References carries the chain and In-Reply-To its immediate parent, which is
+    usually the last entry of the chain again - but only usually, and a mailer
+    that sends one without the other is common enough that both are read. The
+    ids are pulled out by pattern rather than split on whitespace: a folded
+    References header arrives with newlines in it, and some mailers separate
+    the ids with commas.
+
+    Panel-side these become edges in a graph, so order and duplication do not
+    matter to the result; they are kept tidy anyway because this is also what a
+    person reads when a thread looks wrong.
+    """
+    blob = " ".join(
+        part for part in (header_str(message, "References"),
+                          header_str(message, "In-Reply-To")) if part
+    )
+    seen, found = set(), []
+    for candidate in MESSAGE_ID.findall(blob):
+        if candidate not in seen:
+            seen.add(candidate)
+            found.append(candidate)
+    return found
+
+
+def looks_important(message):
+    if header_str(message, "Importance").strip().lower() == "high":
+        return True
+    priority = header_str(message, "X-Priority").strip()[:1]
+    return priority in ("1", "2")
+
+
+def looks_attached(message):
+    """Whether the message probably carries an attachment.
+
+    BODYSTRUCTURE would answer properly, at the cost of parsing it; the
+    top-level content type is one header away and gets the common case right.
+    An inline image in a multipart/related body reads as no attachment here,
+    which is the wrong answer in the direction that costs least - a paperclip
+    that fails to appear rather than one that appears on mail without one.
+    """
+    return header_str(message, "Content-Type").strip().lower().startswith("multipart/mixed")
+
+
+def strip_markup(markup):
+    # Comments first: an Outlook mail is full of conditional ones, and taking
+    # tags out from under them leaves their "-->" stranded in the text.
+    text = re.sub(r"(?s)<!--.*?-->", " ", markup)
+    # Up to the closing tag, or to the end when the fetch cut the block off:
+    # a preview is built from a truncated body, where a stylesheet routinely
+    # has no </style> to find.
+    text = re.sub(r"(?is)<(script|style)\b.*?(?:</\1>|$)", " ", text)
+    text = re.sub(r"(?is)<br\s*/?>|</p>", "\n", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    import html as html_module
+    return html_module.unescape(text)
+
+
+def _body_for_order(message, order):
+    """(text, is_html) for the first part matching `order`, or ("", False)."""
+    part = None
+    try:
+        part = message.get_body(preferencelist=order)
+    except (AttributeError, ValueError):
+        part = None
+    if part is None:
+        # A truncated fetch can leave get_body with nothing to choose from;
+        # fall back to whatever the top level holds.
+        part = message
+    is_html = str(part.get_content_type() or "").lower() == "text/html"
+    try:
+        content = part.get_content()
+    except (LookupError, ValueError, TypeError, AssertionError):
+        # Base64 cut mid-stream, an unknown charset, a part whose declared
+        # encoding does not match its bytes. The raw payload is still better
+        # than an empty pane.
+        try:
+            raw = part.get_payload(decode=True)
+            content = raw.decode("utf-8", "replace") if raw else str(part.get_payload())
+        except (ValueError, TypeError):
+            content = ""
+    if not isinstance(content, str):
+        content = str(content or "")
+    return content, is_html
+
+
+def body_of(message, want_html):
+    """(text, is_html) for the part worth showing, or ("", False).
+
+    A multipart/alternative can carry an empty text/plain beside a real
+    text/html - some senders ship the plain part as a placeholder. Preferring
+    plain then finding it blank is not a reason to show an empty pane, so the
+    other format gets a turn before giving up.
+    """
+    order = ("html", "plain") if want_html else ("plain", "html")
+    content, is_html = _body_for_order(message, order)
+    if content.strip():
+        return content, is_html
+    alt, alt_is_html = _body_for_order(message, tuple(reversed(order)))
+    return (alt, alt_is_html) if alt.strip() else (content, is_html)
+
+
+def decoded_if_base64(text):
+    """The text behind a body the truncated fetch left base64-encoded.
+
+    Cutting the body mid-stream can leave the parser without what it needs to
+    decode a part, and it hands back the encoded text instead. Decoding as
+    much as arrived beats showing the reader base64.
+    """
+    # The leading run of encoded lines only: a truncated part is usually
+    # followed by the next MIME boundary, so testing the whole string finds
+    # one stray "-" or "_" and gives up. Real prose never survives this -
+    # a line of it carries a space or a comma within the first 40 characters.
+    run = []
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if re.fullmatch(r"[A-Za-z0-9+/=]{40,}", line):
+            run.append(line)
+        elif run:
+            break
+        elif line:
+            return text
+    if not run:
+        return text
+    packed = "".join(run)
+    # A cut stream rarely ends on a four-character group, and a trailing
+    # partial one is what b64decode refuses outright - so drop it rather than
+    # lose the whole body to it.
+    packed = packed.rstrip("=")
+    packed = packed[:len(packed) - len(packed) % 4]
+    if not packed:
+        return text
+    try:
+        raw = base64.b64decode(packed)
+    except (ValueError, base64.binascii.Error):
+        return text
+    decoded = raw.decode("utf-8", "replace")
+    return decoded if decoded.strip() else text
+
+
+def preview_text(header_blob, text_blob):
+    """A one-line preview, built by parsing the headers and body back together.
+
+    The headers carry the boundary and the transfer encoding, so gluing the
+    separately fetched body text under them gives the email parser a message it
+    can walk - truncated, which it tolerates - rather than a wall of MIME to
+    guess at.
+    """
+    if not text_blob:
+        return ""
+    glued = header_blob.rstrip(b"\r\n") + b"\r\n\r\n" + text_blob
+    message = parse_headers(glued)
+    content, is_html = body_of(message, want_html=False)
+    content = decoded_if_base64(content)
+    if is_html:
+        content = strip_markup(content)
+    # Quoted replies and signatures are mostly what a preview would otherwise
+    # show, so lines that are only quoting are dropped before the first two
+    # lines are taken.
+    lines = [line.strip() for line in content.splitlines()]
+    kept = [line for line in lines if line and not line.startswith(">")]
+    return re.sub(r"\s+", " ", " ".join(kept))[:PREVIEW_CHARS].strip()
+
+
+def row_from(prefix, header_blob, mailbox, validity, previews):
+    message = parse_headers(header_blob)
+    uid = uid_of(prefix)
+    flags = [_text(flag).lower() for flag in imaplib.ParseFlags(prefix) or ()]
+    name, address = address_pair(message["From"] if "From" in message else None)
+    subject = header_str(message, "Subject").strip()
+    return {
+        "id": make_id(mailbox, validity, uid),
+        "subject": subject or "(no subject)",
+        "from": name or address,
+        "fromAddress": address,
+        "received": received_iso(prefix),
+        "preview": preview_text(header_blob, previews.get(uid, b"")),
+        # OWA deep links are built from Graph's message id, which IMAP never
+        # sees. The window hides the button when there is nothing to open.
+        "webLink": "",
+        "important": looks_important(message),
+        "hasAttachments": looks_attached(message),
+        "read": "\\seen" in flags,
+        # IMAP's own follow-up flag, and the one Outlook's flag column sets, so
+        # this agrees with what Graph reports for the same mailbox.
+        "flagged": "\\flagged" in flags,
+        # Focused/Other is Outlook's own split, computed server-side and
+        # exposed through Graph only. Every row claims Focused because that is
+        # the view the panel opens on; capabilities() says the split is absent
+        # so the filter can be hidden rather than showing an empty Other.
+        "focused": True,
+        # Threading, in the shape graph.py's rows carry it. IMAP has no
+        # conversation id of its own, so "thread" stays empty and the panel
+        # rebuilds the conversation from these two instead - the Message-ID
+        # graph that has been how mail threads since RFC 822.
+        "thread": "",
+        "messageId": header_str(message, "Message-ID").strip(),
+        "references": reference_ids(message),
+    }
+
+
+def sequence_window(exists, top):
+    """The newest `top` messages as a sequence range, or "" for an empty folder."""
+    if exists <= 0:
+        return ""
+    first = max(1, exists - top + 1)
+    return "%d:%d" % (first, exists)
+
+
+def fetch_previews(client, uid_set):
+    if not uid_set:
+        return {}
+    try:
+        typ, data = client.uid("FETCH", uid_set, PREVIEW_ITEMS)
+    except imaplib.IMAP4.error:
+        return {}
+    if typ != "OK":
+        return {}
+    return {uid_of(prefix): blob for prefix, blob in fetch_items(data) if uid_of(prefix)}
+
+
+def read_rows(client, mailbox, validity, spec, by_uid):
+    """Rows for a sequence range or UID set, newest first."""
+    if not spec:
+        return []
+    try:
+        if by_uid:
+            typ, data = client.uid("FETCH", spec, LIST_ITEMS)
+        else:
+            typ, data = client.fetch(spec, LIST_ITEMS)
+    except imaplib.IMAP4.error as error:
+        raise TransportError("fetch_failed", "Could not read mail: " + _text(error))
+    if typ != "OK":
+        raise TransportError("fetch_failed", "Could not read mail: " + _text(data))
+
+    items = fetch_items(data)
+    uids = [uid_of(prefix) for prefix, _ in items]
+    previews = fetch_previews(client, ",".join(uid for uid in uids if uid))
+    rows = [row_from(prefix, blob, mailbox, validity, previews) for prefix, blob in items]
+    rows.sort(key=lambda row: row["received"], reverse=True)
+    return rows
+
+
+def snapshot(account, token, top, folder_id="", want_folders=True):
+    """One mailbox's unread count, folder tree and newest mail.
+
+    Two lists are read, matching the two the panel can ask for: the newest
+    messages in the folder, and the newest unread ones. The newest N need not
+    contain the newest N unread, so neither list can be derived from the other.
+    """
+    client = None
+    warnings = []
+    try:
+        client = connect(account, token)
+
+        folders, complete = ([], True)
+        if want_folders:
+            try:
+                folders, complete = folder_rows(client)
+            except TransportError as error:
+                warnings.append({"scope": "folders", "message": error.message})
+            if not complete:
+                warnings.append(
+                    {"scope": "folders", "message": "Too many folders to list them all - some are not shown"}
+                )
+
+        inbox = next((row["id"] for row in folders if row["isInbox"]), "INBOX")
+        wanted = str(folder_id or "").strip()
+        if wanted in ("", "inbox"):
+            mailbox = inbox
+        elif any(row["id"] == wanted for row in folders) or not folders:
+            mailbox = wanted
+        else:
+            warnings.append({"scope": "folders", "message": "That folder is gone - showing the inbox"})
+            mailbox = inbox
+
+        unread, _total = folder_counts(client, inbox)
+        exists, validity = select(client, mailbox, readonly=True)
+
+        collected = {}
+        try:
+            for row in read_rows(client, mailbox, validity, sequence_window(exists, top), by_uid=False):
+                collected[row["id"]] = row
+        except TransportError as error:
+            warnings.append({"scope": "mail", "message": error.message})
+
+        try:
+            typ, data = client.uid("SEARCH", None, "UNSEEN")
+            if typ == "OK":
+                unseen = _text(data).split()
+                for row in read_rows(client, mailbox, validity, ",".join(unseen[-top:]), by_uid=True):
+                    collected.setdefault(row["id"], row)
+        except (imaplib.IMAP4.error, TransportError) as error:
+            warnings.append({"scope": "mail", "message": "Could not list unread mail: " + _text(error)})
+
+        name = next((row["name"] for row in folders if row["id"] == mailbox), mailbox)
+        return {
+            "unreadCount": unread,
+            "unreadKnown": True,
+            "folders": folders,
+            "folderId": mailbox,
+            "folderName": name,
+            "mail": sorted(collected.values(), key=lambda row: row["received"], reverse=True),
+            "warnings": warnings,
+        }
+    finally:
+        close(client)
+
+
+def message(account, token, message_id, want_html):
+    """One message's headers and body, raw. graph.py renders it, the same way
+    it renders a Graph body, so both transports look identical in the pane."""
+    mailbox, validity, uid = parse_id(message_id)
+    client = None
+    try:
+        client = connect(account, token)
+        _exists, current = select(client, mailbox, readonly=True)
+        if validity not in ("0", current):
+            raise TransportError(
+                "stale_id",
+                "This message's folder was rebuilt since the list was fetched. Refresh and try again.",
+            )
+        try:
+            typ, data = client.uid("FETCH", uid, "(BODY.PEEK[]<0.%d>)" % MAX_MESSAGE_BYTES)
+        except imaplib.IMAP4.error as error:
+            raise TransportError("message_failed", "Could not open this message: " + _text(error))
+        items = fetch_items(data)
+        if typ != "OK" or not items:
+            raise TransportError("message_failed", "This message is no longer in %s" % mailbox)
+
+        parsed = parse_headers(items[0][1])
+        name, address = address_pair(parsed["From"] if "From" in parsed else None)
+        raw, is_html = body_of(parsed, want_html)
+        return {
+            "id": message_id,
+            "subject": header_str(parsed, "Subject").strip() or "(no subject)",
+            "from": name or address,
+            "fromAddress": address,
+            "to": address_rows(parsed["To"] if "To" in parsed else None),
+            "cc": address_rows(parsed["Cc"] if "Cc" in parsed else None),
+            "received": received_iso(items[0][0]) or header_str(parsed, "Date"),
+            "webLink": "",
+            "hasAttachments": any(
+                part.get_content_disposition() == "attachment" for part in parsed.walk()
+            ),
+            "raw": raw,
+            "isHtml": is_html,
+        }
+    finally:
+        close(client)
+
+
+# --------------------------------------------------------------------------
+# writing
+# --------------------------------------------------------------------------
+
+
+def mark(account, token, message_id, read):
+    mailbox, validity, uid = parse_id(message_id)
+    client = None
+    try:
+        client = connect(account, token)
+        _exists, current = select(client, mailbox, readonly=False)
+        if validity not in ("0", current):
+            raise TransportError("stale_id", "This message's folder was rebuilt. Refresh and try again.")
+        try:
+            typ, data = client.uid("STORE", uid, "+FLAGS" if read else "-FLAGS", "(\\Seen)")
+        except imaplib.IMAP4.error as error:
+            raise TransportError("mark_failed", "Could not change this message: " + _text(error))
+        if typ != "OK":
+            raise TransportError("mark_failed", "Could not change this message: " + _text(data))
+        return {"ok": True, "id": message_id, "read": bool(read)}
+    finally:
+        close(client)
+
+
+def flag(account, token, message_id, flagged):
+    mailbox, validity, uid = parse_id(message_id)
+    client = None
+    try:
+        client = connect(account, token)
+        _exists, current = select(client, mailbox, readonly=False)
+        if validity not in ("0", current):
+            raise TransportError("stale_id", "This message's folder was rebuilt. Refresh and try again.")
+        try:
+            typ, data = client.uid("STORE", uid, "+FLAGS" if flagged else "-FLAGS", "(\\Flagged)")
+        except imaplib.IMAP4.error as error:
+            raise TransportError("flag_failed", "Could not flag this message: " + _text(error))
+        if typ != "OK":
+            raise TransportError("flag_failed", "Could not flag this message: " + _text(data))
+        return {"ok": True, "id": message_id, "flagged": bool(flagged)}
+    finally:
+        close(client)
+
+
+COPYUID = re.compile(rb"\[COPYUID\s+(\d+)\s+([\d,:]+)\s+([\d,:]+)\]", re.I)
+
+
+def move(account, token, message_id, destination):
+    """Move one message into another folder of the same mailbox.
+
+    MOVE is advertised by Exchange, so the copy-then-delete-then-expunge dance
+    is only a fallback - and it matters that it is: an EXPUNGE on a mailbox
+    someone else is also changing removes by sequence number, and getting that
+    wrong deletes the wrong mail. UIDPLUS gives back the new UID, which is what
+    lets the panel follow the message it just moved.
+    """
+    mailbox, validity, uid = parse_id(message_id)
+    wanted = str(destination or "").strip()
+    if not wanted:
+        raise TransportError("no_folder", "No folder to move this message to")
+    client = None
+    try:
+        client = connect(account, token)
+        key = GRAPH_WELL_KNOWN.get(wanted.lower())
+        target = resolve_special(client, key, account) if key else wanted
+        _exists, current = select(client, mailbox, readonly=False)
+        if validity not in ("0", current):
+            raise TransportError("stale_id", "This message's folder was rebuilt. Refresh and try again.")
+
+        new_uid = ""
+        if "MOVE" in (client.capabilities or ()):
+            try:
+                typ, data = client.uid("MOVE", uid, quoted(target))
+            except imaplib.IMAP4.error as error:
+                raise TransportError("move_failed", "Could not move this message: " + _text(error))
+            if typ != "OK":
+                raise TransportError("move_failed", "Could not move this message: " + _text(data))
+            found = COPYUID.search(b" ".join(item for item in (data or []) if isinstance(item, bytes)))
+            new_uid = found.group(3).decode("ascii") if found else ""
+        else:
+            try:
+                typ, data = client.uid("COPY", uid, quoted(target))
+                if typ != "OK":
+                    raise TransportError("move_failed", "Could not copy this message: " + _text(data))
+                found = COPYUID.search(b" ".join(i for i in (data or []) if isinstance(i, bytes)))
+                new_uid = found.group(3).decode("ascii") if found else ""
+                client.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+                # UID EXPUNGE removes only the message named here; a bare
+                # EXPUNGE would take every \Deleted message in the folder,
+                # including ones another client flagged.
+                if "UIDPLUS" in (client.capabilities or ()):
+                    client.uid("EXPUNGE", uid)
+            except imaplib.IMAP4.error as error:
+                raise TransportError("move_failed", "Could not move this message: " + _text(error))
+
+        return {
+            "ok": True,
+            "id": message_id,
+            "newId": make_id(target, "0", new_uid) if new_uid else "",
+            "folder": target,
+        }
+    finally:
+        close(client)
+
+
+def delete(account, token, message_id):
+    """Move to the trash folder rather than erase, so the button stays undoable
+    from Outlook - the same thing Graph's DELETE on a message does."""
+    result = move(account, token, message_id, "deleteditems")
+    return {"ok": True, "id": message_id, "deleted": True, "newId": result.get("newId", "")}
+
+
+def quote_original(original):
+    """The original message, quoted the way mail clients quote."""
+    when = str(original.get("received") or "")
+    who = original.get("from") or original.get("fromAddress") or "somebody"
+    lines = str(original.get("raw") or "")
+    if original.get("isHtml"):
+        lines = strip_markup(lines)
+    quoted_lines = "\n".join("> " + line for line in lines.splitlines())
+    return "On %s, %s wrote:\n%s" % (when, who, quoted_lines)
+
+
+def compose(account, token, message_id, mode, comment, to_addresses, draft):
+    """Reply, reply all or forward - sent over SMTP, or left as a draft.
+
+    Graph builds the quoting, the recipients and the threading headers itself
+    (createReply and friends); over SMTP all of that has to be assembled here.
+    A draft is an APPEND to the Drafts folder, which needs no SMTP permission
+    at all - so a mailbox that consented to IMAP but not SMTP.Send can still
+    write, and finish the message in Outlook.
+    """
+    original = message(account, token, message_id, want_html=False)
+    me = username_of(account)
+
+    subject = original.get("subject") or ""
+    if mode == "forward":
+        prefix = "Fwd: "
+        recipients = list(to_addresses or [])
+    else:
+        prefix = "Re: "
+        sender = original.get("fromAddress") or ""
+        recipients = list(to_addresses or ([sender] if sender else []))
+        if mode == "reply-all":
+            for person in (original.get("to") or []) + (original.get("cc") or []):
+                address = person.get("address") or ""
+                # Replying to everybody should not mean replying to yourself.
+                if address and address.lower() != me.lower() and address not in recipients:
+                    recipients.append(address)
+    if not recipients:
+        raise TransportError("no_recipient", "There is nobody to send this to")
+    if not subject.lower().startswith(prefix.lower().strip()):
+        subject = prefix + subject
+
+    note = EmailMessage(policy=email.policy.SMTP)
+    note["From"] = me
+    note["To"] = ", ".join(recipients)
+    note["Subject"] = subject
+    note["Date"] = email.utils.formatdate(localtime=True)
+    note["Message-ID"] = email.utils.make_msgid()
+    # Threading, so the reply lands in the conversation rather than beside it.
+    original_id = str(original.get("messageId") or "").strip()
+    if original_id:
+        note["In-Reply-To"] = original_id
+        note["References"] = original_id
+    note.set_content("%s\n\n%s" % (str(comment or ""), quote_original(original)))
+
+    if draft:
+        client = None
+        try:
+            client = connect(account, token)
+            folder = resolve_special(client, "drafts", account)
+            try:
+                typ, data = client.append(quoted(folder), "(\\Draft)", None, note.as_bytes())
+            except imaplib.IMAP4.error as error:
+                raise TransportError("draft_failed", "Could not save the draft: " + _text(error))
+            if typ != "OK":
+                raise TransportError("draft_failed", "Could not save the draft: " + _text(data))
+            return {"ok": True, "mode": mode, "drafted": True, "id": "", "webLink": "", "warning": ""}
+        finally:
+            close(client)
+
+    host = str(account.get("smtp_host") or DEFAULT_SMTP_HOST)
+    port = int(account.get("smtp_port") or DEFAULT_SMTP_PORT)
+    try:
+        server = smtplib.SMTP(host, port, timeout=TIMEOUT)
+        try:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.auth("XOAUTH2", _sasl_xoauth2(me, token), initial_response_ok=True)
+            server.send_message(note)
+        finally:
+            try:
+                server.quit()
+            except (OSError, smtplib.SMTPException):
+                pass
+    except smtplib.SMTPAuthenticationError as error:
+        raise TransportError(
+            "send_permission_required",
+            "SMTP would not accept the sign-in - this mailbox may not have consented to "
+            "SMTP.Send. Save it as a draft instead. (%s)" % _text(error.smtp_error or error),
+        )
+    except (OSError, smtplib.SMTPException) as error:
+        raise TransportError("send_failed", "Could not send this message: " + _text(error))
+
+    # Client SMTP submission does not put a copy in Sent Items, so this does.
+    # Best effort: a message that went out and was not filed is worth a warning,
+    # not a failure report on a mail the recipient already has.
+    warning = ""
+    client = None
+    try:
+        client = connect(account, token)
+        folder = resolve_special(client, "sent", account)
+        typ, _data = client.append(quoted(folder), "(\\Seen)", None, note.as_bytes())
+        if typ != "OK":
+            warning = "Sent, but could not file a copy in %s" % folder
+    except (TransportError, imaplib.IMAP4.error, OSError) as error:
+        warning = "Sent, but could not file a copy in Sent Items: " + _text(error)
+    finally:
+        close(client)
+
+    return {"ok": True, "mode": mode, "drafted": False, "id": message_id, "warning": warning}
+
+
+def capabilities():
+    """What this transport cannot do, so the panel can hide it rather than
+    show a filter that never matches or an agenda that is always empty."""
+    return {"calendar": False, "focused": False, "webLinks": False}

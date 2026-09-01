@@ -28,6 +28,7 @@ Column {
   signal openRequested()
   signal closeRequested()
   signal markRequested(bool read)
+  signal flagRequested(bool flagged)
   signal deleteRequested()
   // Filing it in another folder. Offered only where there is room to pick one:
   // the window sets canMove, the bar dropdown leaves it off, the same way it
@@ -338,6 +339,23 @@ Column {
       fontFamily: root.fontFamily
       fontSize: Style.font.caption
       onClicked: root.markRequested(!(root.mail && root.mail.read))
+    }
+
+    // The follow-up flag Outlook shows in its own column. Separate from read
+    // state on purpose: flagging is "come back to this", which is most often
+    // what one wants for a message one has just read.
+    Button {
+      visible: root.canWrite
+      enabled: !root.actionRunning
+      text: root.mail && root.mail.flagged ? "Unflag" : "Flag"
+      tooltipText: root.mail && root.mail.flagged
+                   ? "Clear the follow-up flag"
+                   : "Flag it for follow-up, in Outlook too"
+      bordered: true
+      foreground: root.mail && root.mail.flagged ? root.accent : root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.flagRequested(!(root.mail && root.mail.flagged))
     }
 
     Button {

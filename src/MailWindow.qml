@@ -307,6 +307,18 @@ Item {
     }
   }
 
+  // Flagging reaches what the cursor is on, and what is being read when the
+  // reading pane has focus - the same reach moving has, because a flag is
+  // most often the thing one wants for the message just read.
+  function flagAtCursor() {
+    if (moving) return
+    var rows = mailView.mail
+    var row = pane === "mail" && mailCursor >= 0 && mailCursor < rows.length
+              ? rows[mailCursor]
+              : mailView.previewMail
+    if (row && mailView.canWrite(row.alias)) mailView.flagMail(row, row.flagged !== true)
+  }
+
   function deleteAtCursor() {
     if (moving || pane !== "mail") return
     var rows = mailView.mail
@@ -539,8 +551,11 @@ Item {
           }
           if (text === "f") mailView.focusedOnly = !mailView.focusedOnly
           else if (text === "u") mailView.unreadOnly = !mailView.unreadOnly
+          else if (text === "t") mailView.threaded = !mailView.threaded
           else if (text === "r") mailView.refresh()
           else if (text === "m") root.moveAtCursor()
+          // Capital, because f is already the Focused filter.
+          else if (text === "F") root.flagAtCursor()
           else if (text === "?") root.showHelp = !root.showHelp
           else if (text === "g") root.scrollToEnd(view, false)
           else if (text === "G") root.scrollToEnd(view, true)
@@ -559,56 +574,87 @@ Item {
             Row {
               id: header
               anchors.left: parent.left
+              // Bounded by where the buttons start. Without this the row is
+              // free to be as wide as it likes, elide has nothing to elide
+              // against, and a title such as "Inbox — someone@example.com"
+              // runs straight under Folders on any window narrower than about
+              // half a screen - which is the width a tiling compositor hands
+              // this window most of the time.
+              anchors.right: headerActions.left
+              anchors.rightMargin: Style.spacing.lg
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.spacing.md
 
               Text {
                 anchors.verticalCenter: parent.verticalCenter
+                // Whatever the status bits beside it do not need. They are
+                // short, they come and go, and they are the part somebody is
+                // waiting to read - so the title is the part that gives way.
+                width: Math.max(0, header.width - status.width
+                                   - (status.width > 0 ? header.spacing : 0))
                 text: root.folderTitle
                 textFormat: Text.PlainText
+                elide: Text.ElideRight
                 color: Color.foreground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.heading
               }
 
-              Text {
+              // Grouped, so their combined width can be measured and taken off
+              // the title's rather than each one pushing it along. A Row skips
+              // children that are not visible, so this is nothing at all when
+              // nothing is happening.
+              Row {
+                id: status
                 anchors.verticalCenter: parent.verticalCenter
-                visible: mailView.loading
-                text: "loading…"
-                textFormat: Text.PlainText
-                color: Qt.darker(Color.foreground, 1.5)
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-              }
+                spacing: Style.spacing.md
 
-              // Where a moved message went. The one action with nothing left on
-              // screen to show for itself: the row is gone, and the folder it
-              // landed in is somewhere else entirely.
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                visible: mailView.actionNotice !== ""
-                text: mailView.actionNotice
-                textFormat: Text.PlainText
-                elide: Text.ElideRight
-                color: Color.accent
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-              }
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: mailView.loading
+                  text: "loading…"
+                  textFormat: Text.PlainText
+                  color: Qt.darker(Color.foreground, 1.5)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
 
-              // "Sent", or where the draft went. Cleared by the next compose.
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                visible: mailView.composeNotice !== ""
-                text: mailView.composeNotice
-                textFormat: Text.PlainText
-                elide: Text.ElideRight
-                color: Color.accent
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
+                // Where a moved message went. The one action with nothing left
+                // on screen to show for itself: the row is gone, and the folder
+                // it landed in is somewhere else entirely.
+                //
+                // Capped rather than free: "Moved to Gelöschte Elemente" is a
+                // sentence, and a sentence that pushes the title out of the
+                // window is a worse way to be told about it.
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: mailView.actionNotice !== ""
+                  width: Math.min(implicitWidth, header.width * 0.45)
+                  text: mailView.actionNotice
+                  textFormat: Text.PlainText
+                  elide: Text.ElideRight
+                  color: Color.accent
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+
+                // "Sent", or where the draft went. Cleared by the next compose.
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: mailView.composeNotice !== ""
+                  width: Math.min(implicitWidth, header.width * 0.45)
+                  text: mailView.composeNotice
+                  textFormat: Text.PlainText
+                  elide: Text.ElideRight
+                  color: Color.accent
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
               }
             }
 
             Row {
+              id: headerActions
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.spacing.sm
@@ -633,6 +679,20 @@ Item {
                 accent: Color.accent
                 fontFamily: Style.font.family
                 onClicked: mailView.unreadOnly = !mailView.unreadOnly
+              }
+
+              // Only the window offers this: the bar dropdown has nowhere to
+              // put a conversation once it opens. The count is conversations
+              // rather than messages, which is what the list is showing.
+              FilterPill {
+                label: "Threads"
+                detail: mailView.threaded && mailView.threads.length > 0
+                  ? String(mailView.threads.length) : ""
+                selected: mailView.threaded
+                fg: Color.foreground
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: mailView.threaded = !mailView.threaded
               }
 
               // Focused/Other is a split Outlook draws across the inbox alone,
@@ -786,11 +846,18 @@ Item {
               MailList {
                 width: columns.listWidth
                 mails: mailView.mail
+                threads: mailView.threads
+                threaded: mailView.threaded
                 unreadOnly: mailView.unreadOnly
                 showPreviewLine: mailView.previewLine
                 showAccount: root.combined && mailView.filterAlias === ""
                 selectedId: mailView.previewMail ? String(mailView.previewMail.id) : ""
-                cursorIndex: root.pane === "mail" ? root.mailCursor : -1
+                // By id rather than by index: a threaded list draws summary
+                // rows the message list knows nothing about, so the two stop
+                // counting in step the moment a conversation is grouped.
+                cursorId: root.pane === "mail" && root.mailCursor >= 0
+                          && root.mailCursor < mailView.mail.length
+                  ? String(mailView.mail[root.mailCursor].id) : ""
                 fg: Color.foreground
                 accent: Color.accent
                 fontFamily: Style.font.family
@@ -884,6 +951,7 @@ Item {
                   onCloseRequested: mailView.closePreview()
                   onOpenRequested: mailView.openPreviewed()
                   onMarkRequested: function(read) { mailView.markPreviewed(read) }
+                  onFlagRequested: function(flagged) { mailView.flagPreviewed(flagged) }
                   onDeleteRequested: mailView.deletePreviewed()
                   onMoveRequested: root.startMove(mailView.previewMail)
                   onWriteAccessRequested: {

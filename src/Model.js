@@ -409,9 +409,19 @@ function folderNameFor(views, alias, selected) {
 }
 
 
+// The merged list and the cap on it, kept apart because the threaded view
+// needs the first without the second: a cap of seven messages leaves seven
+// conversations with nothing to group, while a cap of seven *conversations*
+// wants every message that was fetched to sort them from.
 function mergeMail(views, unreadOnly, limit, state, focusedOnly) {
+  return capMail(mergeMailAll(views, unreadOnly, state, focusedOnly), limit, state)
+}
+
+
+function mergeMailAll(views, unreadOnly, state, focusedOnly) {
   var overrides = (state && state.read) || {}
   var deleted = (state && state.deleted) || {}
+  var flagged = (state && state.flagged) || {}
   var held = (state && state.held) || {}
   var merged = []
 
@@ -441,13 +451,21 @@ function mergeMail(views, unreadOnly, limit, state, focusedOnly) {
         important: mail.important === true,
         hasAttachments: mail.hasAttachments === true,
         read: read,
+        flagged: flagged[id] === undefined ? mail.flagged === true : flagged[id] === true,
         focused: mail.focused !== false,
         alias: view.alias,
         short: view.short,
         color: view.color,
         // Whether this row's mailbox may be acted on, so the list can offer
         // delete only where it would work.
-        write: view.write === true
+        write: view.write === true,
+        // What groupThreads reads. Graph fills thread and leaves the other
+        // two empty; IMAP does the reverse. Defaulted here rather than
+        // trusted, because a mailbox fetched by an older helper has none of
+        // them and must still merge.
+        thread: String(mail.thread || ""),
+        messageId: String(mail.messageId || ""),
+        references: mail.references || []
       })
     }
   }
@@ -458,11 +476,20 @@ function mergeMail(views, unreadOnly, limit, state, focusedOnly) {
     for (var key in pinned) row[key] = pinned[key]
     row.receivedAt = (parseDate(row.received) || new Date(0)).getTime()
     if (overrides[pinnedId] !== undefined) row.read = overrides[pinnedId] === true
+    if (flagged[pinnedId] !== undefined) row.flagged = flagged[pinnedId] === true
     merged.push(row)
   }
 
   merged.sort(function(a, b) { return b.receivedAt - a.receivedAt })
+  return merged
+}
 
+
+// The newest `limit` rows, plus whatever is being read. A limit of zero or
+// less means every row, which is what the threaded view asks for.
+function capMail(merged, limit, state) {
+  var pinned = state && state.pinned
+  var pinnedId = pinned ? String(pinned.id) : ""
   var cap = limit > 0 ? limit : merged.length
   if (merged.length <= cap) return merged
 
@@ -479,6 +506,177 @@ function mergeMail(views, unreadOnly, limit, state, focusedOnly) {
   }
   return capped
 }
+
+// Conversations, built from the rows that are already in the list.
+//
+// Two transports answer here and they thread differently: Graph keeps the
+// conversation itself and hands over its id, while IMAP has only what RFC 5322
+// has always had - a Message-ID per message and a References header naming the
+// ones it answers. Both are edges in the same graph, so both go into one
+// union-find and the difference stops at this function. Nothing is grouped by
+// subject: "Re: Rechnung" from two strangers is two conversations, and a
+// threading rule that cannot tell them apart is worse than no threading.
+//
+// Only what was fetched can be grouped. A thread whose earlier messages are
+// older than the fetch window comes out as the messages that are here, which
+// is the honest answer - the count on the row is "how many of these you have",
+// not a claim about the whole conversation on the server.
+function groupThreads(rows, limit, state) {
+  var list = rows || []
+  var parent = {}
+
+  // Path-halving find. The graph is a handful of nodes per refresh, so this is
+  // about keeping the code short rather than about speed.
+  function rootOf(node) {
+    if (parent[node] === undefined) parent[node] = node
+    while (parent[node] !== node) {
+      parent[node] = parent[parent[node]]
+      node = parent[node]
+    }
+    return node
+  }
+
+  function join(a, b) {
+    a = rootOf(a)
+    b = rootOf(b)
+    if (a !== b) parent[b] = a
+  }
+
+  // Every node is namespaced by mailbox: two accounts can hold the same
+  // message, and merging those two rows into one thread would put one
+  // mailbox's colour rail on another mailbox's mail.
+  function nodeFor(alias, kind, value) { return alias + " " + kind + value }
+
+  var i, k
+  var selves = []
+  for (i = 0; i < list.length; i++) {
+    var mail = list[i]
+    var alias = String(mail.alias || "")
+    // A message with no Message-ID still needs a node of its own, or every
+    // such message in the mailbox would collapse into one thread.
+    var own = String(mail.messageId || "")
+    var self = nodeFor(alias, "m:", own !== "" ? own : "row:" + String(mail.id))
+    selves.push(self)
+    rootOf(self)
+
+    var thread = String(mail.thread || "")
+    if (thread !== "") join(self, nodeFor(alias, "c:", thread))
+
+    var refs = mail.references || []
+    for (k = 0; k < refs.length; k++) {
+      var ref = String(refs[k] || "")
+      if (ref !== "") join(self, nodeFor(alias, "m:", ref))
+    }
+  }
+
+  var groups = []
+  var byKey = {}
+  for (i = 0; i < list.length; i++) {
+    var key = rootOf(selves[i])
+    var group = byKey[key]
+    if (group === undefined) {
+      group = byKey[key] = {
+        key: key,
+        alias: list[i].alias,
+        short: list[i].short,
+        color: list[i].color,
+        write: list[i].write === true,
+        mails: []
+      }
+      groups.push(group)
+    }
+    group.mails.push(list[i])
+  }
+
+  for (i = 0; i < groups.length; i++) finishThread(groups[i])
+  groups.sort(function(a, b) { return b.receivedAt - a.receivedAt })
+
+  var cap = limit > 0 ? limit : groups.length
+  if (groups.length <= cap) return groups
+
+  var capped = groups.slice(0, cap)
+  // The conversation being read keeps its row even when it sorts below the
+  // cut, the same way a single message does.
+  var pinned = state && state.pinned
+  var pinnedId = pinned ? String(pinned.id) : ""
+  if (pinnedId !== "" && !threadWith(capped, pinnedId)) {
+    for (var g = 0; g < groups.length; g++) {
+      if (threadWith([groups[g]], pinnedId)) {
+        capped = groups.slice(0, cap - 1)
+        capped.push(groups[g])
+        break
+      }
+    }
+  }
+  return capped
+}
+
+
+// The summary a collapsed thread reads as: who is in it, how much of it is
+// unread, and when it last moved.
+function finishThread(group) {
+  group.mails.sort(function(a, b) { return b.receivedAt - a.receivedAt })
+
+  var newest = group.mails[0]
+  group.newest = newest
+  group.count = group.mails.length
+  group.received = newest.received
+  group.receivedAt = newest.receivedAt
+  group.subject = String(newest.subject || "")
+  group.preview = String(newest.preview || "")
+
+  var unread = 0
+  var important = false
+  var attached = false
+  var flagged = false
+  var names = []
+  var seen = {}
+  for (var i = 0; i < group.mails.length; i++) {
+    var mail = group.mails[i]
+    if (mail.read !== true) unread++
+    if (mail.important === true) important = true
+    if (mail.hasAttachments === true) attached = true
+    if (mail.flagged === true) flagged = true
+    var name = senderName(mail)
+    if (name !== "" && seen[name] !== true) {
+      seen[name] = true
+      names.push(name)
+    }
+  }
+  group.unread = unread
+  group.important = important
+  group.hasAttachments = attached
+  // Any flag in the conversation, because the row stands for all of them: a
+  // thread with one flagged message is a thread with something to come back to.
+  group.flagged = flagged
+  // Newest speaker first, because that is who the row is about. Two names and
+  // a count, rather than a list that elides mid-name at this width.
+  group.senders = names.length <= 2
+    ? names.join(", ")
+    : names.slice(0, 2).join(", ") + " +" + (names.length - 2)
+  return group
+}
+
+
+function threadWith(groups, id) {
+  for (var g = 0; g < (groups || []).length; g++)
+    if (containsId(groups[g].mails, id)) return true
+  return false
+}
+
+
+// Every message the threaded list shows, in the order it shows them. This is
+// what the keyboard walks: grouping changes where a row is drawn, not which
+// messages are on offer.
+function threadMessages(groups) {
+  var out = []
+  for (var g = 0; g < (groups || []).length; g++) {
+    var mails = groups[g].mails
+    for (var i = 0; i < mails.length; i++) out.push(mails[i])
+  }
+  return out
+}
+
 
 // After the row at `index` is removed, whichever row slid into its place is
 // the natural one to read next; at the end of the list, step back to the last
@@ -512,15 +710,18 @@ function pruneOwnedOverrides(account, state, owner) {
   var alias = String(account.alias || "")
   var read = (state && state.read) || {}
   var deleted = (state && state.deleted) || {}
+  var flagged = (state && state.flagged) || {}
   var owners = owner || {}
 
   var seen = {}
   var serverRead = {}
+  var serverFlagged = {}
   var mail = account.mail || []
   for (var m = 0; m < mail.length; m++) {
     var id = String(mail[m].id)
     seen[id] = true
     serverRead[id] = mail[m].read === true
+    serverFlagged[id] = mail[m].flagged === true
   }
 
   var changed = false
@@ -534,6 +735,14 @@ function pruneOwnedOverrides(account, state, owner) {
     else changed = true
   }
 
+  // The same rule as read, for the same reason: a flag the fetch no longer
+  // carries keeps its override rather than snapping back on screen.
+  var nextFlagged = {}
+  for (var f in flagged) {
+    if (owners[f] !== alias || !seen[f] || serverFlagged[f] !== flagged[f]) nextFlagged[f] = flagged[f]
+    else changed = true
+  }
+
   var nextDeleted = {}
   for (var gone in deleted) {
     if (owners[gone] !== alias || seen[gone]) nextDeleted[gone] = deleted[gone]
@@ -543,9 +752,13 @@ function pruneOwnedOverrides(account, state, owner) {
   if (!changed) return null
 
   var nextOwner = {}
-  for (var o in owners) if (o in nextRead || o in nextDeleted) nextOwner[o] = owners[o]
+  for (var o in owners)
+    if (o in nextRead || o in nextFlagged || o in nextDeleted) nextOwner[o] = owners[o]
 
-  return { overrides: { read: nextRead, deleted: nextDeleted }, owner: nextOwner }
+  return {
+    overrides: { read: nextRead, flagged: nextFlagged, deleted: nextDeleted },
+    owner: nextOwner
+  }
 }
 
 // One agenda across mailboxes, grouped by day. Events keep epoch times and a

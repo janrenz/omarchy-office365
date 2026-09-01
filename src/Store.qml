@@ -195,7 +195,7 @@ Item {
   //
   // `held` is deliberately not here: it is the row being read staying put in
   // an unread list, and which message that is belongs to the host reading it.
-  property var overrides: ({ read: ({}), deleted: ({}) })
+  property var overrides: ({ read: ({}), flagged: ({}), deleted: ({}) })
 
   // Which mailbox each override belongs to, so a fetch of one mailbox retires
   // only its own and leaves the others alone.
@@ -203,13 +203,14 @@ Item {
 
   function setOverride(field, id, alias, value) {
     var key = String(id)
-    var next = { read: ({}), deleted: ({}) }
+    var next = { read: ({}), flagged: ({}), deleted: ({}) }
     for (var group in next) for (var k in overrides[group]) next[group][k] = overrides[group][k]
     var owners = {}
     for (var o in overrideOwner) owners[o] = overrideOwner[o]
     if (value === undefined) {
       delete next[field][key]
-      if (next.read[key] === undefined && next.deleted[key] === undefined) delete owners[key]
+      if (next.read[key] === undefined && next.flagged[key] === undefined
+          && next.deleted[key] === undefined) delete owners[key]
     } else {
       next[field][key] = value
       owners[key] = String(alias || "")
@@ -222,7 +223,7 @@ Item {
   // left, and they would otherwise be applied to whatever lands in its place.
   function forgetOverrides(alias) {
     var target = String(alias || "")
-    var next = { read: ({}), deleted: ({}) }
+    var next = { read: ({}), flagged: ({}), deleted: ({}) }
     var owners = {}
     for (var group in next) {
       for (var key in overrides[group]) {
@@ -569,8 +570,13 @@ Item {
   // Marks are queued rather than dropped while one is in flight: opening the
   // next message before the previous mark returned must still mark both.
   property var markQueue: []
-  readonly property bool actionRunning: markProc.running || deleteProc.running
-                                        || moveProc.running || markQueue.length > 0
+  // Flags are queued for the same reason marks are: flagging three rows in a
+  // row must flag three rows, not whichever one the process happened to be
+  // free for.
+  property var flagQueue: []
+  readonly property bool actionRunning: markProc.running || flagProc.running
+                                        || deleteProc.running || moveProc.running
+                                        || markQueue.length > 0 || flagQueue.length > 0
 
   // Deleting is announced before the row is hidden, so a host reading that
   // message can work out which one takes its place while it is still listed.
@@ -601,6 +607,30 @@ Item {
     markProc.running = true
   }
 
+  // Outlook's follow-up flag, raised and cleared. Deliberately not tied to
+  // read state: a flag is "come back to this", which is exactly what one does
+  // to a message already read.
+  function flagMessage(id, alias, flagged) {
+    if (!id) return
+    actionError = ""
+    actionNotice = ""
+    setOverride("flagged", id, alias, flagged === true)
+    var queued = flagQueue.slice()
+    queued.push({ id: String(id), alias: String(alias), flagged: flagged === true })
+    flagQueue = queued
+    pumpFlags()
+  }
+
+  function pumpFlags() {
+    if (flagProc.running || flagQueue.length === 0 || pluginDir === "") return
+    var next = flagQueue[0]
+    flagProc.command = ["python3", helper(), "flag",
+                        "--account", next.alias,
+                        "--id", next.id,
+                        next.flagged ? "--flag" : "--unflag"]
+    flagProc.running = true
+  }
+
   function deleteMessage(alias, id) {
     if (!id || deleteProc.running || pluginDir === "") return
     actionError = ""
@@ -625,6 +655,23 @@ Item {
       }
       root.pumpMarks()
       if (root.markQueue.length === 0 && done) root.refresh([done.alias])
+    }
+  }
+
+  Process {
+    id: flagProc
+    running: false
+    stdout: StdioCollector { id: flagOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var done = root.flagQueue.length > 0 ? root.flagQueue[0] : null
+      root.flagQueue = root.flagQueue.slice(1)
+      var parsed = Model.parseJson(flagOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        root.actionError = parsed && parsed.error ? String(parsed.error.message) : "Could not flag this message"
+        if (done) root.setOverride("flagged", done.id, done.alias, !done.flagged)
+      }
+      root.pumpFlags()
+      if (root.flagQueue.length === 0 && done) root.refresh([done.alias])
     }
   }
 
@@ -709,7 +756,7 @@ Item {
   // verification page opens in that mailbox's browser profile.
   property var loginConfig: null
 
-  function startLogin(alias, wantWrite, config) {
+  function startLogin(alias, wantWrite, config, calendar) {
     if (loginStartProc.running || pluginDir === "") return
     loginAlias = String(alias)
     loginConfig = config || null
@@ -723,8 +770,18 @@ Item {
     if (wantWrite === true) command.push("--write")
     var clientId = String((config || {}).clientId || "").trim()
     var authority = String((config || {}).authority || "").trim()
+    // An IMAP mailbox signs in as a desktop mail client instead of as this
+    // plugin: a different client id and a different set of scopes, both of
+    // which graph.py picks from the transport. Sending no client id is what
+    // keeps that default, so only an explicit one is passed on.
+    var transport = String((config || {}).transport || "").trim().toLowerCase()
     if (clientId !== "") command = command.concat(["--client-id", clientId])
     if (authority !== "") command = command.concat(["--authority", authority])
+    if (transport === "imap") command = command.concat(["--transport", "imap"])
+    // A calendar is added to a mailbox that already has mail, so this asks for
+    // the EWS scope and merges the result rather than signing the mailbox in
+    // again - which would throw the mail tokens away.
+    if (calendar === true) command.push("--calendar")
     loginStartProc.command = command
     loginStartProc.running = true
   }

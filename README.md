@@ -165,6 +165,30 @@ enough to show.
 Filters are a way of looking at the panel now rather than a setting: closing
 and reopening it starts from the whole picture again.
 
+## Conversations
+
+**Threads** - in the window, and press **t** - folds the list by conversation.
+A conversation of more than one message collapses to a summary row: who is in
+it, the newest subject, and how many messages are behind it, tinted while any
+of them is unread. Click the row to open it and the messages appear under it,
+newest first; click one to read it. A conversation of a single message is
+still drawn as that message, because a fold with nothing behind it only costs
+a click.
+
+Both transports thread, and they do it differently. Graph keeps the
+conversation itself and hands over its id. IMAP has what RFC 5322 has always
+had - a `Message-ID` per message and a `References` header naming the ones it
+answers - so the panel rebuilds the relation from those. Nothing is ever
+grouped by subject: two strangers replying to "Re: Rechnung" are two
+conversations, and a rule that cannot tell them apart is worse than no
+threading at all.
+
+Only what was fetched can be grouped, so the count on a row is how many of the
+conversation you have here, not a claim about the whole thing on the server.
+The cap in `mails` counts conversations rather than messages while this is on -
+everything fetched is grouped first, and the newest `mails` conversations are
+what the list shows - so turning it on does not thin the list out.
+
 ## The agenda
 
 The right-hand column is a day-grouped list by default, and can be a drawn
@@ -212,6 +236,16 @@ one. Click the message again, the ✕, or press Escape to go back to the agenda.
 
 Bodies are fetched one at a time, only when you open a message, and long ones
 scroll inside the pane rather than stretching the popup.
+
+**Flag** raises Outlook's own follow-up flag on the message, and **Unflag**
+clears it - the flag Outlook draws in its own column, so a message flagged here
+is flagged in Outlook and on the phone. Over IMAP it is the `\Flagged` keyword,
+which is the same thing by another name. Flagged rows carry a flag beside the
+time and keep it once read, which is the point of a flag: it outlives having
+been read. A collapsed conversation wears one if any message in it does.
+
+Flagging is a write, so it needs the same permission marking and moving do -
+see [Sign-in and your data](#sign-in-and-your-data).
 
 ### Links
 
@@ -294,7 +328,9 @@ including inside a message, which is the one place they used to do nothing.
 | `g` / `G` | To the top / to the bottom |
 | `x` | Delete the message under the cursor |
 | `m` | Move it to another folder |
+| `F` | Flag it for follow-up, or clear the flag (capital, since `f` is the Focused filter) |
 | `u` / `f` | Only unread / only Focused |
+| `t` | Group the list by conversation |
 | `r` | Refresh |
 | `?` | This list |
 
@@ -311,6 +347,7 @@ uses, so what is learned in one window works in the other.
 - **Middle click** - refresh now
 - **Click a mail** - read it in the right column
 - **Trash icon on a row** - delete without opening it first
+- **`F`** - flag the row under the cursor for follow-up, or clear its flag
 - **Click an event** - open it in Outlook, or select it when the agenda is a grid
 - **Join** - open a Teams meeting, in that mailbox's browser profile
 - **Click the header** - same as right-clicking the bar icon

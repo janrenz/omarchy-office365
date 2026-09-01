@@ -109,6 +109,14 @@ Panel {
 
   // Delete what the cursor is on, or what is being read when there is no
   // cursor yet.
+  function flagAtCursor() {
+    if (!service) return
+    var row = cursorIndex >= 0 && cursorIndex < mailRows.length
+              ? mailRows[cursorIndex]
+              : service.previewMail
+    if (row) service.flagMail(row, row.flagged !== true)
+  }
+
   function deleteAtCursor() {
     if (!service) return
     if (cursorIndex >= 0 && cursorIndex < mailRows.length) service.deleteMail(mailRows[cursorIndex])
@@ -236,6 +244,8 @@ Panel {
         if (!root.service) return
         if (text === "f") root.service.focusedOnly = !root.service.focusedOnly
         else if (text === "u") root.service.unreadOnly = !root.service.unreadOnly
+        // Capital F, the same as in the window, and clear of the f above.
+        else if (text === "F") root.flagAtCursor()
       }
       // Escape backs out one layer at a time: the meeting you picked, then the
       // message you opened, then the panel.
@@ -746,6 +756,7 @@ Panel {
               root.close()
             }
             onMarkRequested: function(read) { if (root.service) root.service.markPreviewed(read) }
+            onFlagRequested: function(flagged) { if (root.service) root.service.flagPreviewed(flagged) }
             onDeleteRequested: if (root.service) root.service.deletePreviewed()
             onWriteAccessRequested: {
               if (root.service && root.service.previewMail)

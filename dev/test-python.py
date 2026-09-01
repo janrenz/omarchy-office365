@@ -592,6 +592,103 @@ class Move(unittest.TestCase):
         self.assertEqual(result["newId"], "")
 
 
+class FlagArgs:
+    account = "work"
+    id = "MSG-1"
+    flagged = True
+
+
+class Flag(unittest.TestCase):
+    """Raising and clearing the follow-up flag.
+
+    Outlook's flag has three states and only two of them are a flag: clearing
+    has to send notFlagged, because "complete" is a ticked-off task and would
+    leave Outlook drawing a tick where the user asked for nothing.
+    """
+
+    def run_flag(self, write=True, response=(200, {}), **overrides):
+        self.calls = []
+
+        def http(url, method="GET", data=None, json_body=None, headers=None, timeout=20):
+            self.calls.append({"url": url, "method": method, "body": json_body})
+            return response
+
+        args = FlagArgs()
+        for key, value in overrides.items():
+            setattr(args, key, value)
+
+        patched = {
+            "read_json": lambda *a, **k: {"write": write, "scopes": "Mail.ReadWrite"},
+            "access_token": lambda alias, account: ("token", account),
+            "http": http,
+            "out": lambda payload: (_ for _ in ()).throw(Emitted(payload)),
+        }
+        original = {name: getattr(graph, name) for name in patched}
+        for name, stub in patched.items():
+            setattr(graph, name, stub)
+        try:
+            graph.cmd_flag(args)
+        except Emitted as emitted:
+            return emitted.payload
+        finally:
+            for name, value in original.items():
+                setattr(graph, name, value)
+        raise AssertionError("cmd_flag emitted nothing")
+
+    def test_flagging_patches_the_message(self):
+        result = self.run_flag()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["flagged"])
+        self.assertTrue(self.calls[0]["url"].endswith("/messages/MSG-1"))
+        self.assertEqual(self.calls[0]["method"], "PATCH")
+        self.assertEqual(self.calls[0]["body"], {"flag": {"flagStatus": "flagged"}})
+
+    def test_clearing_says_notflagged_rather_than_complete(self):
+        result = self.run_flag(flagged=False)
+        self.assertFalse(result["flagged"])
+        self.assertEqual(self.calls[0]["body"], {"flag": {"flagStatus": "notFlagged"}})
+
+    def test_an_id_with_punctuation_is_escaped_into_the_path(self):
+        self.run_flag(id="AA/BB+CC==")
+        self.assertTrue(self.calls[0]["url"].endswith("/messages/AA%2FBB%2BCC%3D%3D"))
+
+    def test_a_read_only_mailbox_is_refused_before_the_request(self):
+        result = self.run_flag(write=False)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "write_required")
+        self.assertEqual(self.calls, [])
+
+    def test_a_refused_flag_is_reported_as_itself(self):
+        result = self.run_flag(response=(403, {"error": {"message": "Access is denied"}}))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "flag_failed")
+        self.assertIn("Access is denied", result["error"]["message"])
+
+    def test_a_no_content_answer_is_still_a_flag(self):
+        result = self.run_flag(response=(204, None))
+        self.assertTrue(result["ok"])
+
+
+class MessageRowFlag(unittest.TestCase):
+    """What the list rows say about the flag.
+
+    Graph's flagStatus is a string with three values; the row carries a boolean,
+    and "complete" is not one of the two that mean a flag is still standing.
+    """
+
+    def test_a_flagged_message_says_so(self):
+        row = graph.message_row({"id": "1", "flag": {"flagStatus": "flagged"}})
+        self.assertTrue(row["flagged"])
+
+    def test_notflagged_and_a_missing_flag_are_both_unflagged(self):
+        self.assertFalse(graph.message_row({"id": "1", "flag": {"flagStatus": "notFlagged"}})["flagged"])
+        self.assertFalse(graph.message_row({"id": "1"})["flagged"])
+
+    def test_a_completed_follow_up_is_not_a_standing_flag(self):
+        row = graph.message_row({"id": "1", "flag": {"flagStatus": "complete"}})
+        self.assertFalse(row["flagged"])
+
+
 class ComposeArgs:
     account = "work"
     id = "MSG-1"
