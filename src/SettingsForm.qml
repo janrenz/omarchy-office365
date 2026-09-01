@@ -35,6 +35,7 @@ Item {
   property int vRefresh: 180
   property bool vTint: true
   property bool vNotify: true
+  property bool vPausePolling: true
   property bool vMarkRead: false
   property bool vPreviewLine: true
   property bool vFocusedDefault: false
@@ -87,6 +88,7 @@ Item {
     vRefresh = parseInt(String(setting("refreshIntervalSec", 180)), 10) || 180
     vTint = setting("tintOnUnread", true) !== false
     vNotify = setting("notify", true) !== false
+    vPausePolling = setting("pausePolling", true) !== false
     vMarkRead = setting("markReadOnOpen", false) === true
     vPreviewLine = setting("previewLine", true) !== false
     vFocusedDefault = setting("focusedByDefault", false) === true
@@ -215,6 +217,7 @@ Item {
       refreshIntervalSec: vRefresh,
       tintOnUnread: vTint,
       notify: vNotify,
+      pausePolling: vPausePolling,
       markReadOnOpen: vMarkRead,
       previewLine: vPreviewLine,
       focusedByDefault: vFocusedDefault,
@@ -527,6 +530,42 @@ Item {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }
+
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(pauseLabel.implicitHeight, pauseSwitch.implicitHeight)
+
+          Text {
+            textFormat: Text.PlainText
+            id: pauseLabel
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Stop polling while you are away"
+            color: root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          ToggleSwitch {
+            id: pauseSwitch
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            checked: root.vPausePolling
+            foreground: root.fg
+            accent: root.accent
+            onToggled: root.vPausePolling = !root.vPausePolling
+          }
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.WordWrap
+          text: "A poll is also a token refresh, and spending one on a locked laptop spends it on nobody. Nothing is asked of the server while the screen has been idle five minutes or the machine has no network, and a fetch goes out the moment you come back or reconnect. Anything you ask for by hand still goes out. On battery the interval is doubled."
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
       }
 
       // ---- fetching ----
@@ -789,6 +828,7 @@ Item {
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
       }
+
     }
 
     // ==================== calendar ====================

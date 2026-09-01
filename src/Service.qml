@@ -100,6 +100,7 @@ Item {
   readonly property string calendarMode: String(setting("calendar", "3day"))
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 180, 60, 3600)
   readonly property bool notifyOnNew: setting("notify", true) !== false
+  readonly property bool pausePolling: setting("pausePolling", true) !== false
   readonly property bool dedupeEvents: setting("dedupeEvents", true) !== false
   // Off unless asked for: turning it on is what makes the plugin want
   // permission to change mail, and the default stays read-only.
@@ -145,7 +146,11 @@ Item {
     // Asked for per host, answered once by the store: the widget and the
     // window watching the same inbox share one fetch, so they must also share
     // one announcement of what that fetch found.
-    notify: notifyOnNew
+    notify: notifyOnNew,
+    // Whether this host is content for the store to stop polling while nobody
+    // is at the machine. One host saying no is enough to keep it polling - the
+    // fetch is shared, so the most demanding subscriber decides.
+    pausePolling: pausePolling
   })
 
   function syncRequest() {
@@ -187,6 +192,11 @@ Item {
   // Not called `palette`: this is an Item, and QQuickItem has a palette of its
   // own that a property of that name would shadow.
   readonly property var themePalette: hub ? hub.themePalette : ({})
+
+  // Why the store is not polling, when it is not. Empty while it is.
+
+  readonly property string pollReason: hub ? hub.pollReason : ""
+
 
   readonly property bool loading: {
     if (!hub) return false

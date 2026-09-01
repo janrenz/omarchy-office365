@@ -92,7 +92,7 @@ Item {
           spec = out[key] = {
             key: key, alias: alias, folder: folder,
             mails: 0, days: 0, demo: false, intervalSec: 3600,
-            notify: false
+            notify: false, pausePolling: true
           }
         }
         // The most anyone asked for, so a widget showing five messages and a
@@ -104,6 +104,9 @@ Item {
         // One host wanting to be told is enough. The fetch is shared, so the
         // announcement has to be made once for all of them or not at all.
         spec.notify = spec.notify || request.notify === true
+        // The other way round: one host that wants to keep polling keeps the
+        // fetch alive for everybody, because the answer it gets is shared too.
+        spec.pausePolling = spec.pausePolling && request.pausePolling !== false
       }
     }
     return out
@@ -424,6 +427,25 @@ Item {
     return true
   }
 
+  // ---- when it is worth asking at all -------------------------------------
+  //
+  // See PollGate.qml. Nothing here decides *what* to fetch, only whether the
+  // timers should be running, so a refresh anybody asked for by hand still
+  // goes out - a failure the user can see beats a silence they cannot.
+  readonly property bool pausePolling: {
+    for (var key in wants) if (wants[key].pausePolling === false) return false
+    return true
+  }
+
+  property PollGate poll: PollGate {
+    pauseWhenAway: root.pausePolling
+    pauseWhenOffline: root.pausePolling
+    slowOnBattery: root.pausePolling
+  }
+
+  // For a host that wants to explain a panel that is not moving.
+  readonly property string pollReason: poll.reason
+
   // One per mailbox: its timer, its fetch, and a queue of the folders wanted
   // for it, so two folders of one mailbox never refresh a token at once.
   Instantiator {
@@ -488,8 +510,12 @@ Item {
           unit.queue = unit.queue.slice(1)
           if (key !== "") {
             // Retry sooner than the normal cadence after a failure, so a
-            // laptop coming back from suspend refills the panel quickly.
-            if (!root.applyFetch(key, exitCode, fetchOut.text, fetchErr.text)) retry.restart()
+            // laptop coming back from suspend refills the panel quickly. Not
+            // while the gate is closed, though: twenty seconds apart forever
+            // is what a locked laptop with no network would do to the API
+            // budget, and the gate opening starts a fetch on its own.
+            if (!root.applyFetch(key, exitCode, fetchOut.text, fetchErr.text)
+                && !root.poll.paused) retry.restart()
           }
           unit.pump()
         }
@@ -501,10 +527,13 @@ Item {
         onTriggered: unit.refreshNow()
       }
 
+      // triggeredOnStart is what makes waking up and coming back online
+      // immediate: the gate opening restarts this timer, and a restarted timer
+      // fires at once rather than an interval later.
       property Timer timer: Timer {
-        interval: unit.intervalSec * 1000
+        interval: unit.intervalSec * 1000 * root.poll.intervalScale
         repeat: true
-        running: root.pluginDir !== ""
+        running: root.pluginDir !== "" && !root.poll.paused
         triggeredOnStart: true
         onTriggered: unit.refreshNow()
       }
@@ -521,6 +550,37 @@ Item {
   property Notifier notifier: Notifier {
     appName: "Mail"
     plural: "new emails"
+    // The same glyph the bar widget defaults to, so the toast is recognisably
+    // this plugin's at a glance.
+    glyph: "󰇮"
+    // Clicking a digest opens the window on whatever it was showing: a digest
+    // is about several messages, so there is no one message to open.
+    defaultExec: root.summonArgv("{}")
+  }
+
+  // The argv omarchy's notification service runs when a toast is clicked. It
+  // goes through the shell rather than a window of our own, because the click
+  // may arrive when nothing is loaded - summon() mounts the window and hands
+  // the payload to open(), and delivers it straight away when the window is
+  // already up.
+  readonly property string pluginId: manifest && manifest.id
+    ? String(manifest.id) : "caseonline.omarchy.office365"
+
+  function summonArgv(payloadJson) {
+    return ["omarchy-shell", "shell", "summon", pluginId, String(payloadJson || "{}")]
+  }
+
+  // Which message a toast should open. The key is `messageId` and not `message`
+  // because that is what MailWindow.applyPayload reads; the chat plugins call
+  // the same thing `message`, since a row there has no other id.
+  // JSON.stringify rather than a hand-built string: a subject never goes in
+  // here, but an id from the server still is not ours to trust with quoting.
+  function openMessageArgv(alias, folderId, id) {
+    return summonArgv(JSON.stringify({
+      account: String(alias || ""),
+      folderId: String(folderId || ""),
+      messageId: String(id || "")
+    }))
   }
 
   // Everything this fetch found, against everything the last one did. New ids
@@ -550,7 +610,15 @@ Item {
       fresh.push({
         id: id,
         summary: (place !== "" ? place + " · " : "") + (from !== "" ? from : "New mail"),
-        body: String(row.subject || "")
+        body: String(row.subject || ""),
+        // Clicking it opens that message, in that mailbox and folder.
+        exec: openMessageArgv(account.alias, account.folderId, id),
+        // Two replies to the same conversation in one round are one thing
+        // happening, so the second updates the first toast rather than
+        // stacking under it. Keyed by conversation, not by message, and
+        // scoped so two mailboxes cannot collide.
+        replaceKey: String(row.thread || "") !== ""
+          ? key + "/" + String(row.thread) : ""
       })
     }
 

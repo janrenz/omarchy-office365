@@ -361,7 +361,14 @@ Panel {
               id: refreshButton
               readonly property bool spinning: !!root.service && root.service.loading
               iconText: ""
-              tooltipText: spinning ? "Updating…" : "Refresh"
+              // The one place a paused poll is visible: a panel that is not
+              // moving because nobody is at the machine looks exactly like a
+              // panel that is broken, and the difference belongs where the
+              // hand-driven refresh is.
+              readonly property string paused: root.service ? root.service.pollReason : ""
+              tooltipText: spinning
+                ? "Updating…"
+                : (paused !== "" ? "Refresh — " + paused : "Refresh")
               foreground: root.fg
               visible: !!root.service && root.service.configured && !root.showSettings
               onClicked: if (root.service) root.service.refresh()

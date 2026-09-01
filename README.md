@@ -89,6 +89,7 @@ Widget-level keys:
 | `dayEnd` | `22:00` | Bottom of the grid. |
 | `showWeekends` | `true` | Draw Saturday and Sunday in the grid. |
 | `refreshIntervalSec` | `180` | How often to poll Microsoft Graph (60–3600). |
+| `pausePolling` | `true` | Stop polling while the screen has been idle five minutes or there is no network. Doubles the interval on battery. |
 | `tintOnUnread` | `true` | Highlight the bar icon while **new** mail is waiting - unread mail that is in the list, meaning among the newest `mails` messages. An unread message further down the mailbox is backlog and leaves the icon plain, so the tint keeps meaning "something arrived" instead of settling in permanently on an inbox nobody empties. The tooltip and the panel header say both numbers: `2 new · 14 unread`. When the mailbox will not say how many are unread, the panel shows `3+` rather than `3`, and `?` rather than claiming none. |
 | `notify` | `true` | Desktop notification when new mail arrives. |
 | `previewLine` | `true` | Show a line of the message body under each subject. Off gives a two-line row. |
@@ -146,6 +147,14 @@ What counts as new is *new since the shell started watching*, not *unread*. The 
 The announcement is made by the store, which is the one thing there is exactly one of: the bar widget and the window watching the same inbox share one fetch, and so share one notification rather than raising two.
 
 ## Filtering
+Clicking the notification opens that message: the right mailbox, the right folder, and the message in the reading pane. Several messages in one conversation update one notification rather than stacking, and the click still works after the shell has been restarted underneath it — the action travels as data on the notification rather than as a callback into the process that sent it.
+
+## When it does not poll
+
+A poll is not free. It is a token refresh and a round trip, and on a mailbox with a rate limit it is part of a budget — so it stops when there is nobody to poll for. Nothing is asked of the server while the screen has been idle for five minutes, or while the machine has no network at all, and a fetch goes out the moment you come back or reconnect rather than at the next tick. Idle inhibitors count as being present, so a full-screen call does not look like an empty desk. On battery the interval is doubled, and tripled in the power-saver profile, because a system asked for less power is asking us for less too.
+
+Anything you ask for by hand still goes out, offline included: a failure you can see beats a silence you cannot. The refresh button's tooltip says why the panel is not moving while it is paused. Set `pausePolling` to `false` to keep the old fixed cadence.
+
 
 The pills under the title are both the legend for the row colours and the
 controls for what is shown, and they appear only once there is mail to filter.
@@ -329,6 +338,7 @@ including inside a message, which is the one place they used to do nothing.
 | `x` | Delete the message under the cursor |
 | `m` | Move it to another folder |
 | `F` | Flag it for follow-up, or clear the flag (capital, since `f` is the Focused filter) |
+| `a` | Hand this message to your coding agent — see below |
 | `u` / `f` | Only unread / only Focused |
 | `t` | Group the list by conversation |
 | `r` | Refresh |

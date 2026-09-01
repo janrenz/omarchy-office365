@@ -30,7 +30,9 @@ src/Panel.qml         The bar dropdown: merged mail beside the merged agenda.
 src/MailWindow.qml    The window: folders, list, reading pane. ~1.2k lines.
 src/MailList.qml      A ListView, deliberately — read the comment at the top.
 src/AgendaList.qml    The day-grouped agenda. AgendaTimeline.qml is the grid.
-src/Notifier.qml      notify-send, with the prime-then-announce rule.
+src/Notifier.qml      omarchy-notification-send, the prime-then-announce rule,
+                      and the click that opens the message.
+src/PollGate.qml      Whether it is worth polling at all: idle, network, battery.
 ```
 
 **Store vs Service is the thing to understand first.** The bar widget and the
@@ -118,6 +120,22 @@ keeps using the old client id or authority.
   consent and their own token set; the calendar's lives under
   `account["calendar"]`. Asking for a scope the account did not consent to fails
   with AADSTS65001, not with a prompt.
+- **A toast is a route back in, and it survives a shell restart.** Notifications
+  go out through `omarchy-notification-send`, whose `--exec` becomes the
+  `omarchy-exec-argv` hint: the click action rides as *data*, so omarchy can
+  still run it after the shell that sent it has been restarted, which a live
+  libnotify action cannot. Clicking runs `omarchy-shell shell summon <id>
+  '<json>'` and the payload lands in the window's `open()`. Two traps: that
+  sender has no `--` to end its options, so a headline that is exactly one of
+  its flags is guarded with a leading space in `asText()`; and `-r` needs the id
+  a previous send printed with `-p`, which is what makes several messages in one
+  conversation update one toast instead of stacking.
+- **The poll gate's signals arrive late.** For the first second or two of a
+  shell's life UPower has no devices, NetworkManager reports `Unknown`
+  connectivity and `canCheckConnectivity` is false - measured, on this machine.
+  Every default in `PollGate.qml` therefore means "go ahead": a gate that failed
+  closed would swallow the first fetch after every shell start, which is the one
+  that fills an empty panel.
 - **`compose` only replies, replies-all and forwards.** There is no "new
   message" — writing a fresh mail means leaving for Outlook, and the
   `--draft` path opens Outlook by design. That is the plugin's biggest hole, and
