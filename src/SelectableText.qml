@@ -29,11 +29,15 @@ TextEdit {
   textFormat: TextEdit.PlainText
   color: Color.foreground
   // Links, in the theme's accent rather than in Qt's built-in blue, which
-  // belongs to no Omarchy theme and sat oddly against every one of them. It
-  // goes through the palette and not through `linkColor`, which is a Text
-  // property that a TextEdit does not have. Markup that colours its own
-  // anchors - which plenty of HTML mail does - still wins; this is the colour
-  // for links that state no preference, and those are all of them here.
+  // belongs to no Omarchy theme and sat oddly against every one of them.
+  //
+  // This is the palette a Qt item is meant to be asked, and it is not enough on
+  // its own: a TextEdit showing rich text hands the markup to a QTextDocument,
+  // which bakes each anchor's colour in as it parses, out of the application
+  // palette rather than this one. Measured - the links came out #0000ff with
+  // these two lines in place. So the colour that actually lands on a message
+  // body is the style block `Model.withLinkColor` puts in front of it; these
+  // stay for the selection and for any plain link a Qt version fixes later.
   palette.link: Color.accent
   palette.linkVisited: Color.accent
   // A TextEdit shows an I-beam and a blinking caret by default; read-only text

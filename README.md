@@ -660,6 +660,19 @@ journalctl --user -f | grep -i office365
 
 ## Changelog
 
+### 1.1.1 — 2026-09-01
+
+- **Links in a message body take the theme's colour.** They were coming out in
+  Qt's built-in `#0000ff` under every theme. `SelectableText` sets
+  `palette.link`, which is the palette a Qt item is meant to be asked and is not
+  enough on its own: a `TextEdit` showing rich text hands the markup to a
+  `QTextDocument`, which bakes each anchor's colour in as it parses, out of the
+  application palette rather than the item's. The colour now arrives as a
+  `<style>` block in front of the body, which is a default rather than an
+  override - HTML mail that colours its own anchors still keeps its own colour -
+  and which is applied at render time, so a theme change re-colours the pane
+  without re-fetching anything.
+
 ### 1.1.0 — 2026-09-01
 
 - **Focused/Other is offered only where it exists.** Outlook computes the split

@@ -718,5 +718,40 @@ group("accountViews - the Focused/Other split", () => {
         build({ account: "fwu", transport: "imap" }, { alias: "fwu", ok: true }).canFocus, false)
 })
 
+group("withLinkColor - links in the theme's colour", () => {
+  // A TextEdit's rich text ignores palette.link and bakes Qt's #0000ff into
+  // every anchor, so the colour has to arrive as markup in front of the body.
+  const body = '<a href="https://e.com">Sign in</a>'
+
+  check("a rich-text body is given the theme's link colour",
+        Model.withLinkColor(body, "linked", "#7aa2f7"),
+        '<style>a { color: #7aa2f7; }</style>' + body)
+
+  check("a sender's own markup gets it too",
+        Model.withLinkColor(body, "html", "#7aa2f7").startsWith("<style>"), true)
+
+  // Plain text is rendered as plain text: a style block would be shown as
+  // words rather than read as CSS.
+  check("plain text is left exactly as it is",
+        Model.withLinkColor("Sign in at https://e.com", "text", "#7aa2f7"),
+        "Sign in at https://e.com")
+
+  check("an empty body stays empty", Model.withLinkColor("", "linked", "#7aa2f7"), "")
+
+  // The value comes from qs.Commons, but it is going into a style block.
+  check("anything that is not plainly a colour is refused rather than escaped",
+        Model.withLinkColor(body, "linked", "red; } body { display: none"), body)
+
+  check("and so is a colour by name, which Qt would take but this will not",
+        Model.withLinkColor(body, "linked", "rebeccapurple"), body)
+
+  // Qt stringifies a non-opaque colour as #aarrggbb, which CSS reads as a
+  // different colour entirely.
+  check("an alpha channel is dropped rather than read as part of the colour",
+        Model.cssColor("#ff7aa2f7"), "#7aa2f7")
+
+  check("a short form is passed through", Model.cssColor("#abc"), "#abc")
+})
+
 console.log(`\n${checks - failures}/${checks} passed`)
 process.exit(failures ? 1 : 0)

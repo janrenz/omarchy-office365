@@ -16,6 +16,10 @@ Column {
   property color fg: Color.foreground
   property color dim: Qt.darker(fg, 1.5)
   property color accent: Color.accent
+  // Links in the body. Its own property rather than `accent` read directly, so
+  // a host that wants its links to sit differently against its ground can say
+  // so without moving every other accented thing in the pane with it.
+  property color linkColor: Color.accent
   property string fontFamily: Style.font.family
   property real maxBodyHeight: Style.space(360)
 
@@ -204,7 +208,10 @@ Column {
     SelectableText {
       id: bodyText
       width: parent.width
-      text: root.detail ? String(root.detail.body || "").trim() : ""
+      readonly property string bodyFormat: root.detail ? String(root.detail.bodyFormat || "") : ""
+      text: root.detail
+            ? Model.withLinkColor(String(root.detail.body || "").trim(), bodyFormat, root.linkColor)
+            : ""
       color: root.fg
       // Link colour is SelectableText's business - through the palette, since
       // linkColor is a Text property and this is a TextEdit. A message that
@@ -219,10 +226,8 @@ Column {
       // "html" is the message's own markup, sanitised. "linked" is markup
       // graph.py built out of the message's plain text, so that the links the
       // text conversion leaves unusable can be clicked. Both are rich text.
-      textFormat: {
-        var kind = root.detail ? String(root.detail.bodyFormat || "") : ""
-        return kind === "html" || kind === "linked" ? TextEdit.RichText : TextEdit.PlainText
-      }
+      textFormat: bodyFormat === "html" || bodyFormat === "linked"
+                  ? TextEdit.RichText : TextEdit.PlainText
       // Rich text makes links clickable. They open where every other link in
       // this plugin opens rather than in whatever Qt would do with them.
       onLinkActivated: function(url) { root.linkActivated(url) }

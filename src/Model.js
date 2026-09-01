@@ -1389,10 +1389,22 @@ function withLinkColor(body, bodyFormat, color) {
   var text = String(body || "")
   if (bodyFormat !== "html" && bodyFormat !== "linked") return text
   if (text === "") return text
-  // Only a colour this file wrote: the value comes from qs.Commons, but it
-  // arrives as a string and is going into markup, so anything that could close
-  // the declaration and open something else is refused rather than escaped.
-  var safe = /^#[0-9A-Fa-f]{3,8}$/.test(String(color)) ? String(color) : ""
+  var safe = cssColor(color)
   if (safe === "") return text
   return "<style>a { color: " + safe + "; }</style>" + text
+}
+
+// A QML color as something Qt's CSS subset reads, or "" for anything else.
+//
+// Only a colour this file wrote reaches the markup: the value comes from
+// qs.Commons, but it arrives as a string and is going into a style block, so
+// anything that could close the declaration and open something else is refused
+// rather than escaped. A non-opaque colour stringifies as #aarrggbb, which CSS
+// would read as a different colour entirely, so the alpha is dropped - links
+// are not the place to be translucent.
+function cssColor(color) {
+  var text = String(color || "").trim()
+  if (/^#[0-9A-Fa-f]{3}$/.test(text) || /^#[0-9A-Fa-f]{6}$/.test(text)) return text
+  if (/^#[0-9A-Fa-f]{8}$/.test(text)) return "#" + text.slice(3)
+  return ""
 }
