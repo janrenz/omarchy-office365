@@ -25,7 +25,7 @@ ln -sfn /usr/share/omarchy/shell/Ui "$STAGE/Ui"
 # The Python helpers too: without graph.py beside the QML the harness cannot
 # run a fetch at all, so --demo data never arrives and anything downstream of
 # it - the mail list, the folder tree - renders empty for no visible reason.
-for f in "$repo"/src/*.qml "$repo"/src/Model.js "$repo"/src/*.py; do
+for f in "$repo"/src/*.qml "$repo"/src/Model.js "$repo"/src/*.py "$repo"/src/*.sh; do
   ln -sfn "$f" "$STAGE/$(basename "$f")"
 done
 for f in shell.qml Fixtures.js; do

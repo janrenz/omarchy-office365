@@ -22,6 +22,9 @@ Column {
   property bool canWrite: false
   property bool canCompose: false
   property bool canMove: false
+  // Whether to offer the coding-agent handover. Only the window sets this: the
+  // bar dropdown has no reply box for a draft to come back into.
+  property bool canAgent: false
   property bool actionRunning: false
   property string actionError: ""
 
@@ -42,6 +45,7 @@ Column {
   signal replyRequested()
   signal replyAllRequested()
   signal forwardRequested()
+  signal agentRequested()
 
   readonly property string subject: detail && detail.subject ? detail.subject
                                     : (mail && mail.subject ? mail.subject : "")
@@ -327,6 +331,19 @@ Column {
       fontFamily: root.fontFamily
       fontSize: Style.font.caption
       onClicked: root.forwardRequested()
+    }
+
+    // Reading does not need write access and neither does asking about it, so
+    // this one keeps company with Open rather than with Reply.
+    Button {
+      visible: root.canAgent
+      text: "Ask agent"
+      tooltipText: "Open your coding agent on this message"
+      bordered: true
+      foreground: root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.agentRequested()
     }
 
     // Changing mail needs permission this plugin does not ask for by

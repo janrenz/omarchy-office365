@@ -2,6 +2,8 @@ import QtQuick
 import QtCore
 import QtQuick.Controls
 import QtQuick.Dialogs
+import qs.Commons
+import qs.Ui
 
 // Writing a reply, a reply to everyone, or a forward.
 //
@@ -52,6 +54,17 @@ Column {
   }
 
   function focusBody() { body.forceActiveFocus() }
+
+  // Text this box should open holding - a draft a coding agent wrote. Applied
+  // once, on completion, rather than bound: the binding belongs to what the
+  // person types the moment they type it.
+  property string initialBody: ""
+
+  // The same thing for a draft that arrives while this box is already open.
+  // Both paths exist because the reply box is built by a Loader the instant
+  // `composing` turns true, and whether that happens before or after the draft
+  // is set is not something to depend on - see MailWindow's fillCompose.
+  function setBody(text) { body.text = String(text || "") }
 
   // The window's key catcher stands down while a reply is open - it claims
   // bare letters to move a cursor, and would eat them out of the text. So the

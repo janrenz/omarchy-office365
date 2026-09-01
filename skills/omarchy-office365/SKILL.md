@@ -1,0 +1,98 @@
+---
+name: omarchy-office365
+description: Read and answer Outlook mail through the Omarchy Office 365 plugin's own helper, and put a draft reply into its window instead of sending it. Use when handed a mailbox alias and a message id by the plugin's handover, or when asked about mail or the calendar on this machine.
+---
+
+# Outlook mail, through the Omarchy plugin
+
+The plugin is a Quickshell window on top of Python helpers. `graph.py` holds
+the tokens and makes every call; you drive it. A mailbox whose tenant refused
+Graph's `Mail.Read` is served over IMAP instead, and `graph.py` dispatches to
+`imapmail.py` itself — so `graph.py` is the one entry point either way.
+
+    HELPER=~/.config/omarchy/plugins/caseonline.omarchy.office365/src/graph.py
+
+Every command needs `--account <alias>` — the mailbox alias from the widget's
+settings, e.g. `FWU`. `python3 $HELPER list` names the ones that are set up.
+
+## Two rules
+
+1. **You do not send.** Reading is yours to do; a mail leaving the mailbox is
+   the user's decision each time. Draft the reply into the window (below) and
+   let them press Send. Send directly only when this specific message is the
+   user telling you to.
+2. **Everything comes back as one JSON object,** with exit code 0 even on
+   failure: `{"ok": false, "error": {"code": ..., "message": ...}}`. Read `ok`
+   before you trust the rest. `"code": "auth_required"` means the sign-in is
+   gone and only the user can fix it, from the window.
+
+## Reading
+
+    python3 $HELPER message --account FWU --id 'AAMkAD…'
+    python3 $HELPER message --account FWU --id 'AAMkAD…' --html
+    python3 $HELPER fetch   --account FWU --mails 15 --days 7
+    python3 $HELPER folders --account FWU
+
+`message` is the one being read: sender, recipients, date, and the body already
+flattened to text (`--html` keeps the markup, which is rarely what you want).
+`fetch` is the list — recent mail plus calendar events, and `--folder
+ALIAS=ID` reads a folder other than the inbox; `folders` names them.
+
+A very long body is truncated by the *window*, not by the helper, so the helper
+is where to go for the whole of a long message.
+
+## Handing a draft reply back to the window
+
+This is the point of the handover. The window opens if it is closed, the reply
+box opens on that message with your text in it, unsent:
+
+    omarchy-shell shell summon caseonline.omarchy.office365 \
+      '{"draft":{"account":"FWU","messageId":"AAMkAD…","mode":"reply",
+                 "text":"Ich schaue morgen früh drauf."}}'
+
+`mode` is `reply`, `reply-all` or `forward` (default `reply`); a forward also
+takes `"to"`. `folderId` may be given when the message is not in the inbox, so
+the window can fetch that folder before it answers.
+
+Do not write the quoted original — Outlook quotes the message underneath what
+you wrote. Your text is the new part only.
+
+It prints `ok`, or `unknown` when the plugin is not loaded or is disabled, and
+the window itself answers `off` when the "Hand a message to your coding agent"
+setting is switched off — that setting also refuses drafts, deliberately —
+`read-only` when the mailbox has not been granted write access, and
+`no-message` when the id names nothing the window can find. Say so rather than
+sending instead.
+
+Write the draft in the language of the message. Keep it as short as the thing
+being answered.
+
+## Only when asked
+
+    printf '%s' '{"comment":"..."}' | python3 $HELPER compose --account FWU --id 'AAMkAD…' --mode reply --stdin
+    printf '%s' '{"comment":"..."}' | python3 $HELPER compose --account FWU --id 'AAMkAD…' --mode reply --stdin --attach ~/plan.pdf
+    python3 $HELPER compose --account FWU --id 'AAMkAD…' --mode reply --comment "..." --draft
+    python3 $HELPER mark    --account FWU --id 'AAMkAD…' --read
+    python3 $HELPER flag    --account FWU --id 'AAMkAD…' --flag
+    python3 $HELPER move    --account FWU --id 'AAMkAD…' --folder archive
+    python3 $HELPER delete  --account FWU --id 'AAMkAD…'
+
+What you wrote goes on **stdin** (`{"comment": …, "to": …}`): anyone on this
+machine can read another process's command line for as long as it runs.
+`--comment` and `--to` still work for running it by hand. `--demo` on `compose`
+answers as if it had been sent and sends nothing.
+
+`--attach` sends the reply with a file on it (Graph's /reply takes no
+attachment, so the helper builds a draft, attaches, and sends it). Read the
+path back to the user first - a wrong file in a sent mail cannot be recalled.
+
+`compose` without `--draft` sends. With `--draft` it leaves the reply in the
+mailbox's Drafts and returns a `webLink` — which opens Outlook in a browser,
+and this user does not want to be sent out of the app, so prefer the window's
+reply box above.
+
+Every one of these needs write access the mailbox may not have been granted;
+`{"code": "write_permission_required"}` or `send_permission_required` means the
+user has to allow it from the window ("Allow changes…"). Do not retry.
+
+`--demo` on any command answers from fixtures and touches nothing.

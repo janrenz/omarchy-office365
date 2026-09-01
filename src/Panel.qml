@@ -440,7 +440,12 @@ Panel {
 
           FilterPill {
             label: "Unread"
-            detail: root.service && root.service.unreadOnly ? "on" : ""
+            // The count rather than "on": the pill's own fill already says the
+            // filter is on, and the number is the thing worth knowing before
+            // pressing it.
+            detail: root.service && root.service.unreadCount > 0
+              ? String(root.service.unreadCount) : ""
+            alert: !!root.service && root.service.unreadCount > 0
             selected: !!root.service && root.service.unreadOnly
             fg: root.fg
             dim: root.dim

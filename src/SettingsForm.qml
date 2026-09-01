@@ -37,6 +37,7 @@ Item {
   property bool vNotify: true
   property bool vPausePolling: true
   property bool vMarkRead: false
+  property bool vAgentHandover: true
   property bool vPreviewLine: true
   property bool vFocusedDefault: false
   property string vAgendaView: "list"
@@ -90,6 +91,7 @@ Item {
     vNotify = setting("notify", true) !== false
     vPausePolling = setting("pausePolling", true) !== false
     vMarkRead = setting("markReadOnOpen", false) === true
+    vAgentHandover = setting("agentHandover", true) !== false
     vPreviewLine = setting("previewLine", true) !== false
     vFocusedDefault = setting("focusedByDefault", false) === true
     vAgendaView = String(setting("agendaView", "list")) === "timeline" ? "timeline" : "list"
@@ -219,6 +221,7 @@ Item {
       notify: vNotify,
       pausePolling: vPausePolling,
       markReadOnOpen: vMarkRead,
+      agentHandover: vAgentHandover,
       previewLine: vPreviewLine,
       focusedByDefault: vFocusedDefault,
       account: "", short: "", color: "", clientId: "", authority: "", transport: "", webUrl: "", focusMatch: ""
@@ -829,6 +832,46 @@ Item {
         font.pixelSize: Style.font.caption
       }
 
+      Item {
+        width: parent.width
+        implicitHeight: Math.max(agentLabel.implicitHeight, agentSwitch.implicitHeight)
+
+        Text {
+          textFormat: Text.PlainText
+          id: agentLabel
+          anchors.left: parent.left
+          anchors.right: agentSwitch.left
+          anchors.rightMargin: Style.spacing.sm
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Hand a message to your coding agent"
+          color: root.fg
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+
+        ToggleSwitch {
+          id: agentSwitch
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          checked: root.vAgentHandover
+          foreground: root.fg
+          accent: root.accent
+          onToggled: root.vAgentHandover = !root.vAgentHandover
+        }
+      }
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        wrapMode: Text.WordWrap
+        text: root.vAgentHandover
+          ? "The a key and the Ask agent button, which open the agent you chose with `omarchy default agent` on the message you are reading. It is told which message to read and reads it through graph.py; not even the subject is put on a command line."
+          : "No a key and no Ask agent button, and a draft reply an agent tries to hand back is refused."
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
     }
 
     // ==================== calendar ====================

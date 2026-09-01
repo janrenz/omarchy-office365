@@ -96,6 +96,7 @@ Widget-level keys:
 | `focusedByDefault` | `false` | Open with the Focused filter already on, hiding Outlook's Other mail. |
 | `unreadByDefault` | `false` | Open with the Unread filter already on, for a widget you keep as an inbox rather than a record of everything that arrived. |
 | `markReadOnOpen` | `false` | Mark a message read once you open it in the panel. Needs permission to change mail, per mailbox. |
+| `agentHandover` | `true` | Whether `a` and the **Ask agent** button are there at all, and whether a draft reply from an agent is accepted. |
 | `instance` | written for you | Identifies this widget among several. Written the first time you save, and read back on the next save so two widgets holding the same mailbox never write into each other's settings. Nothing to set by hand. |
 
 Per-mailbox keys, inside an `accounts` entry:
@@ -146,7 +147,6 @@ What counts as new is *new since the shell started watching*, not *unread*. The 
 
 The announcement is made by the store, which is the one thing there is exactly one of: the bar widget and the window watching the same inbox share one fetch, and so share one notification rather than raising two.
 
-## Filtering
 Clicking the notification opens that message: the right mailbox, the right folder, and the message in the reading pane. Several messages in one conversation update one notification rather than stacking, and the click still works after the shell has been restarted underneath it — the action travels as data on the notification rather than as a callback into the process that sent it.
 
 ## When it does not poll
@@ -155,6 +155,7 @@ A poll is not free. It is a token refresh and a round trip, and on a mailbox wit
 
 Anything you ask for by hand still goes out, offline included: a failure you can see beats a silence you cannot. The refresh button's tooltip says why the panel is not moving while it is paused. Set `pausePolling` to `false` to keep the old fixed cadence.
 
+## Filtering
 
 The pills under the title are both the legend for the row colours and the
 controls for what is shown, and they appear only once there is mail to filter.
@@ -278,7 +279,6 @@ one, and only for a message that needs it. If the attaching fails, the draft is
 left in Drafts with whatever did attach, and the error says so - it is somewhere
 you can finish it, which "could not send" would not have told you.
 
-
 ### Links
 
 Graph hands a message over as plain text unless `htmlBody` is on, and its
@@ -360,8 +360,8 @@ including inside a message, which is the one place they used to do nothing.
 | `g` / `G` | To the top / to the bottom |
 | `x` | Delete the message under the cursor |
 | `m` | Move it to another folder |
-| `F` | Flag it for follow-up, or clear the flag (capital, since `f` is the Focused filter) |
 | `a` | Hand this message to your coding agent — see below |
+| `F` | Flag it for follow-up, or clear the flag (capital, since `f` is the Focused filter) |
 | `u` / `f` | Only unread / only Focused |
 | `t` | Group the list by conversation |
 | `r` | Refresh |
@@ -372,6 +372,44 @@ message open, and only the next Escape closes it.
 
 This is the same ladder the [Teams plugin](https://github.com/janrenz/omarchy-teams)
 uses, so what is learned in one window works in the other.
+
+## Your coding agent
+
+Omarchy already knows which coding agent you use — `omarchy default agent`
+picks one, `omarchy-agent` launches it. Press `a` on a message, or the **Ask
+agent** button in the reading pane, and that agent opens on the message you are
+reading.
+
+What crosses over is a pointer, not the mail. The prompt names the mailbox
+alias, the folder and the message id, and points at a skill in
+`skills/omarchy-office365/`; the agent then reads the message through
+`src/graph.py`, the same helper the window uses. Not even the subject is in the
+prompt: a subject is content, and an agent window's command line is readable by
+anyone on this machine for as long as it lives. It also means the agent reads
+the message as it is now, and can read the whole of a long one — the window is
+where the body gets truncated, not the helper.
+
+The skill tells it to draft rather than to send. A reply it writes comes back
+into the window's reply box, on the right message, unsent:
+
+```bash
+omarchy-shell shell summon caseonline.omarchy.office365 \
+  '{"draft":{"account":"work","messageId":"AAMkAD…","mode":"reply",
+             "text":"Ich schaue morgen früh drauf."}}'
+```
+
+The window opens if it was closed, and fetches the folder first when the
+message is not in the list. `mode` may be `reply`, `reply-all` or `forward`.
+Sending stays a button you press — nothing an agent does here leaves the
+mailbox. A mailbox that has not been granted write access refuses the draft
+outright, because even a draft is a write as far as Graph is concerned.
+
+`src/handover.sh` is what the key runs, and it is usable on its own: `--print`
+shows the prompt instead of launching anything.
+
+Turn the whole thing off with `agentHandover` in the settings and the key, the
+button and the help entry are gone, and a draft arriving from an agent is
+refused rather than quietly applied.
 
 ## Interactions
 

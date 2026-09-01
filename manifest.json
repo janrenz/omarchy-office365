@@ -31,7 +31,8 @@
       "refreshIntervalSec": 180,
       "pausePolling": true,
       "tintOnUnread": true,
-      "notify": true
+      "notify": true,
+      "agentHandover": true
     },
     "schema": [
       {
@@ -165,6 +166,13 @@
         "label": "Mark a message read when you open it",
         "description": "Needs permission to change mail, granted per mailbox from the panel.",
         "defaultValue": false
+      },
+      {
+        "key": "agentHandover",
+        "type": "boolean",
+        "label": "Hand a message to your coding agent",
+        "description": "Adds the a key and an Ask agent button, which open the coding agent you chose in Omarchy on the message you are reading. No mail text leaves the window - the agent is told which mailbox and message to read and reads it through the same helper this window uses. Off means neither the key nor the button is there, and a draft reply sent back from an agent is refused.",
+        "defaultValue": true
       },
       {
         "key": "ipcTarget",

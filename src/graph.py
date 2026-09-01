@@ -2068,6 +2068,26 @@ def recipient_list(value):
     return addresses, bad
 
 
+def read_stdin_json():
+    """One JSON object, on one line, from whoever started this.
+
+    What a person wrote goes in this way rather than as an argument: anyone on
+    this machine can read /proc/<pid>/cmdline for as long as a process runs,
+    and nobody can read another process's stdin. One line, and `{}` for
+    anything unreadable - the same contract slack.py and teams.py keep, so the
+    QML side writes one line in `onStarted` and all three behave alike.
+    """
+    try:
+        line = sys.stdin.readline()
+    except (OSError, ValueError):
+        return {}
+    try:
+        parsed = json.loads(line or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def cmd_compose(args):
     """Reply, reply all or forward - sent, or left as a draft in Outlook.
 
@@ -2081,7 +2101,18 @@ def cmd_compose(args):
         fail("bad_mode", "Unknown compose mode: %s" % args.mode)
     send_path, draft_path = mode
 
-    recipients, bad = recipient_list(args.to)
+    # What was written, and who it goes to, off stdin when the window asks for
+    # that - see read_stdin_json. --comment and --to stay for running this by
+    # hand. Read first and checked exactly as before: the address guard and the
+    # attachment reads below still happen before anything reaches the network.
+    comment = str(args.comment or "")
+    to = str(args.to or "")
+    if getattr(args, "stdin", False):
+        payload = read_stdin_json()
+        comment = str(payload.get("comment") or comment)
+        to = str(payload.get("to") or to)
+
+    recipients, bad = recipient_list(to)
     if bad:
         fail("bad_recipient", "Not an email address: %s" % ", ".join(bad[:3]))
     if args.mode == "forward" and not recipients:
@@ -2090,6 +2121,19 @@ def cmd_compose(args):
     # Read before the account is touched: a file that cannot be attached is
     # worth saying so about before a token is refreshed for it.
     files = read_attachments(getattr(args, "attach", None))
+
+    # Everything above refuses what the real thing would refuse; everything
+    # below it reaches the mailbox. This is the line the other two helpers have
+    # had all along and this one did not, so a dev harness with `demo` on that
+    # pressed Send made a real request with a real token - and would have sent a
+    # real reply if the fixture's message id had happened to be a live one.
+    if getattr(args, "demo", False):
+        # `out()` does not exit in this helper - unlike slack.py's and
+        # teams.py's, where it does - so the return is what actually stops this.
+        out({"ok": True, "sent": not bool(args.draft), "drafted": bool(args.draft),
+             "comment": bool(comment), "recipients": len(recipients),
+             "attachments": len(files), "demo": True})
+        return
 
     account = read_json(state_path(args.account))
     if not account:
@@ -2110,12 +2154,11 @@ def cmd_compose(args):
                  "This mailbox consented to IMAP but not to SMTP.Send. Save this as a draft, "
                  "or sign in again to allow sending.")
         out(imap_run(need_imap().compose, account, token, args.id, args.mode,
-                     str(args.comment or ""), addresses, bool(args.draft), files))
+                     comment, addresses, bool(args.draft), files))
         return
 
     base = GRAPH + "/me/messages/" + urllib.parse.quote(args.id, safe="")
     headers = {"Authorization": "Bearer " + token}
-    comment = str(args.comment or "")
 
     if args.draft:
         status, payload = http(base + "/" + draft_path, method="POST",
@@ -2303,9 +2346,13 @@ def main():
     compose.add_argument("--id", required=True, help="message id from a fetch")
     compose.add_argument("--mode", required=True, choices=sorted(COMPOSE_MODES), help="what to write")
     compose.add_argument("--comment", default="", help="what to say above the quoted message")
+    compose.add_argument("--stdin", action="store_true",
+                         help='read {"comment": "...", "to": "..."} from stdin, keeping the words out of argv')
     compose.add_argument("--to", default="", help="recipients for a forward, comma separated")
     compose.add_argument("--attach", action="append", default=[],
                          help="a file to attach; repeat for more")
+    compose.add_argument("--demo", action="store_true",
+                         help="answer as if it had been sent, and send nothing")
     compose.add_argument("--draft", action="store_true",
                          help="leave it as a draft in Outlook instead of sending it")
     compose.set_defaults(func=cmd_compose)

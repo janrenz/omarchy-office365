@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Ui
 
 // A toggle in the panel's filter row. Selected pills carry a soft fill;
 // once any filter is on, the ones not chosen fade back so the active one
@@ -8,6 +9,11 @@ Rectangle {
   id: root
 
   property string label: ""
+  // A glyph instead of a word, for a pill whose one job has a picture everybody
+  // already knows. Drawn through OpticalGlyph rather than as text: a Nerd Font
+  // glyph is not centred in its own advance width, so a bare Text sits it
+  // slightly off inside the pill.
+  property string icon: ""
   property string detail: ""
   property color dotColor: "transparent"
   property bool selected: false
@@ -46,11 +52,24 @@ Rectangle {
 
     Text {
       textFormat: Text.PlainText
+      visible: root.icon === ""
       text: root.label
       color: root.fg
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
       font.bold: true
+      anchors.verticalCenter: parent.verticalCenter
+    }
+
+    OpticalGlyph {
+      visible: root.icon !== ""
+      // Square, so the pill comes out as round as the text ones are tall.
+      width: Style.font.icon
+      height: width
+      text: root.icon
+      color: root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.icon
       anchors.verticalCenter: parent.verticalCenter
     }
 

@@ -33,6 +33,13 @@ src/AgendaList.qml    The day-grouped agenda. AgendaTimeline.qml is the grid.
 src/Notifier.qml      omarchy-notification-send, the prime-then-announce rule,
                       and the click that opens the message.
 src/PollGate.qml      Whether it is worth polling at all: idle, network, battery.
+src/handover.sh       Builds the prompt that hands a message to the user's
+                      coding agent and execs omarchy-agent. Runnable by hand;
+                      --print shows the prompt and launches nothing.
+skills/omarchy-office365/
+                      What that agent is pointed at: the helper's commands, and
+                      how to put a draft reply in the window's reply box
+                      instead of sending it.
 ```
 
 **Store vs Service is the thing to understand first.** The bar widget and the
@@ -123,15 +130,6 @@ keeps using the old client id or authority.
 
 ## Things that will surprise you
 
-- **Three transports, chosen per mailbox** by `"transport"` on the widget entry.
-  Graph is the default; `"imap"` moves mail to IMAP/SMTP and the calendar to
-  EWS. `GRAPH_CAPABILITIES` gates calendar, Focused and webLinks behaviour, so a
-  feature added on the Graph path needs a decision about the IMAP one.
-- **Entra will not mint a token for one resource from another's refresh token.**
-  Mail (IMAP), sending (SMTP) and calendar (EWS) each need their own interactive
-  consent and their own token set; the calendar's lives under
-  `account["calendar"]`. Asking for a scope the account did not consent to fails
-  with AADSTS65001, not with a prompt.
 - **A toast is a route back in, and it survives a shell restart.** Notifications
   go out through `omarchy-notification-send`, whose `--exec` becomes the
   `omarchy-exec-argv` hint: the click action rides as *data*, so omarchy can
@@ -148,6 +146,26 @@ keeps using the old client id or authority.
   Every default in `PollGate.qml` therefore means "go ahead": a gate that failed
   closed would swallow the first fetch after every shell start, which is the one
   that fills an empty panel.
+- **`out()` does not exit here.** In `slack.py` and `teams.py` it does, so a
+  command ends at its `out(...)`. In `graph.py` only `fail()` exits: every
+  `out(...)` needs the `return` after it, and code copied across from the chat
+  plugins will happily print an answer and then carry on and make the request.
+- **`compose` reaches the mailbox unless `--demo` says otherwise**, and the
+  window passes `--demo` when the widget has `demo` on. That line was added
+  after a dev harness whose fixture alias was `work` - a real signed-in mailbox
+  here - pressed Send and made a real Graph request; the fixture's message id
+  was refused as malformed, which is the only reason nothing was sent. Give a
+  scratch harness an alias no mailbox uses, and check the demo line is there
+  before you press anything that writes.
+- **Three transports, chosen per mailbox** by `"transport"` on the widget entry.
+  Graph is the default; `"imap"` moves mail to IMAP/SMTP and the calendar to
+  EWS. `GRAPH_CAPABILITIES` gates calendar, Focused and webLinks behaviour, so a
+  feature added on the Graph path needs a decision about the IMAP one.
+- **Entra will not mint a token for one resource from another's refresh token.**
+  Mail (IMAP), sending (SMTP) and calendar (EWS) each need their own interactive
+  consent and their own token set; the calendar's lives under
+  `account["calendar"]`. Asking for a scope the account did not consent to fails
+  with AADSTS65001, not with a prompt.
 - **An attachment cannot ride on `/reply`.** Those endpoints take a comment and
   recipients and nothing else, so `compose --attach` builds the same draft the
   `--draft` path builds, POSTs each file to `/attachments`, and sends the draft.
@@ -173,6 +191,30 @@ keeps using the old client id or authority.
 - **The window has no settings of its own.** It is one per plugin while the
   widget is multi-instance, so it reads a widget's configuration out of
   `shell.json`.
+- **`MailWindow.open(payloadJson)` is a contract now, not a stub.** Beside the
+  old `{"instance": "..."}` it takes `account`, `folderId` and `messageId` -
+  what a clicked notification passes - and a `draft` object, which puts a
+  coding agent's reply in the reply box unsent. The shell drains its payload
+  queue in a loop and delivers to a window that is already open, so anything
+  added there has to survive arriving twice. A message in a folder that has not
+  been read yet cannot be revealed at once, which is why `pendingMessageId` and
+  the `Connections` on `mailView.mail` exist: the folder is fetched and the
+  request answered when the list lands. `omarchy-shell shell call <id>
+  agentDraft '<json>'` is the same draft route and returns what it made of it.
+- **The coding-agent handover is one setting away from not existing.**
+  `agentHandover` gates the `a` key, the reading pane's button, the help entry
+  and the inbound draft. A feature that reaches somebody's mail has to be
+  refusable, so check the gate rather than assuming it.
+- **`dev/link.sh` symlinks `dev/shell.qml` into the stage.** Writing a
+  throwaway harness to `$STAGE/shell.qml` therefore writes it *into the repo*,
+  through the symlink. Give a scratch harness any other name.
+- **`open()` re-reads `shell.json` every time it is called.** A dev harness
+  that calls it after putting fixture settings in place has them replaced by
+  the real widget's - which points the harness at a real mailbox. Drive
+  `applyPayload` directly instead.
+- **The demo fixtures are read-only** (`"write": False`, `"send": False` in
+  `graph.py`), so no compose path can be exercised against them without
+  changing the fixture in the staged copy outside the repo.
 
 ## House style
 

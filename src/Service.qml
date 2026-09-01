@@ -105,6 +105,10 @@ Item {
   // Off unless asked for: turning it on is what makes the plugin want
   // permission to change mail, and the default stays read-only.
   readonly property bool markReadOnOpen: setting("markReadOnOpen", false) === true
+  // Whether the coding-agent handover is on offer at all. Off takes away the a
+  // key, the button, and the route an agent uses to hand a draft reply back -
+  // see the README's "Your coding agent" section.
+  readonly property bool agentHandover: setting("agentHandover", true) !== false
   readonly property bool previewLine: setting("previewLine", true) !== false
   // Keep the message's own formatting - headings, lists, tables, links -
   // instead of Graph's flattening to text. Everything that would fetch or run
@@ -552,13 +556,18 @@ Item {
     composeRunning = true
     composeError = ""
     composeNotice = ""
+    // What was written goes over stdin; only the ids stay on the command line.
+    // Anyone on this machine can read /proc/<pid>/cmdline for as long as the
+    // call runs, and a reply is somebody's words - see composeProc below.
     var command = ["python3", helper(), "compose",
                    "--account", alias,
                    "--id", String(composeMail.id),
                    "--mode", composeMode,
-                   "--comment", composeText,
-                   "--to", composeTo]
+                   "--stdin"]
     if (asDraft === true) command.push("--draft")
+    // A harness runs with this on. Without it, pressing Send there reaches the
+    // mailbox with a real token - see graph.py's demo line in cmd_compose.
+    if (demo) command.push("--demo")
     for (var i = 0; i < composeAttachments.length; i++)
       command = command.concat(["--attach", String(composeAttachments[i])])
     composeProc.command = command
@@ -568,6 +577,9 @@ Item {
   Process {
     id: composeProc
     running: false
+    stdinEnabled: true
+    onStarted: composeProc.write(JSON.stringify({ comment: root.composeText,
+                                                  to: root.composeTo }) + "\n")
     stdout: StdioCollector { id: composeOut; waitForEnd: true }
     stderr: StdioCollector { id: composeErr; waitForEnd: true }
     onExited: function(exitCode) {

@@ -43,17 +43,73 @@ Item {
     // Optional {"instance": "..."} picks which widget's mailboxes to open when
     // the bar carries more than one. Anything else opens the first.
     var requested = ""
+    var payload = null
     if (payloadJson) {
       try {
-        var parsed = JSON.parse(String(payloadJson))
-        if (parsed && typeof parsed.instance === "string") requested = parsed.instance
+        payload = JSON.parse(String(payloadJson))
+        if (payload && typeof payload.instance === "string") requested = payload.instance
       } catch (e) { /* an unreadable payload is not worth refusing to open for */ }
     }
     wantedInstance = requested
 
     loadSettings()
+    if (payload) applyPayload(payload)
     window.visible = true
     Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+  }
+
+  // The rest of what the shell may deliver with a summon: a message to read -
+  // what a clicked notification passes, as `account`, `folderId` and
+  // `messageId` - and a draft reply a coding agent wrote. Both have to survive
+  // arriving twice, because the shell drains its payload queue in a loop and
+  // delivers to a window that is already open.
+  function applyPayload(payload) {
+    var alias = String(payload.account || "")
+    var messageId = String(payload.messageId || "")
+    if (alias !== "") {
+      // An empty folderId is the inbox, which is also what selectFolder makes
+      // of it - and it is a no-op when that folder is already the one open.
+      mailView.selectFolder(alias, String(payload.folderId || ""))
+      if (messageId !== "") revealMessage(alias, messageId)
+    }
+    if (payload.draft) {
+      agentDraftPending = payload.draft
+      flushAgentDraft()
+    }
+  }
+
+  // A message named by id alone. Switching folder is a fetch, so the row it
+  // lives in is usually not here yet when the payload is; the request is kept
+  // and answered by the Connections below when the list lands. Kept as one
+  // request rather than a queue: a second notification supersedes the first,
+  // because it is the newer thing the person clicked.
+  property string pendingMessageAlias: ""
+  property string pendingMessageId: ""
+
+  function revealMessage(alias, id) {
+    pendingMessageAlias = String(alias || "")
+    pendingMessageId = String(id || "")
+    flushPendingMessage()
+  }
+
+  function flushPendingMessage() {
+    if (pendingMessageId === "") return
+    var at = mailView.indexOfMail(pendingMessageId)
+    if (at < 0) return
+    var row = mailView.mail[at]
+    pendingMessageAlias = ""
+    pendingMessageId = ""
+    pane = "mail"
+    mailCursor = at
+    // showPreview toggles the message it is already showing closed, which is
+    // the opposite of what a notification asked for.
+    if (!mailView.previewMail || String(mailView.previewMail.id) !== String(row.id))
+      mailView.showPreview(row)
+  }
+
+  Connections {
+    target: mailView
+    function onMailChanged() { root.flushPendingMessage() }
   }
 
   // Host-initiated close (`shell hide`). The host already knows.
@@ -74,6 +130,8 @@ Item {
   // ---- the widget's settings ----------------------------------------------
   property string wantedInstance: ""
   property var settings: ({})
+  // A draft that came in before the settings did has been waiting for them.
+  onSettingsChanged: flushAgentDraft()
   property bool settingsLoaded: false
   property string settingsError: ""
 
@@ -142,6 +200,10 @@ Item {
   // `service`: that name belongs to the shell's injection above. The dev
   // harness drives the window through this.
   readonly property alias mailService: mailView
+
+  // The toplevel itself, so a harness can photograph what this draws without
+  // the shell in the way. Nothing in the plugin uses it.
+  readonly property alias floatingWindow: window
 
   readonly property var views: mailView.views
   readonly property bool combined: mailView.combined
@@ -310,6 +372,113 @@ Item {
   // Flagging reaches what the cursor is on, and what is being read when the
   // reading pane has focus - the same reach moving has, because a flag is
   // most often the thing one wants for the message just read.
+  // ---- the coding agent ---------------------------------------------------
+  //
+  // Omarchy's own handover, pointed at a message: omarchy-agent starts
+  // whichever agent was chosen with `omarchy default agent`, and handover.sh
+  // writes the prompt. Nothing out of the mail goes into that prompt - not even
+  // the subject - because the agent is told which message to read and reads it
+  // through graph.py, the same helper this window uses. src/handover.sh says
+  // why.
+  //
+  // Split in two so the fixtures can be checked without an agent starting.
+  // Empty means there is nothing to hand over, or the setting says not to.
+  function agentArgv() {
+    if (!mailView.agentHandover || moving) return []
+    // The message under the cursor when the list has the keyboard, the one
+    // being read otherwise - the same choice flagging makes.
+    var rows = mailView.mail
+    var row = pane === "mail" && mailCursor >= 0 && mailCursor < rows.length
+              ? rows[mailCursor]
+              : mailView.previewMail
+    if (!row) return []
+    var alias = String(row.alias || "")
+    return [pluginDir + "/handover.sh",
+            "--account", alias,
+            "--message", String(row.id || ""),
+            "--folder", mailView.folderIdFor(alias)]
+  }
+
+  function askAgent() {
+    var argv = agentArgv()
+    if (argv.length === 0) return
+    Quickshell.execDetached(argv)
+  }
+
+  // A draft reply an agent wrote, arriving from outside:
+  //   omarchy-shell shell summon caseonline.omarchy.office365 '{"draft":{...}}'
+  //   omarchy-shell shell call   caseonline.omarchy.office365 agentDraft '{...}'
+  // It opens the reply box on that message with the text in it, unsent. Sending
+  // stays a button a person presses, which is the whole reason this is a draft.
+  property var agentDraftPending: null
+
+  function agentDraft(argJson) {
+    var payload = Model.parseJson(argJson, null)
+    if (!payload) return "bad-json"
+    agentDraftPending = payload.draft ? payload.draft : payload
+    return flushAgentDraft()
+  }
+
+  // Held rather than applied when it arrives before the settings, or before the
+  // folder it names has been read: the setting is what says whether a draft may
+  // be taken at all, and the message has to be in hand before there is anything
+  // to reply to.
+  function flushAgentDraft() {
+    if (!agentDraftPending) return "ok"
+    if (!settingsLoaded) return "waiting"
+    if (!mailView.agentHandover) { agentDraftPending = null; return "off" }
+    var draft = agentDraftPending
+    var text = String(draft.text || "")
+    if (text === "") { agentDraftPending = null; return "empty" }
+
+    var id = String(draft.messageId || "")
+    var row = null
+    if (id !== "") {
+      var at = mailView.indexOfMail(id)
+      if (at >= 0) row = mailView.mail[at]
+    } else {
+      row = mailView.previewMail
+    }
+
+    if (!row) {
+      // Not in the list this window is holding. When the payload says which
+      // mailbox the message is in, that folder can be fetched and this
+      // answered again once it lands - which is what revealMessage arranges.
+      var alias = String(draft.account || "")
+      if (alias !== "" && id !== "") {
+        mailView.selectFolder(alias, String(draft.folderId || ""))
+        revealMessage(alias, id)
+        return "waiting"
+      }
+      agentDraftPending = null
+      return "no-message"
+    }
+
+    agentDraftPending = null
+    // Even a draft is a write as far as Graph is concerned, so a read-only
+    // mailbox cannot hold one. Saying so beats opening a reply box whose every
+    // button would fail.
+    if (!mailView.canWrite(row.alias)) return "read-only"
+
+    if (!mailView.previewMail || String(mailView.previewMail.id) !== String(row.id))
+      mailView.showPreview(row)
+    var mode = String(draft.mode || "reply")
+    if (mode !== "reply" && mode !== "reply-all" && mode !== "forward") mode = "reply"
+    mailView.startCompose(mode, row)
+    // After startCompose, which clears both.
+    fillCompose(text)
+    if (draft.to) mailView.composeTo = String(draft.to)
+    return "ok"
+  }
+
+  // The reply box is rebuilt for each message, so the text has to reach both
+  // the state it is kept in and the box itself when one is already open.
+  function fillCompose(text) {
+    mailView.composeText = String(text || "")
+    if (composeBox.item && typeof composeBox.item.setBody === "function")
+      composeBox.item.setBody(mailView.composeText)
+  }
+
   function flagAtCursor() {
     if (moving) return
     var rows = mailView.mail
@@ -509,6 +678,7 @@ Item {
             anchors.centerIn: parent
             fg: Color.foreground
             fontFamily: Style.font.family
+            agentHandover: mailView.agentHandover
           }
         }
       }
@@ -554,6 +724,7 @@ Item {
           else if (text === "t") mailView.threaded = !mailView.threaded
           else if (text === "r") mailView.refresh()
           else if (text === "m") root.moveAtCursor()
+          else if (text === "a") root.askAgent()
           // Capital, because f is already the Focused filter.
           else if (text === "F") root.flagAtCursor()
           else if (text === "?") root.showHelp = !root.showHelp
@@ -674,6 +845,11 @@ Item {
 
               FilterPill {
                 label: "Unread"
+                // The count belongs on the pill that filters by it: "Unread"
+                // alone made you turn the filter on to find out whether it was
+                // worth turning on. Messages, which is what the list counts.
+                detail: mailView.unreadCount > 0 ? String(mailView.unreadCount) : ""
+                alert: mailView.unreadCount > 0
                 selected: mailView.unreadOnly
                 fg: Color.foreground
                 accent: Color.accent
@@ -710,7 +886,8 @@ Item {
               }
 
               FilterPill {
-                label: "Refresh"
+                icon: "\u{F0450}"   // nf-md-refresh
+                label: "Refresh"     // still what the tooltip-less pill is named
                 faded: mailView.loading
                 fg: Color.foreground
                 accent: Color.accent
@@ -948,6 +1125,8 @@ Item {
                   onReplyRequested: mailView.startCompose("reply", mailView.previewMail)
                   onReplyAllRequested: mailView.startCompose("reply-all", mailView.previewMail)
                   onForwardRequested: mailView.startCompose("forward", mailView.previewMail)
+                  canAgent: mailView.agentHandover
+                  onAgentRequested: root.askAgent()
                   onCloseRequested: mailView.closePreview()
                   onOpenRequested: mailView.openPreviewed()
                   onMarkRequested: function(read) { mailView.markPreviewed(read) }
@@ -990,7 +1169,11 @@ Item {
                     onPermissionRequested: {
                       if (mailView.composeMail) mailView.startLogin(mailView.composeMail.alias, true)
                     }
-                    Component.onCompleted: Qt.callLater(focusBody)
+                    initialBody: mailView.composeText
+                    Component.onCompleted: {
+                      if (initialBody !== "") setBody(initialBody)
+                      Qt.callLater(focusBody)
+                    }
                   }
                 }
               }
