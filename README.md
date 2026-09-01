@@ -660,6 +660,22 @@ journalctl --user -f | grep -i office365
 
 ## Changelog
 
+### 1.1.2 — 2026-09-01
+
+- **The folder actions are in the window, not only under the keys.** New,
+  rename, move and delete had buttons beside the tree and nowhere else - and
+  the sidebar only exists in a window wide enough for it, so in a narrow one
+  the tree lives in a drawer and the four actions were reachable by `n`, `R`,
+  `m` and `x` alone. They are one component now (`FolderTools.qml`), carried by
+  both, and it names the folder it would act on: the cursor and the folder
+  being read are not always the same row, and **Delete** is not a button to
+  press while guessing which one is meant. A pill that cannot act - a read-only
+  mailbox, or the inbox, which no mail server lets you rename - is faded rather
+  than removed, and pressing it says why.
+- **A new folder can be put at the top level with the pointer.** That was `N`
+  and only `N`; the prompt now carries the same choice as a toggle, since a
+  pill has no shift key.
+
 ### 1.1.1 — 2026-09-01
 
 - **Links in a message body take the theme's colour.** They were coming out in

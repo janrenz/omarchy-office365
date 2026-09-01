@@ -295,8 +295,14 @@ Item {
   property string folderActionAlias: ""
   property string folderActionId: ""        // the folder acted on; "" for a new one
   property string folderActionName: ""      // what it is called now
-  property string folderActionParent: ""    // where a new one goes; "" is the top level
-  property string folderActionParentName: ""
+  // Where a new one would go. An offer rather than a decision: N asks for the
+  // top level from the keyboard, and the prompt carries the same choice as a
+  // toggle, because the pointer has no shift key on a pill.
+  property string folderActionParentOffer: ""
+  property string folderActionParentOfferName: ""
+  property bool folderActionNestIn: true
+  readonly property string folderActionParent: folderActionNestIn ? folderActionParentOffer : ""
+  readonly property string folderActionParentName: folderActionNestIn ? folderActionParentOfferName : ""
   readonly property bool folderActing: folderAction !== ""
   readonly property bool folderNaming: folderAction === "new" || folderAction === "rename"
   readonly property var folderActionTargets: folderAction === "move"
@@ -305,12 +311,19 @@ Item {
   // Which folder these act on: the row under the sidebar cursor once the
   // keyboard has been in the tree, and otherwise whichever folder the mailbox
   // is reading. Never a header - those are mailboxes, not folders.
-  function folderUnderCursor() {
+  //
+  // A property rather than only a function, because the buttons beside the
+  // tree fade themselves against it and a binding cannot follow a call.
+  readonly property var cursorFolder: {
     var tree = folderPane
     if (!tree) return null
     var index = tree.cursorIndex >= 0 ? tree.cursorIndex : tree.selectedPickable
     if (index < 0 || index >= tree.pickable.length) return null
     return tree.rows[tree.pickable[index]] || null
+  }
+
+  function folderUnderCursor() {
+    return cursorFolder
   }
 
   function startFolderAction(what, topLevel) {
@@ -336,11 +349,11 @@ Item {
     folderActionAlias = alias
     folderActionId = what === "new" ? "" : String(row.id)
     folderActionName = what === "new" ? "" : String(row.name || "")
-    // A new folder goes inside the one under the cursor, unless N asked for
-    // the top level. Two keys rather than a choice inside the prompt: it is
-    // one decision and it is already made by the time anybody types a name.
-    folderActionParent = (what === "new" && topLevel !== true) ? String(row.id || "") : ""
-    folderActionParentName = (what === "new" && topLevel !== true) ? String(row.name || "") : ""
+    // A new folder goes inside the one under the cursor unless it is asked to
+    // go to the top level - by N, or by turning the toggle off in the prompt.
+    folderActionParentOffer = what === "new" ? String(row.id || "") : ""
+    folderActionParentOfferName = what === "new" ? String(row.name || "") : ""
+    folderActionNestIn = topLevel !== true
     folderAction = what
   }
 
@@ -730,6 +743,24 @@ Item {
               font.family: Style.font.family
               font.pixelSize: Style.font.subtitle
               font.bold: true
+            }
+
+            // Inside the folder the cursor was on, or not. Only when there is
+            // a folder to be inside: at the top of a tree there is no choice
+            // to offer, and a toggle with one setting is furniture.
+            FilterPill {
+              visible: root.folderAction === "new" && root.folderActionParentOffer !== ""
+              label: root.folderActionNestIn
+                ? ("Inside " + root.folderActionParentOfferName) : "At the top level"
+              selected: root.folderActionNestIn
+              fg: Color.foreground
+              dim: Qt.darker(Color.foreground, 1.5)
+              accent: Color.accent
+              fontFamily: Style.font.family
+              onClicked: {
+                root.folderActionNestIn = !root.folderActionNestIn
+                folderName.forceActiveFocus()
+              }
             }
 
             // What a name is typed into, and the one place Return means yes.
@@ -1205,22 +1236,45 @@ Item {
             // The tree when there is no sidebar to put it in: the full width
             // of the window, over the mail, until a folder is picked or
             // Escape puts it away.
-            ScrollView {
-              id: drawerFolderScroll
+            Column {
               width: columns.width
               height: columns.height
               visible: columns.folderPicking
-              clip: true
+              spacing: Style.spacing.sm
 
-              FolderList {
-                id: drawerFolders
-                width: columns.width
-                rows: mailView.folderRows
+              ScrollView {
+                id: drawerFolderScroll
+                width: parent.width
+                height: parent.height - drawerTools.height - parent.spacing
+                clip: true
+
+                FolderList {
+                  id: drawerFolders
+                  width: columns.width
+                  rows: mailView.folderRows
+                  fg: Color.foreground
+                  accent: Color.accent
+                  fontFamily: Style.font.family
+                  cursorIndex: -1
+                  onPicked: function(alias, folderId) { root.pickFolder(alias, folderId) }
+                }
+              }
+
+              // The same tools the sidebar carries. A narrow window is where
+              // the tree lives in this drawer rather than beside the mail, and
+              // leaving them out of it would put folder actions behind a
+              // window width.
+              FolderTools {
+                id: drawerTools
+                width: parent.width
+                visible: mailView.configured
+                target: root.cursorFolder
+                busy: mailView.folderBusy
+                writable: !!root.cursorFolder && mailView.canWrite(root.cursorFolder.alias)
                 fg: Color.foreground
                 accent: Color.accent
                 fontFamily: Style.font.family
-                cursorIndex: -1
-                onPicked: function(alias, folderId) { root.pickFolder(alias, folderId) }
+                onAct: function(what, topLevel) { root.startFolderAction(what, topLevel) }
               }
             }
 
@@ -1248,58 +1302,17 @@ Item {
                 }
               }
 
-              // The same four things the keys do, for the pointer. A Flow
-              // rather than a Row: the sidebar is as narrow as the window lets
-              // it be, and four words do not fit across it at every width.
-              //
-              // They act on the folder under the sidebar cursor, or on the one
-              // being read - the same rule the keys follow, so the two cannot
-              // disagree about which folder is meant.
-              Flow {
+              FolderTools {
                 id: folderTools
                 width: parent.width
-                spacing: Style.spacing.xs
                 visible: mailView.configured
-
-                FilterPill {
-                  label: "New"
-                  faded: mailView.folderBusy
-                  fg: Color.foreground
-                  dim: Qt.darker(Color.foreground, 1.5)
-                  accent: Color.accent
-                  fontFamily: Style.font.family
-                  onClicked: root.startFolderAction("new", false)
-                }
-
-                FilterPill {
-                  label: "Rename"
-                  faded: mailView.folderBusy
-                  fg: Color.foreground
-                  dim: Qt.darker(Color.foreground, 1.5)
-                  accent: Color.accent
-                  fontFamily: Style.font.family
-                  onClicked: root.startFolderAction("rename")
-                }
-
-                FilterPill {
-                  label: "Move"
-                  faded: mailView.folderBusy
-                  fg: Color.foreground
-                  dim: Qt.darker(Color.foreground, 1.5)
-                  accent: Color.accent
-                  fontFamily: Style.font.family
-                  onClicked: root.startFolderAction("move")
-                }
-
-                FilterPill {
-                  label: "Delete"
-                  faded: mailView.folderBusy
-                  fg: Color.foreground
-                  dim: Qt.darker(Color.foreground, 1.5)
-                  accent: Color.accent
-                  fontFamily: Style.font.family
-                  onClicked: root.startFolderAction("delete")
-                }
+                target: root.cursorFolder
+                busy: mailView.folderBusy
+                writable: !!root.cursorFolder && mailView.canWrite(root.cursorFolder.alias)
+                fg: Color.foreground
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onAct: function(what, topLevel) { root.startFolderAction(what, topLevel) }
               }
             }
 

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "caseonline.omarchy.office365",
   "name": "Office 365 Mail & Calendar",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "author": "Kees Schollaart",
   "license": "MIT",
   "description": "Unread Outlook mail and your agenda in the Omarchy bar. One widget can carry several mailboxes, or add one per mailbox. Needs python3 (standard library only) and talks to Microsoft Graph, nothing else.",
