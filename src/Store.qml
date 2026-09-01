@@ -808,6 +808,73 @@ Item {
     }
   }
 
+  // ---- folders as things that can be made and unmade ----------------------
+  //
+  // One process for all four actions. They are all somebody's deliberate act
+  // on one folder, one at a time, and a second while the first is in flight is
+  // refused rather than queued - a rename racing a move on the same folder is
+  // two answers about where it now is.
+
+  readonly property bool folderBusy: folderProc.running
+
+  // Told to every host, because a folder that has just been renamed or deleted
+  // is one that somebody else's sidebar is pointing at. `was` is the id it had
+  // - on IMAP a folder id is its path, so renaming or moving one changes it.
+  signal folderChanged(string alias, string action, string folderId, string was)
+
+  function folderAction(alias, action, folderId, name, parent) {
+    if (!alias || folderProc.running || pluginDir === "") return
+    var verbs = { "new": "folder-new", "rename": "folder-rename",
+                  "move": "folder-move", "delete": "folder-delete" }
+    var verb = verbs[String(action)]
+    if (!verb) return
+    actionError = ""
+    actionNotice = ""
+
+    var command = ["python3", helper(), verb, "--account", String(alias)]
+    if (action !== "new") command = command.concat(["--id", String(folderId || "")])
+    if (action === "new" || action === "rename") command = command.concat(["--name", String(name || "")])
+    if (action === "new" || action === "move") command = command.concat(["--parent", String(parent || "")])
+
+    folderProc.mailbox = String(alias)
+    folderProc.what = String(action)
+    folderProc.was = String(folderId || "")
+    folderProc.label = String(name || "")
+    folderProc.command = command
+    folderProc.running = true
+  }
+
+  Process {
+    id: folderProc
+    running: false
+    property string mailbox: ""
+    property string what: ""
+    property string was: ""
+    property string label: ""
+    stdout: StdioCollector { id: folderOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var parsed = Model.parseJson(folderOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        root.actionError = parsed && parsed.error
+          ? String(parsed.error.message) : "Could not change that folder"
+        return
+      }
+      var name = String(parsed.name || folderProc.label)
+      var notices = {
+        "new": name !== "" ? "Made " + name : "Folder made",
+        "rename": name !== "" ? "Renamed to " + name : "Folder renamed",
+        "move": name !== "" ? "Moved " + name : "Folder moved",
+        "delete": name !== "" ? "Deleted " + name : "Folder deleted"
+      }
+      root.actionNotice = notices[folderProc.what] || "Done"
+      root.folderChanged(folderProc.mailbox, folderProc.what,
+                         String(parsed.id || ""), folderProc.was)
+      // The tree comes back with the fetch, so the sidebar redraws itself the
+      // moment this lands rather than at the next poll.
+      root.refresh([folderProc.mailbox])
+    }
+  }
+
   // ---- sign-in ------------------------------------------------------------
   //
   // One mailbox at a time for the whole shell. Two hosts offering the button

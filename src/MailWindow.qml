@@ -39,6 +39,9 @@ Item {
 
   function open(payloadJson) {
     closingFromHost = false
+    // A window opens on a page of mail, not on the bar's own list length -
+    // see Service.mailPage. Scrolling to the end asks for the next page.
+    mailView.openPage()
 
     // Optional {"instance": "..."} picks which widget's mailboxes to open when
     // the bar carries more than one. Anything else opens the first.
@@ -118,6 +121,12 @@ Item {
     window.visible = false
     closingFromHost = false
   }
+
+  // Back to the bar's own list length the moment the window is gone. The fetch
+  // is shared with the widget, so a window left paged to a hundred would have
+  // the background poll reading a hundred messages a mailbox for the rest of
+  // the day for nobody to look at.
+  function stopPaging() { mailView.paged = 0 }
 
   // User-initiated close (Esc, the window's own close button). Tell the shell,
   // so its open-panel map stays right and the next `toggle` opens rather than
@@ -207,14 +216,12 @@ Item {
 
   readonly property var views: mailView.views
   readonly property bool combined: mailView.combined
-  // Whichever mailbox the sidebar cursor is in. With one mailbox this is just
-  // that mailbox, which is the case the window is mostly opened in.
-  readonly property string activeAlias: {
-    var rows = mailView.folderRows
-    for (var i = 0; i < rows.length; i++)
-      if (rows[i].kind === "folder" && rows[i].selected === true) return String(rows[i].alias)
-    return views.length > 0 ? String(views[0].alias) : ""
-  }
+  // Whichever mailbox the sidebar is reading. With one mailbox this is just
+  // that mailbox, which is the case the window is mostly opened in. One source
+  // for it rather than two: the sidebar lights exactly this mailbox's folder,
+  // and reading the answer back out of the rows it drew would be a way for the
+  // two to disagree.
+  readonly property string activeAlias: mailView.activeAlias
 
   readonly property string folderTitle: {
     if (!mailView.configured) return "Office 365"
@@ -277,6 +284,85 @@ Item {
     mailView.moveMail(row, folderId, folderName)
   }
 
+  // ---- folders as things that can be made and unmade ----------------------
+  //
+  // One at a time, over everything else, the way the move picker is. Naming a
+  // folder needs a text field and the other two do not, which is the only
+  // reason the modes are told apart anywhere below: while a field is up the
+  // key catcher has to stand down or it eats what is being typed.
+
+  property string folderAction: ""          // new | rename | move | delete
+  property string folderActionAlias: ""
+  property string folderActionId: ""        // the folder acted on; "" for a new one
+  property string folderActionName: ""      // what it is called now
+  property string folderActionParent: ""    // where a new one goes; "" is the top level
+  property string folderActionParentName: ""
+  readonly property bool folderActing: folderAction !== ""
+  readonly property bool folderNaming: folderAction === "new" || folderAction === "rename"
+  readonly property var folderActionTargets: folderAction === "move"
+    ? mailView.folderMoveTargetsFor(folderActionAlias, folderActionId) : []
+
+  // Which folder these act on: the row under the sidebar cursor once the
+  // keyboard has been in the tree, and otherwise whichever folder the mailbox
+  // is reading. Never a header - those are mailboxes, not folders.
+  function folderUnderCursor() {
+    var tree = folderPane
+    if (!tree) return null
+    var index = tree.cursorIndex >= 0 ? tree.cursorIndex : tree.selectedPickable
+    if (index < 0 || index >= tree.pickable.length) return null
+    return tree.rows[tree.pickable[index]] || null
+  }
+
+  function startFolderAction(what, topLevel) {
+    if (folderActing) return
+    var row = folderUnderCursor()
+    if (!row) return
+    var alias = String(row.alias || "")
+    // Read-only is a sign-in choice rather than a fault, and it is written
+    // nowhere else on this screen - so it is said rather than done silently.
+    if (!mailView.canWrite(alias)) {
+      mailView.noteActionError("This mailbox is signed in for reading only")
+      return
+    }
+    if (what !== "new" && row.isInbox === true) {
+      mailView.noteActionError("The inbox cannot be renamed, moved or deleted")
+      return
+    }
+    if (what !== "new" && String(row.id || "") === "") return
+    if (what === "move" && mailView.folderMoveTargetsFor(alias, String(row.id)).length === 0) {
+      mailView.noteActionError("There is nowhere else to put this folder")
+      return
+    }
+    folderActionAlias = alias
+    folderActionId = what === "new" ? "" : String(row.id)
+    folderActionName = what === "new" ? "" : String(row.name || "")
+    // A new folder goes inside the one under the cursor, unless N asked for
+    // the top level. Two keys rather than a choice inside the prompt: it is
+    // one decision and it is already made by the time anybody types a name.
+    folderActionParent = (what === "new" && topLevel !== true) ? String(row.id || "") : ""
+    folderActionParentName = (what === "new" && topLevel !== true) ? String(row.name || "") : ""
+    folderAction = what
+  }
+
+  function cancelFolderAction() {
+    folderAction = ""
+  }
+
+  // `text` is the typed name for new and rename; `parentId` is the picked
+  // destination for a move. Both are ignored by the actions that have no use
+  // for them, so there is one way out of the overlay rather than four.
+  function commitFolderAction(text, parentId) {
+    var what = folderAction
+    var alias = folderActionAlias
+    var id = folderActionId
+    var parent = folderActionParent
+    folderAction = ""
+    if (what === "new") mailView.newFolder(alias, text, parent)
+    else if (what === "rename") mailView.renameFolder(alias, id, text)
+    else if (what === "move") mailView.moveFolder(alias, id, parentId)
+    else if (what === "delete") mailView.deleteFolder(alias, id)
+  }
+
   // What m acts on: the row under the cursor in the list, or the message being
   // read when the cursor is somewhere else.
   function moveAtCursor() {
@@ -289,6 +375,7 @@ Item {
   // Which scroller the scroll keys act on: whichever pane has focus.
   function scrollTarget() {
     // The picker is over everything else, so it is what the keys reach.
+    if (folderAction === "move") return folderOverlay.item ? folderOverlay.item.scroller : null
     if (moving) return movePicker.item ? movePicker.item.scroller : null
     if (pane === "message" && mailView.previewMail !== null) return readerScroll
     if (pane === "folders") return folderDrawer ? drawerFolderScroll : folderScroll
@@ -343,6 +430,11 @@ Item {
   }
 
   function moveCursor(step) {
+    if (folderAction === "move") {
+      if (folderOverlay.item && folderOverlay.item.tree) folderOverlay.item.tree.moveCursor(step)
+      return
+    }
+    if (folderActing) return
     if (moving) { if (movePicker.item) movePicker.item.tree.moveCursor(step); return }
     if (pane === "folders") { folderPane.moveCursor(step); return }
     // In the message, down and up scroll it rather than moving off it.
@@ -357,6 +449,14 @@ Item {
   }
 
   function activateCursor() {
+    if (folderAction === "move") {
+      if (folderOverlay.item && folderOverlay.item.tree) folderOverlay.item.tree.activateCursor()
+      return
+    }
+    // Return on the warning is the yes. Escape is the no, and it is the key
+    // that is already under everybody's finger.
+    if (folderAction === "delete") { commitFolderAction("", ""); return }
+    if (folderActing) return
     if (moving) { if (movePicker.item) movePicker.item.tree.activateCursor(); return }
     if (pane === "folders") { folderPane.activateCursor(); return }
     if (pane === "message") return
@@ -489,6 +589,10 @@ Item {
   }
 
   function deleteAtCursor() {
+    // In the tree the delete key is about the folder under the cursor, which
+    // is the only thing there to delete.
+    if (folderActing) return
+    if (pane === "folders") { startFolderAction("delete"); return }
     if (moving || pane !== "mail") return
     var rows = mailView.mail
     if (mailCursor < 0 || mailCursor >= rows.length) return
@@ -500,6 +604,9 @@ Item {
   // once there is nothing left inside it to close.
   function dismiss() {
     if (showHelp) { showHelp = false; return }
+    // Over everything, including the move picker, because it is the newest
+    // thing on screen whenever it is there at all.
+    if (folderActing) { cancelFolderAction(); return }
     // Over everything else, so it is the first layer Escape takes back.
     if (moving) { cancelMove(); return }
     // Innermost first. A half-written reply is the last thing that should go
@@ -534,6 +641,7 @@ Item {
     minimumSize: Qt.size(720, 480)
 
     onVisibleChanged: {
+      if (!visible) root.stopPaging()
       if (!visible && !root.closingFromHost && root.shell && typeof root.shell.hide === "function")
         root.shell.hide(root.pluginId)
     }
@@ -573,6 +681,129 @@ Item {
       // that have not settled yet, and Qt reports that as a binding loop;
       // built fresh, it lays out once. It also means the picker can never open
       // holding the cursor position it was left at for another message.
+      // Making and unmaking folders. Built fresh each time, like the move
+      // picker below and for the same reasons: a prompt that opens holding the
+      // name it was left with last time is a prompt that renames the wrong
+      // folder the first time somebody presses Return without reading it.
+      Loader {
+        id: folderOverlay
+        anchors.fill: parent
+        active: root.folderActing
+        z: 120
+
+        sourceComponent: Rectangle {
+          property alias tree: folderTree
+          property alias scroller: folderTreeScroll
+
+          readonly property bool imap: {
+            var view = mailView.viewFor(root.folderActionAlias)
+            return !!view && view.imap === true
+          }
+          readonly property string title: ({
+            "new": root.folderActionParentName !== ""
+                   ? ("New folder in " + root.folderActionParentName) : "New folder",
+            "rename": "Rename " + root.folderActionName,
+            "move": "Move " + root.folderActionName,
+            "delete": "Delete " + root.folderActionName
+          })[root.folderAction] || ""
+
+          color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.97)
+
+          // Clicking off it is the same as Escape: nothing is changed.
+          MouseArea { anchors.fill: parent; onClicked: root.cancelFolderAction() }
+
+          Column {
+            id: folderPane2
+            anchors.centerIn: parent
+            width: Math.min(Style.space(440), parent.width - Style.spacing.xxl * 2)
+            height: root.folderAction === "move"
+              ? Math.min(Style.space(520), parent.height - Style.spacing.xxl * 2)
+              : implicitHeight
+            spacing: Style.spacing.md
+
+            Text {
+              width: parent.width
+              text: parent.parent.title
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              color: Color.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+            }
+
+            // What a name is typed into, and the one place Return means yes.
+            TextField {
+              id: folderName
+              width: parent.width
+              visible: root.folderNaming
+              text: root.folderAction === "rename" ? root.folderActionName : ""
+              placeholderText: "Folder name"
+              foreground: Color.foreground
+              accent: Color.accent
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+              onAccepted: if (text.trim() !== "") root.commitFolderAction(text.trim(), "")
+              Keys.onEscapePressed: root.cancelFolderAction()
+              // Straight into it, and with the old name selected so typing
+              // replaces it - renaming is usually a new word, not an edit.
+              Component.onCompleted: {
+                forceActiveFocus()
+                selectAll()
+              }
+            }
+
+            // What deleting one actually does, which is not the same thing on
+            // the two transports and is not a question to answer afterwards.
+            Text {
+              width: parent.width
+              visible: root.folderAction === "delete"
+              text: parent.parent.imap
+                ? "This deletes the folder and the mail in it. IMAP has no wastebasket for folders, so it does not come back."
+                : "This puts the folder and everything in it in Deleted Items, where Outlook can take it back out."
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              color: Qt.darker(Color.foreground, 1.4)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+            }
+
+            Text {
+              width: parent.width
+              visible: root.folderAction !== "move"
+              text: root.folderAction === "delete"
+                ? "Return deletes it. Escape leaves it alone."
+                : "Return saves it. Escape leaves it alone."
+              textFormat: Text.PlainText
+              color: Qt.darker(Color.foreground, 1.8)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            ScrollView {
+              id: folderTreeScroll
+              width: parent.width
+              height: parent.height - y
+              visible: root.folderAction === "move"
+              clip: true
+
+              FolderList {
+                id: folderTree
+                width: folderPane2.width
+                rows: root.folderActionTargets
+                cursorIndex: 0
+                fg: Color.foreground
+                accent: Color.accent
+                fontFamily: Style.font.family
+                // The id is empty for the "Top level" row, which is exactly
+                // what the helper wants for "no parent".
+                onPicked: function(alias, folderId) { root.commitFolderAction("", folderId) }
+              }
+            }
+          }
+        }
+      }
+
       Loader {
         id: movePicker
         anchors.fill: parent
@@ -679,6 +910,7 @@ Item {
             fg: Color.foreground
             fontFamily: Style.font.family
             agentHandover: mailView.agentHandover
+            canFocus: mailView.canFocus
           }
         }
       }
@@ -689,7 +921,11 @@ Item {
         // While a reply is open the catcher stands down: it consumes plain
         // letter keys to drive the cursor, so leaving it armed would eat the
         // j, k, h and l out of whatever was being typed.
-        blocked: mailView.composing
+        // ...and while a folder is being named, for the same reason. The
+        // other two folder prompts have no field to type into and keep the
+        // catcher armed, so j/k still walk the destinations and Escape still
+        // backs out through dismiss().
+        blocked: mailView.composing || root.folderNaming
         onMoveRequested: function(dx, dy) {
           if (dy !== 0) { root.moveCursor(dy); return }
           // Nothing to step between: the picker is the whole window.
@@ -714,12 +950,24 @@ Item {
           // While the picker is up the only letters that mean anything are the
           // ones that move in it, which the catcher has already dealt with.
           // f, u and r would act on the list behind it, invisibly.
-          if (root.moving) {
+          if (root.moving || root.folderActing) {
             if (text === "g") root.scrollToEnd(view, false)
             else if (text === "G") root.scrollToEnd(view, true)
             return
           }
-          if (text === "f") mailView.focusedOnly = !mailView.focusedOnly
+          // In the tree these letters are about folders; everywhere else the
+          // same ones are about messages. The pane is what tells them apart,
+          // which is how m already worked.
+          if (root.pane === "folders") {
+            if (text === "n") { root.startFolderAction("new", false); return }
+            if (text === "N") { root.startFolderAction("new", true); return }
+            if (text === "R") { root.startFolderAction("rename"); return }
+            if (text === "m") { root.startFolderAction("move"); return }
+            if (text === "x") { root.startFolderAction("delete"); return }
+          }
+          // Only where there is a split to filter on. A key that answers
+          // nothing is indistinguishable from a key that is broken.
+          if (text === "f") { if (mailView.canFocus) mailView.focusedOnly = !mailView.focusedOnly }
           else if (text === "u") mailView.unreadOnly = !mailView.unreadOnly
           else if (text === "t") mailView.threaded = !mailView.threaded
           else if (text === "r") mailView.refresh()
@@ -874,10 +1122,19 @@ Item {
               // Focused/Other is a split Outlook draws across the inbox alone,
               // so the pill goes away in any other folder rather than sitting
               // there filtering on a property the folder has nothing to say
-              // about.
+              // about. And in any mailbox that has no such split at all -
+              // Outlook computes it server-side and only Graph hands it over,
+              // so an IMAP mailbox has nothing to be on either side of.
+              //
+              // With one of each on screen the pill stays and names the
+              // mailbox it cannot speak for: its mail is all still in the
+              // list, and that is a surprise worth heading off.
               FilterPill {
                 label: "Focused"
+                detail: mailView.focusedOnly && mailView.unsplitMailboxes.length > 0
+                        ? (mailView.unsplitMailboxes.join(", ") + ": all") : ""
                 visible: mailView.folderIdFor(root.activeAlias) === "inbox"
+                         && mailView.canFocus
                 selected: mailView.focusedOnly
                 fg: Color.foreground
                 accent: Color.accent
@@ -967,21 +1224,82 @@ Item {
               }
             }
 
-            ScrollView {
-              id: folderScroll
+            Column {
+              id: sidebar
               width: columns.sidebarWidth
               height: columns.height
               visible: columns.showSidebar
-              clip: true
+              spacing: Style.spacing.sm
 
-              FolderList {
-                id: folders
-                width: columns.sidebarWidth
-                rows: mailView.folderRows
-                fg: Color.foreground
-                accent: Color.accent
-                fontFamily: Style.font.family
-                onPicked: function(alias, folderId) { root.pickFolder(alias, folderId) }
+              ScrollView {
+                id: folderScroll
+                width: parent.width
+                height: parent.height - folderTools.height - parent.spacing
+                clip: true
+
+                FolderList {
+                  id: folders
+                  width: columns.sidebarWidth
+                  rows: mailView.folderRows
+                  fg: Color.foreground
+                  accent: Color.accent
+                  fontFamily: Style.font.family
+                  onPicked: function(alias, folderId) { root.pickFolder(alias, folderId) }
+                }
+              }
+
+              // The same four things the keys do, for the pointer. A Flow
+              // rather than a Row: the sidebar is as narrow as the window lets
+              // it be, and four words do not fit across it at every width.
+              //
+              // They act on the folder under the sidebar cursor, or on the one
+              // being read - the same rule the keys follow, so the two cannot
+              // disagree about which folder is meant.
+              Flow {
+                id: folderTools
+                width: parent.width
+                spacing: Style.spacing.xs
+                visible: mailView.configured
+
+                FilterPill {
+                  label: "New"
+                  faded: mailView.folderBusy
+                  fg: Color.foreground
+                  dim: Qt.darker(Color.foreground, 1.5)
+                  accent: Color.accent
+                  fontFamily: Style.font.family
+                  onClicked: root.startFolderAction("new", false)
+                }
+
+                FilterPill {
+                  label: "Rename"
+                  faded: mailView.folderBusy
+                  fg: Color.foreground
+                  dim: Qt.darker(Color.foreground, 1.5)
+                  accent: Color.accent
+                  fontFamily: Style.font.family
+                  onClicked: root.startFolderAction("rename")
+                }
+
+                FilterPill {
+                  label: "Move"
+                  faded: mailView.folderBusy
+                  fg: Color.foreground
+                  dim: Qt.darker(Color.foreground, 1.5)
+                  accent: Color.accent
+                  fontFamily: Style.font.family
+                  onClicked: root.startFolderAction("move")
+                }
+
+                FilterPill {
+                  label: "Delete"
+                  faded: mailView.folderBusy
+                  fg: Color.foreground
+                  dim: Qt.darker(Color.foreground, 1.5)
+                  accent: Color.accent
+                  fontFamily: Style.font.family
+                  onClicked: root.startFolderAction("delete")
+                }
               }
             }
 
@@ -1009,6 +1327,29 @@ Item {
               lines: mailView.previewLine
                 ? [{ w: 0.42, small: false }, { w: 0.86, small: false }, { w: 0.62, small: true }]
                 : [{ w: 0.42, small: false }, { w: 0.86, small: false }]
+            }
+
+            // Scrolled to the end means "give me more". The list is a page of
+            // the mailbox rather than all of it, and the next page is asked
+            // for by reading rather than by pressing anything.
+            //
+            // Also when the page does not fill the column: a mailbox whose
+            // first twenty rows leave white space below them can never be
+            // scrolled, so it would sit there half full with more to give.
+            function askForMore() {
+              if (!listScroll.visible || !mailView.moreToLoad) return
+              var flick = listScroll.contentItem
+              if (!flick) return
+              if (flick.contentHeight > flick.height
+                  && flick.contentY + flick.height < flick.contentHeight - Style.space(320))
+                return
+              mailView.loadMore()
+            }
+
+            Connections {
+              target: listScroll.contentItem
+              function onContentYChanged() { columns.askForMore() }
+              function onContentHeightChanged() { columns.askForMore() }
             }
 
             ScrollView {

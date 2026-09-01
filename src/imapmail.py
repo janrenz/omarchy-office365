@@ -597,7 +597,43 @@ def looks_attached(message):
     return header_str(message, "Content-Type").strip().lower().startswith("multipart/mixed")
 
 
-def strip_markup(markup):
+# An anchor whole, so its address can be saved before the tag carrying it is
+# thrown away. Non-greedy to the first </a>: nesting anchors is not legal HTML,
+# and a greedy match would swallow a whole newsletter as one link.
+_ANCHOR = re.compile(
+    r"""(?is)<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))[^>]*>(.*?)<\s*/\s*a\s*>"""
+)
+# Where a parked anchor waits out the tag strip. NUL cannot survive in a mail
+# body that is going to be read as text, so nothing else can be wearing one.
+_PARKED = re.compile("\x00(\\d+)\x00")
+
+
+def _anchor_label(inner, html_module):
+    """The words inside an anchor, as something linkify will take as a label.
+
+    Its pattern reads a label as `[...]` up to the first `]` or newline, and
+    caps it at 160 characters. Both brackets therefore have to go: a `]` ends
+    the label early, and a `[` inside it is where the pattern starts reading
+    instead, which drops the words before it. Parentheses read the same and
+    mean nothing to the pattern.
+    """
+    text = re.sub(r"(?s)<[^>]+>", " ", inner)
+    text = html_module.unescape(text).replace("[", "(").replace("]", ")")
+    return re.sub(r"\s+", " ", text).strip()[:160].strip()
+
+
+def strip_markup(markup, keep_links=False):
+    """HTML mail as text. With `keep_links`, the addresses come along.
+
+    A link's address lives in the tag, so the plain strip below drops it and
+    leaves the reader words like "Sign in" with nothing behind them - the whole
+    point of that message gone. Graph's own HTML-to-text conversion writes
+    `[label]<url>`, which `linkify` knows how to turn back into a link, so this
+    writes the same shape. Off by default: a one-line preview has no room for
+    an address, and that is the other caller.
+    """
+    import html as html_module
+
     # Comments first: an Outlook mail is full of conditional ones, and taking
     # tags out from under them leaves their "-->" stranded in the text.
     text = re.sub(r"(?s)<!--.*?-->", " ", markup)
@@ -605,10 +641,43 @@ def strip_markup(markup):
     # a preview is built from a truncated body, where a stylesheet routinely
     # has no </style> to find.
     text = re.sub(r"(?is)<(script|style)\b.*?(?:</\1>|$)", " ", text)
+
+    links = []
+    if keep_links:
+        # The address has to be taken out before the tags go, and it cannot be
+        # written back in yet: `<https://…>` is as angle-bracketed as any tag
+        # and the strip would eat it. So each anchor leaves a marker behind and
+        # returns as text once there is nothing left to strip.
+        text = text.replace("\x00", "")
+
+        def park(match):
+            url = match.group(1) or match.group(2) or match.group(3) or ""
+            url = url.strip()
+            # Only the schemes the reading pane will follow. Anything else -
+            # a javascript: href, a cid: image link - keeps its words and
+            # loses its address, which is the safe direction.
+            if not url.lower().startswith(("http://", "https://")):
+                return match.group(4)
+            links.append((url, _anchor_label(match.group(4), html_module)))
+            return "\x00%d\x00" % (len(links) - 1)
+
+        text = _ANCHOR.sub(park, text)
+
     text = re.sub(r"(?is)<br\s*/?>|</p>", "\n", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
-    import html as html_module
-    return html_module.unescape(text)
+    text = html_module.unescape(text)
+    if not links:
+        return text
+
+    def restore(match):
+        url, label = links[int(match.group(1))]
+        # No words to show means the anchor wrapped something that did not
+        # survive - an image, most often. The bare form leaves linkify to
+        # shorten the address into a label of its own.
+        return "[%s]<%s>" % (label, html_module.unescape(url)) if label \
+            else "<%s>" % html_module.unescape(url)
+
+    return _PARKED.sub(restore, text)
 
 
 def _body_for_order(message, order):
@@ -1147,6 +1216,177 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
         close(client)
 
     return {"ok": True, "mode": mode, "drafted": False, "id": message_id, "warning": warning}
+
+
+# --------------------------------------------------------------------------
+# folders, as things that can be made and unmade
+# --------------------------------------------------------------------------
+#
+# An IMAP folder is a path: "Archive", "Archive/2024", with a delimiter the
+# server chooses and announces in LIST. That is why a folder id here is the
+# whole path and not a name - and why moving a folder under another parent is
+# the same command as renaming it. Both are RENAME with a different path.
+
+
+def delimiter_for(client):
+    """The character this server puts between a folder and its parent."""
+    for _name, delim, _flags in list_folders(client):
+        if delim:
+            return delim
+    return "/"
+
+
+def leaf_of(path, delim):
+    return path.split(delim)[-1] if delim else path
+
+
+def _check_leaf(leaf, delim):
+    if leaf == "":
+        raise TransportError("bad_name", "A folder needs a name")
+    if delim and delim in leaf:
+        raise TransportError(
+            "bad_name",
+            "A folder name cannot contain %s on this server - that is how it "
+            "separates a folder from its parent" % delim,
+        )
+
+
+def _refuse_inbox(path):
+    if path.upper() == "INBOX":
+        raise TransportError("bad_folder", "The inbox cannot be renamed, moved or deleted")
+
+
+def _joined(parent, leaf, delim):
+    return (parent + delim + leaf) if parent else leaf
+
+
+def create_folder(account, token, name, parent):
+    """A new folder, under `parent` (a folder id) or at the top level."""
+    leaf = str(name or "").strip()
+    where = str(parent or "").strip()
+    client = None
+    try:
+        client = connect(account, token)
+        delim = delimiter_for(client)
+        _check_leaf(leaf, delim)
+        path = _joined(where, leaf, delim)
+        try:
+            typ, data = client.create(quoted(path))
+        except imaplib.IMAP4.error as error:
+            raise TransportError("create_failed", "Could not create that folder: " + _text(error))
+        if typ != "OK":
+            raise TransportError("create_failed", "Could not create that folder: " + _text(data))
+        # Servers list what is subscribed; one nobody is subscribed to is a
+        # folder this plugin would make and then not be able to find.
+        try:
+            client.subscribe(quoted(path))
+        except imaplib.IMAP4.error:
+            pass
+        return {"ok": True, "id": path, "name": leaf, "parentId": where}
+    finally:
+        close(client)
+
+
+def rename_folder(account, token, folder_id, name):
+    """Give a folder another name, where it already is."""
+    path = str(folder_id or "").strip()
+    leaf = str(name or "").strip()
+    if path == "":
+        raise TransportError("bad_folder", "No folder to rename")
+    _refuse_inbox(path)
+    client = None
+    try:
+        client = connect(account, token)
+        delim = delimiter_for(client)
+        _check_leaf(leaf, delim)
+        parts = path.split(delim) if delim else [path]
+        target = _joined(delim.join(parts[:-1]) if len(parts) > 1 else "", leaf, delim)
+        if target == path:
+            return {"ok": True, "id": path, "name": leaf}
+        return _rename(client, path, target, "rename")
+    finally:
+        close(client)
+
+
+def move_folder(account, token, folder_id, parent):
+    """Put a folder under another one, or back at the top level.
+
+    The same RENAME as above with the leaf kept and the parent changed, which
+    is all "move" means to IMAP. Children come along: the server renames the
+    whole hierarchy under a folder that is renamed.
+    """
+    path = str(folder_id or "").strip()
+    where = str(parent or "").strip()
+    if path == "":
+        raise TransportError("bad_folder", "No folder to move")
+    _refuse_inbox(path)
+    client = None
+    try:
+        client = connect(account, token)
+        delim = delimiter_for(client)
+        # Into itself, or into one of its own children, is a folder that would
+        # have to contain itself. The server may or may not say so; this does.
+        if where == path or (delim and where.startswith(path + delim)):
+            raise TransportError("bad_folder", "A folder cannot be moved inside itself")
+        target = _joined(where, leaf_of(path, delim), delim)
+        if target == path:
+            return {"ok": True, "id": path, "name": leaf_of(path, delim)}
+        return _rename(client, path, target, "move")
+    finally:
+        close(client)
+
+
+def _rename(client, path, target, what):
+    try:
+        typ, data = client.rename(quoted(path), quoted(target))
+    except imaplib.IMAP4.error as error:
+        raise TransportError(what + "_failed", "Could not %s that folder: %s" % (what, _text(error)))
+    if typ != "OK":
+        raise TransportError(what + "_failed", "Could not %s that folder: %s" % (what, _text(data)))
+    try:
+        client.subscribe(quoted(target))
+        client.unsubscribe(quoted(path))
+    except imaplib.IMAP4.error:
+        pass
+    delim = delimiter_for(client)
+    return {"ok": True, "id": target, "name": leaf_of(target, delim)}
+
+
+def delete_folder(account, token, folder_id):
+    """Delete a folder and the mail in it.
+
+    IMAP has no wastebasket for folders: DELETE takes the messages with it.
+    A folder with children is refused rather than guessed at - RFC 3501 lets a
+    server either refuse it or leave a \\Noselect husk behind, and neither is
+    something to find out about after the fact.
+    """
+    path = str(folder_id or "").strip()
+    if path == "":
+        raise TransportError("bad_folder", "No folder to delete")
+    _refuse_inbox(path)
+    client = None
+    try:
+        client = connect(account, token)
+        delim = delimiter_for(client)
+        for name, _delim, _flags in list_folders(client):
+            if delim and name.startswith(path + delim):
+                raise TransportError(
+                    "has_children",
+                    "This folder has folders inside it. Delete or move those first.",
+                )
+        try:
+            client.unsubscribe(quoted(path))
+        except imaplib.IMAP4.error:
+            pass
+        try:
+            typ, data = client.delete(quoted(path))
+        except imaplib.IMAP4.error as error:
+            raise TransportError("delete_failed", "Could not delete that folder: " + _text(error))
+        if typ != "OK":
+            raise TransportError("delete_failed", "Could not delete that folder: " + _text(data))
+        return {"ok": True, "id": path, "name": leaf_of(path, delim)}
+    finally:
+        close(client)
 
 
 def capabilities():

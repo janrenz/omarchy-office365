@@ -624,5 +624,99 @@ group("where a message can be filed", () => {
           short: "W", isInbox: false, selected: false, placeholder: false })
 })
 
+group("folderRows - one highlight at a time", () => {
+  const box = (alias, folders) => ({
+    alias, short: alias.substring(0, 3).toUpperCase(), color: "#fff", username: alias + "@x",
+    unreadCount: 0, folderName: "", folders
+  })
+  const tree = (alias) => [
+    { id: alias + "-inbox", name: "Inbox", isInbox: true, unread: 2, total: 9, depth: 0 },
+    { id: alias + "-archive", name: "Archive", isInbox: false, unread: 0, total: 4, depth: 0 }
+  ]
+  const views = [box("work", tree("work")), box("fwu", tree("fwu"))]
+  const lit = (rows) => rows.filter((r) => r.selected).map((r) => r.alias + ":" + r.name)
+
+  // Both mailboxes are on their inbox at all times; only one of them is where
+  // you are, and two lit rows read as two things open at once.
+  check("only the mailbox being read is lit",
+        lit(Model.folderRows(views, {}, "work")), ["work:Inbox"])
+
+  check("and it follows what was picked, folder and mailbox alike",
+        lit(Model.folderRows(views, { fwu: "fwu-archive" }, "fwu")), ["fwu:Archive"])
+
+  // folderNameFor asks what each mailbox is on, which is a different question.
+  check("without one named, each mailbox shows its own",
+        lit(Model.folderRows(views, { fwu: "fwu-archive" })), ["work:Inbox", "fwu:Archive"])
+
+  check("a mailbox whose folders have not arrived is lit the same way",
+        lit(Model.folderRows([box("work", []), box("fwu", [])], {}, "fwu")), ["fwu:Inbox"])
+})
+
+group("folderMoveTargets - where a folder can go", () => {
+  const view = {
+    alias: "work", short: "WRK", color: "#fff", username: "you@x", unreadCount: 0,
+    folderName: "", folders: [
+      { id: "inbox-id", name: "Inbox", isInbox: true, parentId: "", depth: 0, unread: 0, total: 0 },
+      { id: "arch", name: "Archive", isInbox: false, parentId: "", depth: 0, unread: 0, total: 0 },
+      { id: "arch-24", name: "2024", isInbox: false, parentId: "arch", depth: 1, unread: 0, total: 0 },
+      { id: "arch-24-q1", name: "Q1", isInbox: false, parentId: "arch-24", depth: 2, unread: 0, total: 0 },
+      { id: "back", name: "Backup", isInbox: false, parentId: "", depth: 0, unread: 0, total: 0 }
+    ]
+  }
+  const names = (folderId) =>
+    Model.folderMoveTargets([view], "work", folderId).map((r) => r.name)
+
+  // A folder cannot be its own parent, and a server asked to put one inside
+  // its own child either refuses or loses the subtree.
+  check("itself and everything under it are not destinations",
+        names("arch"), ["Inbox", "Backup"])
+
+  check("the top level is offered to anything that is not already there",
+        names("arch-24"), ["Top level", "Inbox", "Backup"])
+
+  check("and not to a folder that is already at the top level",
+        names("back").indexOf("Top level"), -1)
+
+  // Offering the parent it already has is a row that does nothing.
+  check("its own parent is left out", names("arch-24").indexOf("Archive"), -1)
+
+  check("a grandchild may go anywhere above it",
+        names("arch-24-q1"), ["Top level", "Inbox", "Archive", "Backup"])
+
+  check("another mailbox's folders are never destinations",
+        Model.folderMoveTargets([view], "other", "arch"), [])
+})
+
+group("accountViews - the Focused/Other split", () => {
+  // Outlook computes Focused/Other server-side and hands it over through Graph
+  // alone. An IMAP mailbox says every row is focused because there is nothing
+  // else it could truthfully say, so a filter on it would do nothing at all -
+  // the window asks first, and this is what it asks.
+  const build = (config, account) =>
+    Model.accountViews([config], { accounts: account ? [account] : [] }, {}, "#fff", {}, false)[0]
+
+  check("a Graph mailbox has the split",
+        build({ account: "work" },
+              { alias: "work", ok: true, capabilities: { focused: true } }).canFocus, true)
+
+  check("an IMAP mailbox does not",
+        build({ account: "fwu", transport: "imap" },
+              { alias: "fwu", ok: true, capabilities: { focused: false } }).canFocus, false)
+
+  // Before the first fetch answers there is no payload to read it from, and a
+  // pill that appears for a moment and then leaves is worse than one that was
+  // right from the start.
+  check("the configured transport answers until the fetch does",
+        build({ account: "fwu", transport: "imap" }, null).canFocus, false)
+
+  check("and anything else is assumed to have it",
+        build({ account: "work" }, null).canFocus, true)
+
+  // A helper that stops reporting capabilities must not silently switch the
+  // filter back on over a mailbox that cannot honour it.
+  check("a mailbox that answered without saying is taken at the transport's word",
+        build({ account: "fwu", transport: "imap" }, { alias: "fwu", ok: true }).canFocus, false)
+})
+
 console.log(`\n${checks - failures}/${checks} passed`)
 process.exit(failures ? 1 : 0)

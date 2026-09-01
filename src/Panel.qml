@@ -242,7 +242,10 @@ Panel {
       // Letters the catcher does not claim itself; f and u mirror the pills.
       onTextKey: function(text) {
         if (!root.service) return
-        if (text === "f") root.service.focusedOnly = !root.service.focusedOnly
+        // Only where there is a split to filter on - see the pill below.
+        if (text === "f") {
+          if (root.service.canFocus) root.service.focusedOnly = !root.service.focusedOnly
+        }
         else if (text === "u") root.service.unreadOnly = !root.service.unreadOnly
         // Capital F, the same as in the window, and clear of the f above.
         else if (text === "F") root.flagAtCursor()
@@ -427,9 +430,17 @@ Panel {
             }
           }
 
+          // Gone in a mailbox with no Focused/Other split to filter on:
+          // Outlook computes the split server-side and hands it over through
+          // Graph alone, so an IMAP mailbox has nothing to be on either side
+          // of. With one of each showing, the pill stays and names the one it
+          // cannot speak for, whose mail is all still in the list.
           FilterPill {
             label: "Focused"
-            detail: root.service && root.service.focusedOnly ? "on" : ""
+            visible: !!root.service && root.service.canFocus
+            detail: !root.service || !root.service.focusedOnly ? ""
+                    : (root.service.unsplitMailboxes.length > 0
+                       ? root.service.unsplitMailboxes.join(", ") + ": all" : "on")
             selected: !!root.service && root.service.focusedOnly
             fg: root.fg
             dim: root.dim

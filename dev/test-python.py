@@ -416,6 +416,130 @@ SAFELINK = ("https://eur03.safelinks.protection.outlook.com/?url="
             "&data=05%7C02%7Cjan%40example.com&sdata=Zm9v%3D&reserved=0")
 
 
+class FakeIMAP:
+    """Just enough of an imaplib client to record what it was told to do."""
+
+    capabilities = ("IMAP4REV1",)
+
+    def __init__(self):
+        self.calls = []
+
+    def _ok(self, name, *args):
+        self.calls.append((name,) + args)
+        return "OK", [b"done"]
+
+    def create(self, name):
+        return self._ok("CREATE", name)
+
+    def rename(self, old, new):
+        return self._ok("RENAME", old, new)
+
+    def delete(self, name):
+        return self._ok("DELETE", name)
+
+    def subscribe(self, name):
+        return self._ok("SUBSCRIBE", name)
+
+    def unsubscribe(self, name):
+        return self._ok("UNSUBSCRIBE", name)
+
+
+class FolderActions(unittest.TestCase):
+    """Making and unmaking IMAP folders, which is all path arithmetic.
+
+    A folder id on IMAP is its whole path, so creating one inside another,
+    renaming it and moving it under a different parent are the same two
+    commands with different strings - and getting the string wrong makes a
+    folder at the top level called "Archive/2024".
+    """
+
+    TREE = [
+        ("INBOX", "/", []),
+        ("Archive", "/", ["\\HasChildren"]),
+        ("Archive/2024", "/", []),
+        ("Backup", "/", []),
+    ]
+
+    def setUp(self):
+        import imapmail
+        self.imapmail = imapmail
+        self.client = FakeIMAP()
+        self.original = (imapmail.connect, imapmail.close, imapmail.list_folders)
+        imapmail.connect = lambda *a, **k: self.client
+        imapmail.close = lambda *a, **k: None
+        imapmail.list_folders = lambda client: list(self.TREE)
+
+    def tearDown(self):
+        (self.imapmail.connect, self.imapmail.close,
+         self.imapmail.list_folders) = self.original
+
+    def commands(self, name):
+        return [call for call in self.client.calls if call[0] == name]
+
+    def test_a_new_folder_at_the_top_level_is_its_own_path(self):
+        result = self.imapmail.create_folder({}, "token", "Receipts", "")
+        self.assertEqual(result["id"], "Receipts")
+        self.assertEqual(self.commands("CREATE"), [("CREATE", '"Receipts"')])
+
+    def test_a_new_folder_inside_another_carries_its_parent(self):
+        result = self.imapmail.create_folder({}, "token", "2025", "Archive")
+        self.assertEqual(result["id"], "Archive/2025")
+        self.assertEqual(self.commands("CREATE"), [("CREATE", '"Archive/2025"')])
+        # Servers list what is subscribed; one nobody subscribed to is a folder
+        # this plugin would make and then fail to find.
+        self.assertEqual(self.commands("SUBSCRIBE"), [("SUBSCRIBE", '"Archive/2025"')])
+
+    def test_a_name_with_the_delimiter_in_it_is_refused(self):
+        with self.assertRaises(self.imapmail.TransportError) as caught:
+            self.imapmail.create_folder({}, "token", "2025/Q1", "Archive")
+        self.assertEqual(caught.exception.code, "bad_name")
+        self.assertEqual(self.commands("CREATE"), [])
+
+    def test_renaming_keeps_the_folder_where_it_is(self):
+        result = self.imapmail.rename_folder({}, "token", "Archive/2024", "2023")
+        self.assertEqual(result["id"], "Archive/2023")
+        self.assertEqual(self.commands("RENAME"),
+                         [("RENAME", '"Archive/2024"', '"Archive/2023"')])
+
+    def test_moving_keeps_the_name_and_changes_the_parent(self):
+        result = self.imapmail.move_folder({}, "token", "Archive/2024", "Backup")
+        self.assertEqual(result["id"], "Backup/2024")
+        self.assertEqual(self.commands("RENAME"),
+                         [("RENAME", '"Archive/2024"', '"Backup/2024"')])
+
+    def test_moving_to_the_top_level_drops_the_parent(self):
+        result = self.imapmail.move_folder({}, "token", "Archive/2024", "")
+        self.assertEqual(result["id"], "2024")
+
+    def test_a_folder_cannot_be_moved_inside_itself(self):
+        with self.assertRaises(self.imapmail.TransportError) as caught:
+            self.imapmail.move_folder({}, "token", "Archive", "Archive/2024")
+        self.assertEqual(caught.exception.code, "bad_folder")
+        self.assertEqual(self.commands("RENAME"), [])
+
+    def test_the_inbox_is_left_alone(self):
+        for call in (lambda: self.imapmail.rename_folder({}, "token", "INBOX", "Post"),
+                     lambda: self.imapmail.move_folder({}, "token", "INBOX", "Archive"),
+                     lambda: self.imapmail.delete_folder({}, "token", "INBOX")):
+            with self.assertRaises(self.imapmail.TransportError) as caught:
+                call()
+            self.assertEqual(caught.exception.code, "bad_folder")
+
+    def test_a_folder_with_folders_in_it_is_refused_rather_than_guessed_at(self):
+        # RFC 3501 lets a server either refuse this or leave a \Noselect husk
+        # behind, and neither is something to find out about afterwards.
+        with self.assertRaises(self.imapmail.TransportError) as caught:
+            self.imapmail.delete_folder({}, "token", "Archive")
+        self.assertEqual(caught.exception.code, "has_children")
+        self.assertEqual(self.commands("DELETE"), [])
+
+    def test_deleting_a_leaf_unsubscribes_it_first(self):
+        result = self.imapmail.delete_folder({}, "token", "Archive/2024")
+        self.assertEqual(result["id"], "Archive/2024")
+        self.assertEqual(self.commands("DELETE"), [("DELETE", '"Archive/2024"')])
+        self.assertEqual(self.commands("UNSUBSCRIBE"), [("UNSUBSCRIBE", '"Archive/2024"')])
+
+
 class Linkify(unittest.TestCase):
     """Plain-text mail, with its links put back.
 
@@ -494,6 +618,83 @@ class Linkify(unittest.TestCase):
     def test_an_ordinary_host_is_not_treated_as_a_safelink(self):
         plain = "https://example.com/?url=https%3A%2F%2Felsewhere.example"
         self.assertEqual(graph.unwrap_safelink(plain), plain)
+
+
+class StripMarkupLinks(unittest.TestCase):
+    """HTML mail crossing to text on the IMAP path, with its addresses intact.
+
+    Graph converts HTML to text itself and keeps the links; over IMAP the
+    conversion happens here, and it used to throw every href away. A sign-in
+    mail then arrived as the word "Sign in" with nothing behind it.
+    """
+
+    def setUp(self):
+        import imapmail
+        self.imapmail = imapmail
+
+    def strip(self, markup, keep_links=True):
+        return self.imapmail.strip_markup(markup, keep_links=keep_links)
+
+    def render(self, markup):
+        """All the way to the markup the reading pane is handed."""
+        return graph.linkify(graph.tidy_body(self.strip(markup)))
+
+    def test_an_anchor_keeps_its_words_and_its_address(self):
+        out = self.strip('<p>Click <a href="https://claude.ai/magic-link?x=1">Sign in</a></p>')
+        self.assertIn("[Sign in]<https://claude.ai/magic-link?x=1>", out)
+
+    def test_that_shape_is_the_one_linkify_makes_clickable(self):
+        """The bug the user hit: the words were there, the link was not."""
+        out = self.render('Click <a href="https://claude.ai/magic-link?x=1">Sign in</a>')
+        self.assertIn('href="https://claude.ai/magic-link?x=1"', out)
+        self.assertIn(">Sign in</a>", out)
+
+    def test_an_address_survives_the_tag_strip_that_used_to_eat_it(self):
+        """`<https://…>` is as angle-bracketed as any tag - hence the parking."""
+        out = self.strip('<div><a href="https://example.com/a">Go</a></div>')
+        self.assertIn("https://example.com/a", out)
+
+    def test_an_entity_in_the_address_is_decoded(self):
+        out = self.strip('<a href="https://example.com/?a=1&amp;b=2">Report</a>')
+        self.assertIn("[Report]<https://example.com/?a=1&b=2>", out)
+
+    def test_an_anchor_around_nothing_visible_comes_back_as_a_bare_link(self):
+        """A stripped image leaves no words, and linkify shortens the address
+        into a label of its own rather than showing an empty one."""
+        out = self.strip('<a href="https://example.com/x"><img src="https://t.example/p.gif"></a>')
+        self.assertIn("<https://example.com/x>", out)
+        self.assertNotIn("[]", out)
+
+    def test_a_scheme_the_pane_will_not_follow_keeps_only_its_words(self):
+        out = self.strip('<a href="javascript:alert(1)">Press</a>')
+        self.assertNotIn("javascript", out)
+        self.assertIn("Press", out)
+
+    def test_a_label_cannot_break_the_shape_it_is_written_into(self):
+        """linkify ends a label at a `]`, so one in the words must not reach it."""
+        out = self.strip('<a href="https://example.com/a">See [1] here</a>')
+        self.assertIn("[See (1) here]<https://example.com/a>", out)
+        self.assertIn(">See (1) here</a>", graph.linkify(graph.tidy_body(out)))
+
+    def test_a_very_long_label_is_trimmed_to_what_linkify_accepts(self):
+        out = self.render('<a href="https://example.com/a">%s</a>' % ("word " * 60))
+        self.assertIn('href="https://example.com/a"', out)
+
+    def test_markup_inside_the_words_does_not_ride_along(self):
+        out = self.strip('<a href="https://example.com/a"><span>Open</span> <b>it</b></a>')
+        self.assertIn("[Open it]<https://example.com/a>", out)
+
+    def test_a_null_a_sender_planted_cannot_forge_a_link(self):
+        """The parking marker is NUL-delimited, so any NUL in the body goes."""
+        out = self.strip('\x000\x00 <a href="https://example.com/a">Real</a>')
+        self.assertEqual(out.count("https://example.com/a"), 1)
+
+    def test_a_preview_still_gets_the_words_without_the_addresses(self):
+        """The other caller: one line has no room for two hundred characters
+        of safelink, which is why keeping them is opt-in."""
+        out = self.strip('Click <a href="https://example.com/a">Sign in</a>', keep_links=False)
+        self.assertNotIn("https://example.com/a", out)
+        self.assertIn("Sign in", out)
 
 
 class Emitted(Exception):

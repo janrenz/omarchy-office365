@@ -151,6 +151,21 @@ def imap_run(function, *arguments):
 # What each transport can answer, so the panel can hide what is absent instead
 # of showing an agenda that is always empty or a filter that never matches.
 GRAPH_CAPABILITIES = {"calendar": True, "focused": True, "webLinks": True}
+
+# The most mail one fetch will read per mailbox. The window opens on a page
+# of twenty and asks for another every time it is scrolled to the end; this
+# is where that stops, because past it every poll would be re-reading the
+# whole mailbox for a list nobody has scrolled to. Kept in step with
+# Service.qml's mailCeiling.
+MAIL_CAP = 100
+
+# ...and how far the filtered queries below follow it. They exist to reach the
+# unread and Focused mail that is older than the newest N, and that question
+# does not get more interesting as the list grows: paging to a hundred would
+# otherwise cost four hundred messages a mailbox on every poll, for three views
+# nobody is looking at. Nothing is lost inside the page itself - the unread
+# among the newest hundred arrive with the newest hundred.
+MAIL_FILTER_CAP = 25
 GRAPH = "https://graph.microsoft.com/v1.0"
 USER_AGENT = "omarchy-office365-plugin/1.0"
 
@@ -955,7 +970,7 @@ def imap_fetch_account(alias, account, token, args, timezone_name):
     an empty one. A calendar that fails is a warning, never an empty pane: mail
     arriving without an agenda is still worth showing.
     """
-    top = max(1, min(args.mails, 25))
+    top = max(1, min(args.mails, MAIL_CAP))
     wanted = folder_choices(getattr(args, "folder", [])).get(alias, "")
     try:
         data = need_imap().snapshot(account, token, top, wanted)
@@ -1106,7 +1121,7 @@ def fetch_account(alias, args, timezone_name):
     # Focused and the newest Focused need not be unread, so the both-on view is
     # not something the other three can be made to answer. One that fails
     # leaves its own view short even while the rest look full.
-    top = max(1, min(args.mails, 25))
+    top = max(1, min(args.mails, MAIL_CAP))
     collected = {}
     failures = []
 
@@ -1116,7 +1131,10 @@ def fetch_account(alias, args, timezone_name):
     queries = MAIL_QUERIES if reading_inbox else tuple(q for q in MAIL_QUERIES if not q[2])
 
     for label, unread_only, focused_only in queries:
-        status, payload = fetch_messages(token, top, timezone_name, unread_only, focused_only, folder_id)
+        # The list being read grows a page at a time; the filtered views behind
+        # it stay the length they have always been - see MAIL_FILTER_CAP.
+        want = top if not (unread_only or focused_only) else min(top, MAIL_FILTER_CAP)
+        status, payload = fetch_messages(token, want, timezone_name, unread_only, focused_only, folder_id)
         if status != 200:
             failures.append((label, graph_error(payload, "Could not read mail")))
             continue
@@ -1369,7 +1387,7 @@ def demo_account(alias, index, args):
     meetings = DEMO_EVENTS.get(alias, DEMO_FALLBACK_EVENTS)
 
     mail = []
-    for slot in range(max(1, min(args.mails, 25))):
+    for slot in range(max(1, min(args.mails, MAIL_CAP))):
         who, subject, preview, read, focused = letters[slot % len(letters)]
         received = now - timedelta(minutes=23 * (slot + 1) + 11 * index)
         mail.append(
@@ -1786,7 +1804,12 @@ def cmd_message(args):
         # gets <head> and a stylesheet where the message should be - and the
         # body cap is spent long before the text starts.
         if served_html and not want_html:
-            raw = need_imap().strip_markup(raw)
+            # With the addresses kept, in the `[label]<url>` shape Graph's own
+            # conversion produces - `linkify` below turns them back into links.
+            # Dropped, a sign-in mail arrives as the word "Sign in" with
+            # nothing behind it and the reader has to go and find the message
+            # somewhere else, which is the thing this pane exists to avoid.
+            raw = need_imap().strip_markup(raw, keep_links=True)
             served_html = False
         body, truncated, body_format = render_body(raw, served_html, want_html)
         out(dict(ok=True, id=message["id"], subject=message["subject"], **{
@@ -1954,6 +1977,101 @@ def cmd_move(args):
         "newId": str(moved.get("id") or ""),
         "folder": destination,
     })
+
+
+# Graph's name for "no parent" - the root every top-level folder hangs off.
+FOLDER_ROOT = "msgfolderroot"
+
+
+def folder_url(folder_id, suffix=""):
+    return GRAPH + "/me/mailFolders/" + urllib.parse.quote(str(folder_id), safe="") + suffix
+
+
+def folder_out(payload, fallback_id="", fallback_name=""):
+    """One folder as the window reads it back - the id it now has, and the name.
+
+    A created or moved folder comes back with an id the caller did not have,
+    and the window needs it to put the cursor on what it just made.
+    """
+    row = payload if isinstance(payload, dict) else {}
+    out({
+        "ok": True,
+        "id": str(row.get("id") or fallback_id),
+        "name": str(row.get("displayName") or fallback_name),
+        "parentId": str(row.get("parentFolderId") or ""),
+    })
+
+
+def cmd_folder_new(args):
+    """A new folder, at the top level or inside another one."""
+    token, account = writable(args.account)
+    name = str(args.name or "").strip()
+    if not name:
+        fail("bad_name", "A folder needs a name")
+    parent = str(getattr(args, "parent", "") or "").strip()
+    if transport_of(account) == TRANSPORT_IMAP:
+        out(imap_run(need_imap().create_folder, account, token, name, parent))
+        return
+    url = folder_url(parent, "/childFolders") if parent else (GRAPH + "/me/mailFolders")
+    status, payload = http(url, method="POST", json_body={"displayName": name},
+                           headers={"Authorization": "Bearer " + token})
+    if status not in (200, 201):
+        fail("create_failed", graph_error(payload, "Could not create that folder"))
+    folder_out(payload, "", name)
+
+
+def cmd_folder_rename(args):
+    """The same folder, under another name."""
+    token, account = writable(args.account)
+    name = str(args.name or "").strip()
+    if not name:
+        fail("bad_name", "A folder needs a name")
+    if transport_of(account) == TRANSPORT_IMAP:
+        out(imap_run(need_imap().rename_folder, account, token, args.id, name))
+        return
+    status, payload = http(folder_url(args.id), method="PATCH",
+                           json_body={"displayName": name},
+                           headers={"Authorization": "Bearer " + token})
+    if status not in (200, 201):
+        fail("rename_failed", graph_error(payload, "Could not rename that folder"))
+    folder_out(payload, args.id, name)
+
+
+def cmd_folder_move(args):
+    """A folder under a different parent, or back at the top level.
+
+    Its children come with it, on both transports - which is the whole reason
+    this is one call and not a walk of the tree.
+    """
+    token, account = writable(args.account)
+    parent = str(getattr(args, "parent", "") or "").strip()
+    if transport_of(account) == TRANSPORT_IMAP:
+        out(imap_run(need_imap().move_folder, account, token, args.id, parent))
+        return
+    status, payload = http(folder_url(args.id, "/move"), method="POST",
+                           json_body={"destinationId": parent or FOLDER_ROOT},
+                           headers={"Authorization": "Bearer " + token})
+    if status not in (200, 201):
+        fail("move_failed", graph_error(payload, "Could not move that folder"))
+    folder_out(payload, args.id)
+
+
+def cmd_folder_delete(args):
+    """Delete a folder and everything in it.
+
+    Outlook puts a deleted folder in Deleted Items, where it can be dragged
+    back out; IMAP has no such place and the mail goes with it. The window says
+    which of the two it is before asking anybody to confirm.
+    """
+    token, account = writable(args.account)
+    if transport_of(account) == TRANSPORT_IMAP:
+        out(imap_run(need_imap().delete_folder, account, token, args.id))
+        return
+    status, payload = http(folder_url(args.id), method="DELETE",
+                           headers={"Authorization": "Bearer " + token})
+    if status not in (200, 202, 204):
+        fail("delete_failed", graph_error(payload, "Could not delete that folder"))
+    out({"ok": True, "id": args.id})
 
 
 def cmd_folders(args):
@@ -2294,7 +2412,8 @@ def main():
     fetch = sub.add_parser("fetch", help="fetch unread mail and calendar events")
     # Repeatable: one process serves every mailbox a widget holds.
     fetch.add_argument("--account", action="append", required=True, help="account alias; repeat for more")
-    fetch.add_argument("--mails", type=int, default=5, help="unread messages kept per mailbox")
+    fetch.add_argument("--mails", type=int, default=5,
+                       help="messages read per mailbox, up to %d" % MAIL_CAP)
     fetch.add_argument("--days", type=int, default=3)
     fetch.add_argument("--demo", action="store_true", help="synthetic data, for building the layout")
     # Repeatable and per mailbox: a folder id names a folder in one mailbox
@@ -2358,6 +2477,28 @@ def main():
     compose.set_defaults(func=cmd_compose)
 
     with_account("folders", "list one mailbox's folders").set_defaults(func=cmd_folders)
+
+    # Making and unmaking folders. An id is whatever `folders` called the
+    # folder - a Graph id, or the whole path on IMAP - and an empty --parent
+    # means the top level on both.
+    folder_new = with_account("folder-new", "make a folder")
+    folder_new.add_argument("--name", required=True, help="what to call it")
+    folder_new.add_argument("--parent", default="", help="folder id to put it inside, or nothing for the top level")
+    folder_new.set_defaults(func=cmd_folder_new)
+
+    folder_rename = with_account("folder-rename", "rename a folder")
+    folder_rename.add_argument("--id", required=True, help="folder id from `folders`")
+    folder_rename.add_argument("--name", required=True, help="the new name")
+    folder_rename.set_defaults(func=cmd_folder_rename)
+
+    folder_move = with_account("folder-move", "put a folder under another one")
+    folder_move.add_argument("--id", required=True, help="folder id from `folders`")
+    folder_move.add_argument("--parent", default="", help="folder id to put it inside, or nothing for the top level")
+    folder_move.set_defaults(func=cmd_folder_move)
+
+    folder_delete = with_account("folder-delete", "delete a folder and the mail in it")
+    folder_delete.add_argument("--id", required=True, help="folder id from `folders`")
+    folder_delete.set_defaults(func=cmd_folder_delete)
 
     sub.add_parser("list", help="list configured accounts").set_defaults(func=cmd_list)
     sub.add_parser("palette", help="the active theme's named colours").set_defaults(func=cmd_palette)

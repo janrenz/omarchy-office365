@@ -97,6 +97,50 @@ Item {
   }
 
   readonly property int mails: intSetting("mails", 5, 1, 25)
+
+  // How long the list actually is.
+  //
+  // `mails` is the bar's own list, where seven is plenty and twenty is a wall.
+  // A window is a different question: it opens on a page of `mailPage` and
+  // asks for another every time it is scrolled to the end, up to `mailCeiling`
+  // - past which asking for more is asking the helper to read the whole
+  // mailbox again on every poll, and search is the better tool for that.
+  //
+  // One number for both the fetch and the cap on what is drawn, so the list
+  // never shows fewer rows than were paid for.
+  readonly property int mailPage: 20
+  readonly property int mailCeiling: 100
+  // Zero until a host asks for a page rather than the setting's worth, and
+  // back to zero when it closes: the fetch is shared, so a window left paged
+  // to a hundred would keep the bar's poll reading a hundred as well.
+  property int paged: 0
+  readonly property int wantedMails: Math.max(mails, Math.min(paged, mailCeiling))
+
+  // Whether there is any point asking for more. A mailbox that handed back a
+  // full page probably has more behind it; one that did not has been read to
+  // the end, and a spinner at the bottom of it would never stop.
+  readonly property bool moreToLoad: {
+    if (wantedMails >= mailCeiling) return false
+    for (var i = 0; i < filteredViews.length; i++)
+      if ((filteredViews[i].mail || []).length >= wantedMails) return true
+    return false
+  }
+
+  // The window opens on a page rather than on the bar's seven.
+  function openPage() {
+    if (paged < mailPage) paged = mailPage
+  }
+
+  // ...and asks for one more page when it is scrolled to the end. Refreshing
+  // rather than appending: the store fetches the newest `wantedMails` per
+  // mailbox in one call, so a longer list is one longer fetch rather than a
+  // second one to stitch on - which also means the rows above cannot drift out
+  // of order while the page below them arrives.
+  function loadMore() {
+    if (!moreToLoad || loading) return
+    paged = Math.min(mailCeiling, wantedMails + mailPage)
+    refresh()
+  }
   readonly property string calendarMode: String(setting("calendar", "3day"))
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 180, 60, 3600)
   readonly property bool notifyOnNew: setting("notify", true) !== false
@@ -143,7 +187,7 @@ Item {
   readonly property var request: ({
     aliases: aliases,
     folders: selectedFolders,
-    mails: mails,
+    mails: wantedMails,
     days: Model.calendarDays(calendarMode),
     demo: demo,
     intervalSec: refreshIntervalSec,
@@ -257,8 +301,9 @@ Item {
   property bool focusedOnly: false
 
   // Settings arrive after this object is built, so pick the defaults up when
-  // they resolve rather than only at construction.
-  onFocusedByDefaultChanged: focusedOnly = focusedByDefault
+  // they resolve rather than only at construction. Never Focused-only where
+  // there is no such split to be on the right side of.
+  onFocusedByDefaultChanged: focusedOnly = focusedByDefault && canFocus
   onUnreadByDefaultChanged: unreadOnly = unreadByDefault
 
   function toggleFilter(alias) {
@@ -268,7 +313,7 @@ Item {
   function clearFilters() {
     filterAlias = ""
     unreadOnly = unreadByDefault
-    focusedOnly = focusedByDefault
+    focusedOnly = focusedByDefault && canFocus
     selectedEvent = null
     expandedStart = -1
     expandedEnd = -1
@@ -411,6 +456,58 @@ Item {
     return Model.moveTargets(views, String(alias || ""), folderIdFor(alias))
   }
 
+  // ---- folders as things that can be made and unmade --------------------
+
+  readonly property bool folderBusy: hub ? hub.folderBusy : false
+
+  // Something a host refused to do, said where every other action failure is
+  // said. A window that does nothing when a key is pressed is a window that
+  // looks broken, even when not doing it was the right answer.
+  function noteActionError(message) {
+    if (hub) hub.actionError = String(message || "")
+  }
+
+  // Where a folder could be put: the same tree, less itself and everything
+  // inside it, plus the top level.
+  function folderMoveTargetsFor(alias, folderId) {
+    return Model.folderMoveTargets(views, String(alias || ""), String(folderId || ""))
+  }
+
+  function newFolder(alias, name, parentId) {
+    if (!hub || !canWrite(alias) || String(name || "").trim() === "") return
+    hub.folderAction(String(alias), "new", "", String(name).trim(), String(parentId || ""))
+  }
+
+  function renameFolder(alias, folderId, name) {
+    if (!hub || !canWrite(alias) || !folderId || String(name || "").trim() === "") return
+    hub.folderAction(String(alias), "rename", String(folderId), String(name).trim(), "")
+  }
+
+  function moveFolder(alias, folderId, parentId) {
+    if (!hub || !canWrite(alias) || !folderId) return
+    hub.folderAction(String(alias), "move", String(folderId), "", String(parentId || ""))
+  }
+
+  function deleteFolder(alias, folderId) {
+    if (!hub || !canWrite(alias) || !folderId) return
+    hub.folderAction(String(alias), "delete", String(folderId), "", "")
+  }
+
+  // A folder that was being read and is now renamed, moved or gone leaves this
+  // host pointing at an id that means nothing. On IMAP a folder id is its path,
+  // so a rename changes it; on Graph it survives. Either way the fetch that
+  // follows would fall back to the inbox and the sidebar would say the mailbox
+  // is somewhere it is not.
+  Connections {
+    target: hub
+    ignoreUnknownSignals: true
+    function onFolderChanged(alias, action, folderId, was) {
+      if (was === "" || folderIdFor(alias) !== was) return
+      if (action === "delete") selectFolder(alias, "inbox")
+      else if (folderId !== "" && folderId !== was) selectFolder(alias, folderId)
+    }
+  }
+
   // Every host hears about every message that leaves the folder it is reading,
   // deleted or moved, including the one that asked for it. Carry on down the
   // list rather than dropping back to the agenda - but only where the message
@@ -429,10 +526,23 @@ Item {
     })
   }
 
+  // Outlook Web on this message where the transport can name it, and on the
+  // mailbox otherwise. Only Graph mints a per-message web address - an IMAP
+  // mailbox reports webLinks false and every message carries an empty one - so
+  // without the fallback this button did nothing at all on those accounts,
+  // which reads as a broken app rather than as a missing capability.
   function openPreviewed() {
     if (!previewMail) return
-    var link = previewDetail && previewDetail.webLink ? previewDetail.webLink : previewMail.webLink
+    var link = String((previewDetail && previewDetail.webLink) || previewMail.webLink || "").trim()
+    if (link === "") link = webUrlFor(previewMail.alias)
     openUrl(link, previewMail.alias)
+  }
+
+  // Where this mailbox lives on the web. Shared with focusApp so the button
+  // and the bar icon cannot disagree about it.
+  function webUrlFor(alias) {
+    var config = alias ? configFor(alias) : (accountConfigs.length > 0 ? accountConfigs[0] : null)
+    return String((config && config.webUrl) || "https://outlook.office.com/mail/")
   }
 
   readonly property var filteredViews: {
@@ -441,6 +551,29 @@ Item {
     for (var i = 0; i < views.length; i++) if (views[i].alias === filterAlias) kept.push(views[i])
     return kept
   }
+
+  // Whether Focused/Other means anything for what is on screen. Any rather
+  // than every: with a Graph mailbox and an IMAP one both showing, the filter
+  // still does something to half the list - and unsplitMailboxes names the
+  // half it cannot speak for, so nobody is left wondering why mail they did
+  // not ask for is still there.
+  readonly property bool canFocus: {
+    for (var i = 0; i < filteredViews.length; i++)
+      if (filteredViews[i].canFocus === true) return true
+    return false
+  }
+
+  readonly property var unsplitMailboxes: {
+    var out = []
+    for (var i = 0; i < filteredViews.length; i++)
+      if (filteredViews[i].canFocus !== true)
+        out.push(String(filteredViews[i].short || filteredViews[i].alias))
+    return out
+  }
+
+  // A filter that cannot mean anything must not be left switched on: a lit
+  // pill over an unfiltered list is worse than no pill at all.
+  onCanFocusChanged: if (!canFocus) focusedOnly = false
 
   // Exactly one message is held in the unread view at a time: the one open
   // here. Unlike the read and deleted overrides this is not shared, because
@@ -627,6 +760,16 @@ Item {
   // showing the inbox.
   property var selectedFolders: ({})
 
+  // Which mailbox is being read. Only its folder is lit in the sidebar: every
+  // mailbox is on some folder at all times, and a highlight in each account
+  // says several are open when only one of them is where you are.
+  //
+  // Empty until something is picked, and then it is whatever was picked last.
+  property string pickedAlias: ""
+
+  readonly property string activeAlias: pickedAlias !== ""
+    ? pickedAlias : (views.length > 0 ? String(views[0].alias) : "")
+
   // The mailbox whose folder was last picked here, until the fetch answering
   // that pick lands. The rows still in hand belong to the folder being left,
   // so anything drawing them has to stand something else in their place rather
@@ -642,7 +785,7 @@ Item {
     return !hub.dataFor(awaitingFolderFor, folder) && !hub.errorFor(awaitingFolderFor, folder)
   }
 
-  readonly property var folderRows: Model.folderRows(views, selectedFolders)
+  readonly property var folderRows: Model.folderRows(views, selectedFolders, activeAlias)
 
   function folderIdFor(alias) {
     return String(selectedFolders[String(alias || "")] || "inbox")
@@ -656,6 +799,10 @@ Item {
     var key = String(alias || "")
     if (key === "") return
     var id = String(folderId || "inbox")
+    // Before the early return below: picking the folder another mailbox is
+    // already on changes nothing about what is fetched, and is still somebody
+    // saying which mailbox they are now reading.
+    pickedAlias = key
     if (folderIdFor(key) === id) return
 
     var next = {}
@@ -686,7 +833,7 @@ Item {
   // Empty unless the list is threaded, so nothing is grouped for a host that
   // will not draw it - the bar dropdown has no room to expand a conversation.
   readonly property var threads: threaded
-    ? Model.groupThreads(mailAll, mails, listState)
+    ? Model.groupThreads(mailAll, wantedMails, listState)
     : []
 
   // The messages on offer, in the order they are drawn. Grouping moves rows
@@ -694,7 +841,7 @@ Item {
   // one list either way.
   readonly property var mail: threaded
     ? Model.threadMessages(threads)
-    : Model.capMail(mailAll, mails, listState)
+    : Model.capMail(mailAll, wantedMails, listState)
 
   readonly property var agenda: Model.mergeEvents(filteredViews, new Date(), 20, dedupeEvents)
 
@@ -882,9 +1029,13 @@ Item {
   // ---- actions --------------------------------------------------------
 
   function openUrl(url, alias) {
-    if (!url) return
+    var target = String(url || "").trim()
+    // The last of the three checks a link is meant to pass: Python sanitises
+    // the body, Model.js writes the anchor, and this is the final place a
+    // scheme can be refused before a browser is handed it. It was missing.
+    if (!/^(?:https?|mailto):/i.test(target)) return
     var config = alias ? configFor(alias) : (accountConfigs.length > 0 ? accountConfigs[0] : null)
-    Quickshell.execDetached(Model.openArgv(config ? config.openCommand : "", String(url)))
+    Quickshell.execDetached(Model.openArgv(config ? config.openCommand : "", target))
   }
 
   // Bring a mailbox's own Outlook window forward when it has a match
@@ -892,7 +1043,7 @@ Item {
   function focusApp(alias) {
     var config = alias ? configFor(alias) : (accountConfigs.length > 0 ? accountConfigs[0] : null)
     if (!config) return
-    var webUrl = String(config.webUrl || "https://outlook.office.com/mail/")
+    var webUrl = webUrlFor(config.account)
     var match = String(config.focusMatch || "").trim()
     if (match === "") {
       openUrl(webUrl, config.account)

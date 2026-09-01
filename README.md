@@ -168,12 +168,77 @@ the others fade - and click it again, or another one, to change your mind.
 toggle them from the keyboard, and set `focusedByDefault` to open on Focused
 every time.
 
+**Focused/Other is Outlook's own split, and Graph is the only way to it.** A
+mailbox signed in over IMAP has no such thing, so the pill is not offered
+there at all rather than sitting on a filter that would quietly do nothing;
+`f` does nothing there either, and the keyboard help does not promise it. With
+a Graph mailbox and an IMAP one on screen together the pill stays and says
+whose mail it cannot speak for - `Focused  FWU: all` - because that mail is
+still in the list and a filter that seems to have missed some is worse than
+one that says what it left.
+
 Both fill the list to `mails`: each mailbox is fetched three ways - newest,
 newest unread, and newest Focused - so whichever way you narrow it, there is
 enough to show.
 
+## How long the list is
+
+`mails` is the bar panel's list, where seven is plenty. The window opens on
+twenty and asks for twenty more every time you reach the end of it, up to a
+hundred per mailbox - reading is what asks for the next page, there is nothing
+to press. It stops at a hundred because past that every poll would be
+re-reading the whole mailbox for a list nobody scrolled to, and search is the
+better tool for going further back.
+
+The fetch is shared with the bar widget, so a window paged to a hundred would
+have the background poll reading a hundred as well - which is why the window
+drops back to `mails` the moment it closes. The filtered views behind the list
+(unread, Focused) stay at twenty-five whatever the page grows to: nothing is
+lost inside the page itself, since the unread among the newest hundred arrive
+with the newest hundred.
+
+## Folders
+
+The sidebar's folders can be made and unmade, in either transport:
+
+| | |
+|---|---|
+| **New** / `n` | A folder inside the one under the cursor. `N` makes one at the top level instead |
+| **Rename** / `R` | The same folder, under another name |
+| **Move** / `m` | Put it under another folder, or back at the top level. Everything inside it comes along |
+| **Delete** / `x` | The folder and the mail in it |
+
+The keys are the folder tree's own: `n`, `R`, `m` and `x` mean folders while
+the cursor is in the sidebar and messages everywhere else, which is how `m`
+already worked. The buttons under the tree do the same four things for the
+pointer, and both act on the folder under the cursor - or, before the keyboard
+has been in the tree, on the one being read.
+
+Two things are refused before anything is sent: the inbox cannot be renamed,
+moved or deleted, and a folder cannot be moved inside itself or one of its own
+children. On IMAP a folder with folders inside it will not delete either -
+RFC 3501 lets a server either refuse that or leave an unusable husk behind,
+and neither is something to discover afterwards.
+
+**Deleting is not the same thing on the two transports, and the prompt says
+which one you are looking at.** Outlook puts the folder and its mail in
+Deleted Items, where it can be dragged back out. IMAP has no wastebasket for
+folders: `DELETE` takes the messages with it and they do not come back.
+
+Rearranging means re-parenting, because that is the only ordering either
+server has: Outlook and IMAP both list folders alphabetically and neither
+stores a hand-made order.
+
+All four need the mailbox signed in with permission to change mail. Without
+it the window says so rather than doing nothing.
+
 Filters are a way of looking at the panel now rather than a setting: closing
 and reopening it starts from the whole picture again.
+
+Every mailbox is on some folder at all times — its inbox until you pick another
+— but only one of them is where you are, so only that one is lit in the
+sidebar. A highlight in each account reads as several things open at once when
+only one of them is what you are looking at.
 
 ## Conversations
 
@@ -366,6 +431,16 @@ including inside a message, which is the one place they used to do nothing.
 | `t` | Group the list by conversation |
 | `r` | Refresh |
 | `?` | This list |
+
+In the folder tree the same letters are about folders — see
+[Folders](#folders):
+
+| Key | What it does |
+|---|---|
+| `n` / `N` | New folder, inside the one under the cursor / at the top level |
+| `R` | Rename it (capital, since `r` refreshes) |
+| `m` | Put it under another folder, or back at the top |
+| `x` | Delete it, and the mail in it |
 
 Escape never skips a rung: stepping back from a message to the list leaves the
 message open, and only the next Escape closes it.
@@ -582,6 +657,45 @@ python3 src/graph.py fetch --account work --account personal --mails 5 --days 3 
 # QML errors from the running shell
 journalctl --user -f | grep -i office365
 ```
+
+## Changelog
+
+### 1.1.0 — 2026-09-01
+
+- **Focused/Other is offered only where it exists.** Outlook computes the split
+  server-side and hands it over through Graph alone; a mailbox signed in over
+  IMAP has no such thing and calls every message Focused, so the filter was
+  quietly doing nothing there. The helper had said so all along in
+  `capabilities`, and the view was dropping it. The pill and the `f` key are
+  now absent in a mailbox without the split, and with one of each on screen the
+  pill says whose mail it cannot speak for - `Focused  FWU: all`.
+- **The window's list is a page, and reading asks for the next one.** `mails`
+  stays the bar panel's list; the window opens on twenty and fetches twenty
+  more each time it reaches the end, to a hundred per mailbox, then stops
+  because past that every poll would re-read the whole mailbox. It drops back
+  to `mails` when the window closes, since the fetch is shared with the widget,
+  and the filtered queries behind the list stay at twenty-five.
+- **One folder is highlighted, not one per account.** Every mailbox is on some
+  folder at all times, so every mailbox was lighting one up; only the one being
+  read is lit now.
+- **Folders can be made and unmade** - new, rename, move, delete - on Graph and
+  IMAP alike, from `n`/`N`, `R`, `m` and `x` in the tree or the buttons beneath
+  it. Moving means re-parenting, which is the only ordering either server has.
+  The inbox, a folder inside itself, and an IMAP folder with folders in it are
+  refused before anything is sent, and the delete prompt says which of the two
+  things deleting does: Deleted Items on Outlook, gone for good on IMAP.
+- **Links survive an IMAP message body.** `strip_markup` keeps anchors as
+  Graph's own `[label]<url>` shape instead of dropping them with the tags, so a
+  sign-in link in an HTML mail is clickable on both transports. **Open** falls
+  back to Outlook Web for a message that has no web link of its own, and
+  `openUrl` will only hand out http and https.
+
+### 1.0.0
+
+- Everything before the above, which this fork of
+  [keesschollaart81/omarchy-office365](https://github.com/keesschollaart81/omarchy-office365)
+  shipped without bumping the number. `git log` is the record of it.
+
 
 ## License
 

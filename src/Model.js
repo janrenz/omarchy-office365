@@ -129,6 +129,22 @@ function accountViews(configs, snapshot, palette, fallback, busyMap, loading) {
       folders: (data && data.folders) || [],
       folderId: data && data.folderId ? String(data.folderId) : "inbox",
       folderName: data && data.folderName ? String(data.folderName) : "",
+      // Whether Outlook's Focused/Other split means anything for this mailbox.
+      // Outlook computes the split server-side and hands it over through Graph
+      // alone; an IMAP mailbox has no such thing, and every row it sends says
+      // "focused" because there is nothing else it could truthfully say. A
+      // filter on that would quietly do nothing, so the pill asks first.
+      //
+      // Read from the transport that answered, and guessed from the configured
+      // one until the first fetch says - otherwise the pill appears for a
+      // moment on every open and then leaves.
+      // Which transport answered. Deleting a folder means different things on
+      // the two - Outlook puts it in Deleted Items, IMAP takes the mail with
+      // it - and that is worth saying before somebody agrees to it.
+      imap: !!data && String(data.transport || "") === "imap",
+      canFocus: (data && data.capabilities)
+        ? data.capabilities.focused === true
+        : String(config.transport || "") !== "imap",
       warnings: (data && data.warnings) || []
     })
   }
@@ -288,16 +304,25 @@ function collectWarnings(views) {
 // first.
 //
 // `selected` is {alias: folder id}; a mailbox missing from it is on its inbox.
-function folderRows(views, selected) {
+//
+// `activeAlias` is the mailbox being read. Every mailbox is always on some
+// folder - its inbox until something else is picked - but only one of them is
+// where you are, and lighting up a row in each account reads as several things
+// open at once when only one of them is being looked at. Empty means no
+// mailbox is singled out and each shows its own, which is what folderNameFor
+// asks for.
+function folderRows(views, selected, activeAlias) {
   var rows = []
   var list = views || []
   var multi = list.length > 1
   var chosenAll = selected || {}
+  var active = String(activeAlias || "")
 
   for (var i = 0; i < list.length; i++) {
     var view = list[i]
     var folders = view.folders || []
     var chosen = String(chosenAll[view.alias] || "inbox")
+    var here = active === "" || String(view.alias) === active
 
     if (multi)
       rows.push({
@@ -321,7 +346,7 @@ function folderRows(views, selected) {
         id: "inbox", name: view.folderName !== "" ? view.folderName : "Inbox",
         unread: view.unreadCount || 0, total: 0,
         depth: multi ? 1 : 0, color: view.color, short: view.short,
-        isInbox: true, selected: chosen === "inbox", placeholder: true
+        isInbox: true, selected: here && chosen === "inbox", placeholder: true
       })
       continue
     }
@@ -344,7 +369,7 @@ function folderRows(views, selected) {
         isInbox: isInbox,
         // "inbox" is the well-known name the fetch defaults to; the tree knows
         // the same folder by its real id, so both have to match the same row.
-        selected: id === chosen || (chosen === "inbox" && isInbox),
+        selected: here && (id === chosen || (chosen === "inbox" && isInbox)),
         placeholder: false
       })
     }
@@ -401,6 +426,73 @@ function moveTargets(views, alias, currentFolderId) {
 
 // The folder a mailbox is reading, named. Falls back to the row marked inbox,
 // so the header says "Inbox" rather than nothing before a folder is picked.
+// Where a *folder* could be put: the same mailbox's tree, less the folder
+// itself and everything inside it - a folder cannot be its own parent, and a
+// server asked to do it either refuses or loses the subtree - plus a row for
+// the top level, which is the one destination that is not a folder.
+//
+// Descendants are found by parentId rather than by depth: the tree arrives
+// flattened parents-first, and depth alone cannot tell a child of this folder
+// from a child of the next one along.
+function folderMoveTargets(views, alias, folderId) {
+  var wanted = String(alias || "")
+  var moving = String(folderId || "")
+  var list = views || []
+  var rows = []
+
+  for (var i = 0; i < list.length; i++) {
+    var view = list[i]
+    if (String(view.alias) !== wanted) continue
+    var folders = view.folders || []
+
+    // The folder and everything under it, by walking parents down the tree.
+    var inside = {}
+    inside[moving] = true
+    for (var d = 0; d < folders.length; d++) {
+      var parent = String(folders[d].parentId || "")
+      if (parent !== "" && inside[parent] === true) inside[String(folders[d].id || "")] = true
+    }
+
+    var current = ""
+    for (var c = 0; c < folders.length; c++)
+      if (String(folders[c].id || "") === moving) current = String(folders[c].parentId || "")
+
+    // The top level, unless that is where it already is.
+    if (current !== "")
+      rows.push({
+        kind: "folder", key: view.alias + ":<root>", alias: view.alias, id: "",
+        name: "Top level", unread: 0, total: 0, depth: 0,
+        color: view.color, short: view.short, isInbox: false,
+        selected: false, placeholder: false
+      })
+
+    for (var f = 0; f < folders.length; f++) {
+      var folder = folders[f]
+      var id = String(folder.id || "")
+      if (id === "" || inside[id] === true) continue
+      // Already its parent: a move that moves nothing.
+      if (id === current) continue
+      rows.push({
+        kind: "folder",
+        key: view.alias + ":" + id,
+        alias: view.alias,
+        id: id,
+        name: String(folder.name || ""),
+        unread: Number(folder.unread || 0),
+        total: Number(folder.total || 0),
+        depth: Number(folder.depth || 0),
+        color: view.color,
+        short: view.short,
+        isInbox: folder.isInbox === true,
+        selected: false,
+        placeholder: false
+      })
+    }
+    break
+  }
+  return rows
+}
+
 function folderNameFor(views, alias, selected) {
   var rows = folderRows(views, selected)
   for (var i = 0; i < rows.length; i++)
@@ -1276,4 +1368,31 @@ function parseJson(raw, fallback) {
   } catch (error) {
     return fallback
   }
+}
+
+// A body's links in the theme's colour rather than in Qt's built-in blue.
+//
+// `SelectableText` sets `palette.link`, which is what a Qt item is supposed to
+// read - but a TextEdit showing rich text does not. Its QTextDocument bakes the
+// anchor colour in while parsing the markup, from the application palette and
+// not from the item's, so every link came out #0000ff whatever the theme was.
+// Measured, on this Qt: of `palette.link`, an inline style, a nested span and a
+// leading <style> block, only the last three reach the glyphs.
+//
+// A style block is the one that is a *default*: CSS on the anchor itself still
+// wins, so HTML mail that colours its own links keeps its own colour, which is
+// what the pane has always promised. It also costs one insertion rather than
+// one per anchor, and it re-colours on a theme change without a re-fetch,
+// because it is applied here at render time rather than written into a body by
+// the helper.
+function withLinkColor(body, bodyFormat, color) {
+  var text = String(body || "")
+  if (bodyFormat !== "html" && bodyFormat !== "linked") return text
+  if (text === "") return text
+  // Only a colour this file wrote: the value comes from qs.Commons, but it
+  // arrives as a string and is going into markup, so anything that could close
+  // the declaration and open something else is refused rather than escaped.
+  var safe = /^#[0-9A-Fa-f]{3,8}$/.test(String(color)) ? String(color) : ""
+  if (safe === "") return text
+  return "<style>a { color: " + safe + "; }</style>" + text
 }

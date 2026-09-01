@@ -18,6 +18,9 @@ Column {
   // The a key is only there when the handover setting is on, so the list must
   // not promise it either.
   property bool agentHandover: true
+  // And f only where there is a Focused/Other split to filter on, which an
+  // IMAP mailbox does not have.
+  property bool canFocus: true
 
   // [key, what it does, which section]
   readonly property var bindings: [
@@ -41,7 +44,15 @@ Column {
     ["f", "Show only Focused mail", "Doing"],
     ["t", "Group the list by conversation", "Doing"],
     ["r", "Refresh", "Doing"],
-    ["?", "This list", "Doing"]
+    ["?", "This list", "Doing"],
+
+    // In the folder tree the same letters are about folders. Listed as their
+    // own section rather than mixed in, because which one a key means depends
+    // on where the cursor is.
+    ["n / N", "New folder, inside this one / at the top level", "Folders"],
+    ["R", "Rename the folder under the cursor", "Folders"],
+    ["m", "Put it under another folder, or back at the top", "Folders"],
+    ["x", "Delete it, and the mail in it", "Folders"]
   ]
 
   spacing: Style.spacing.md
@@ -56,7 +67,7 @@ Column {
   }
 
   Repeater {
-    model: ["Moving", "Scrolling", "Doing"]
+    model: ["Moving", "Scrolling", "Doing", "Folders"]
 
     delegate: Column {
       required property string modelData
@@ -66,7 +77,9 @@ Column {
 
       Repeater {
         model: root.bindings.filter(function(row) {
-          return row[2] === modelData && (root.agentHandover || row[0] !== "a")
+          return row[2] === modelData
+                 && (root.agentHandover || row[0] !== "a")
+                 && (root.canFocus || row[0] !== "f")
         })
 
         delegate: Row {
