@@ -16,7 +16,11 @@ manifest.json         schemaVersion 1. kinds: bar-widget + panel + service, and
 src/graph.py          The helper. Microsoft Graph, the device-code sign-in, and
                       the token store. Prints one JSON object per invocation.
 src/imapmail.py       IMAP/SMTP transport, for tenants that will not consent to
-                      Graph's Mail.Read. Same device-code sign-in.
+                      Graph's Mail.Read. Same device-code sign-in. Also the
+                      attachment side of that transport: `fetch_parsed` gets
+                      the source once, `shaped` turns it into the fields the
+                      pane binds to, `attached_files` and `attachment_rows`
+                      read the files out of it.
 src/ewscal.py         EWS calendar, for a mailbox read over IMAP — IMAP carries
                       no calendar, and Entra issues one token per resource.
 src/config.py         Shared config/paths for the three.
@@ -252,6 +256,45 @@ keeps using the old client id or authority.
   nothing, so an agenda taller than the pane could not be scrolled by anything
   - keys or wheel. `contentHeight` is stated, from whichever child the
   `agendaView` setting is showing.
+- **Attachments are names and sizes until somebody clicks one.** The list
+  rides along with the body (`attachments` on the `message` reply), which is
+  free over IMAP - the source is already parsed - and one extra request on the
+  Graph path, made only when `hasAttachments` says so. The bytes are the
+  separate `attachment` command, which *writes the file and answers with its
+  path*: a megabyte of PDF has no business being turned into JSON, parsed into
+  a QML value and written back out. The key is a Graph attachment id on one
+  transport and a walk-order position on the other, so it is opaque to QML by
+  design.
+- **A part with a Content-ID is markup, not a document** - tested before the
+  disposition, because senders mark inline logos `Content-Disposition:
+  attachment` all the same. Only images: a non-image part with a Content-ID is
+  rare enough that treating it as a file is the safer guess. Get this wrong and
+  every forward carries somebody's letterhead as an attachment.
+- **A forward fetches the original whole; every other mode reads 2 MB of it.**
+  `MAX_MESSAGE_BYTES` is a display decision and `FORWARD_FETCH_BYTES` is not:
+  cutting the source at 2 MB drops the files being forwarded. `fetch_parsed`
+  says whether the cap cut the source, and a forward refuses rather than going
+  out short. The 3 MB `ATTACH_TOTAL_CAP` deliberately does *not* apply to what
+  a forward carries - that number is what one Graph request can hold, and
+  Graph's own forward carries attachments already on the server with no such
+  limit, so matching it here would refuse forwards that work on the other
+  transport. `FORWARD_TOTAL_CAP` is 25 MB, which is roughly where a server
+  stops.
+- **The opened message and the list row carry different fields.** `messageId`
+  was on the row and not on the opened message, and `compose` read it from the
+  opened one - so replies over IMAP went out with no `In-Reply-To` while the
+  suite stayed green, because the tests stubbed `message()` with a dict that
+  had the key. The fixtures build a real source and let `shaped` shape it now
+  (`imap_message` in dev/test-python.py); a hand-written dict is how that hid.
+- **A mailbox with no data for the folder being opened stands in with its last
+  answer.** Switching folder makes a new fetch key, and `Service.snapshot`
+  used to skip a mailbox with nothing under it: the mailbox vanished and its
+  folder tree collapsed to one row until the server answered.
+  `Store.staleDataFor` hands back the newest answer for that alias whatever
+  folder it was for, marked `stale: true`, and `Model.accountViews` decides
+  what may be taken from it - the tree, the identity, the agenda, the unread
+  count - and what may not: the mail rows and the folder they came from. Add a
+  field to a view and ask which of the two it is.
 - **The window has no settings of its own.** It is one per plugin while the
   widget is multi-instance, so it reads a widget's configuration out of
   `shell.json`.

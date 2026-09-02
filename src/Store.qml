@@ -162,6 +162,34 @@ Item {
     return entry ? entry.data : null
   }
 
+  // The newest answer this mailbox gave for any folder.
+  //
+  // Switching folder makes a new fetch key, and a new key has no data until
+  // the server answers. The mailbox therefore vanished from the snapshot
+  // altogether for those seconds - taking its folder tree with it, which is
+  // the thing the click was aimed at and the last thing that should move.
+  // The tree, the address, what the mailbox may do and its agenda are the
+  // same whatever folder is open, so the last answer stands in for them while
+  // the new one is on its way. What is genuinely about the folder - the mail
+  // itself - is left out by Model.accountViews, which is handed this marked
+  // as stale.
+  function staleDataFor(alias) {
+    var wanted = String(alias || "")
+    var best = null
+    var newest = -1
+    for (var key in entries) {
+      var entry = entries[key]
+      if (!entry || !entry.data) continue
+      if (String(entry.data.alias || "") !== wanted) continue
+      var when = Number(entry.at || 0)
+      if (when >= newest) {
+        newest = when
+        best = entry.data
+      }
+    }
+    return best
+  }
+
   function loadingFor(alias, folderId) {
     var entry = entries[fetchKey(alias, folderId)]
     return !!entry && entry.loading === true
@@ -511,7 +539,9 @@ Item {
     // it - the fetch itself is only in error when nothing came back at all.
     var accounts = parsed.accounts || []
     var account = accounts.length > 0 ? accounts[0] : null
-    patchEntry(key, { loading: false, error: null, data: account })
+    // `at` is what makes staleDataFor able to pick the newest answer this
+    // mailbox gave, whichever folder it was for.
+    patchEntry(key, { loading: false, error: null, data: account, at: Date.now() })
     harvestFromMail(account)
     announceNewMail(key, spec, account)
     if (spec) clearBusy(spec.alias)

@@ -838,6 +838,17 @@ Panel {
               return root.service.previewMail
             }
             detail: root.service ? root.service.previewDetail : null
+            // Saving a file is one of the few things this surface can do
+            // itself: it is a fetch and a write, with no window state to
+            // hold open afterwards - see actsHere below for the rest.
+            attachments: root.service ? root.service.previewAttachments : []
+            attachmentsPartial: !!root.service && root.service.attachmentsPartial
+            attachmentBusy: root.service ? root.service.attachmentBusy : ""
+            attachmentNotice: root.service ? root.service.attachmentNotice : ""
+            attachmentError: root.service ? root.service.attachmentError : ""
+            onAttachmentRequested: function(key) {
+              if (root.service) root.service.saveAttachment(key, true)
+            }
             loading: !!root.service && root.service.previewLoading
             error: root.service ? root.service.previewError : ""
             fg: root.fg

@@ -54,6 +54,22 @@ PREVIEW_CHARS = 200
 # A reading pane cannot show a novel, and some mail carries megabytes of
 # attachment that BODY[] would drag over the wire before anything is drawn.
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+# What a forward may weigh. The 2 MB above is a display decision - past it
+# there is more text than anybody reads - but a forward is not a display:
+# cutting the source there drops the very files being forwarded, which is what
+# this transport used to do without saying so. So a forward fetches the
+# original whole, up to rather more than a mail server will accept from it
+# anyway, and a message past that is refused by name instead of sent with its
+# attachments missing.
+FORWARD_FETCH_BYTES = 30 * 1024 * 1024
+# What the assembled forward may weigh, own attachments included. Not the 3 MB
+# the two transports share for files picked off this machine: that number comes
+# from what one Graph request can carry, and a forward on the Graph side is
+# built by Outlook out of attachments already on the server, with no request
+# for them to be too big for. Matching 3 MB here would refuse forwards that
+# work perfectly well over the other transport. 25 MB is roughly where
+# Exchange stops, and a refusal above it names the total.
+FORWARD_TOTAL_CAP = 25 * 1024 * 1024
 
 FOLDER_CAP = 200
 FOLDER_MAX_DEPTH = 3
@@ -735,6 +751,140 @@ def inline_images(message):
     return found
 
 
+def is_attachment(part):
+    """Whether one MIME part is a file the message is carrying.
+
+    Content-Disposition is the first answer and not the only one: senders leave
+    it off and name the file on the Content-Type instead often enough that
+    trusting it alone loses real documents, so a part with a filename counts
+    too. What is deliberately left out is the picture a body points at with
+    `cid:` - that belongs to the markup, and treating a signature logo as a
+    document would forward it as one.
+    """
+    if part.get_content_maintype() == "multipart":
+        return False
+    identifier = str(part.get("Content-ID") or "").strip()
+    # An image with a Content-ID is what a body points at with `cid:` - a
+    # logo, a signature, a screenshot pasted into the text. Some senders mark
+    # those `Content-Disposition: attachment` all the same, which is why this
+    # is tested before the disposition and not after it. The trade is a photo
+    # that a sender's client gave a Content-ID to and meant as a document; the
+    # other way round puts everybody's signature logo in front of the next
+    # reader as though it were one, on every forward, which is worse.
+    if identifier != "" and part.get_content_maintype() == "image":
+        return False
+    if part.get_content_disposition() == "attachment":
+        return True
+    if identifier != "":
+        return False
+    try:
+        return bool(part.get_filename())
+    except (ValueError, TypeError):
+        return False
+
+
+def attached_files(message):
+    """[(filename, bytes, content type)] for the files a message carries.
+
+    Named for the recipient rather than for the protocol: a part with no
+    filename of its own gets one from its type, because "attachment" with no
+    extension is a file nobody can open. Anything that cannot be decoded is
+    left out rather than forwarded as the base64 it arrived as.
+    """
+    files = []
+    for index, part in enumerate(message.walk()):
+        if not is_attachment(part):
+            continue
+        try:
+            payload = part.get_payload(decode=True)
+        except (ValueError, TypeError, AssertionError):
+            continue
+        if not payload:
+            continue
+        content_type = str(part.get_content_type() or "application/octet-stream")
+        try:
+            name = part.get_filename() or ""
+        except (ValueError, TypeError):
+            name = ""
+        if not name:
+            name = "attachment-%d%s" % (index, mimetypes.guess_extension(content_type) or "")
+        files.append((str(name), payload, content_type))
+    return files
+
+
+def attachment_rows(message):
+    """[{name, size, contentType, key}] for the files a message carries.
+
+    The key is the part's position in walk order, and that is what makes it a
+    key: a name is not unique - two files called scan.pdf on one message is
+    ordinary - and IMAP part numbers would mean parsing BODYSTRUCTURE for an
+    answer this already has. The position is stable across fetches of the same
+    message because the MIME tree is; a source the read cap cut short can lose
+    the *later* parts, which is why the reply that carries this list also says
+    whether it was cut.
+    """
+    rows = []
+    for index, part in enumerate(message_parts(message)):
+        if not is_attachment(part):
+            continue
+        try:
+            payload = part.get_payload(decode=True) or b""
+        except (ValueError, TypeError, AssertionError):
+            payload = b""
+        content_type = str(part.get_content_type() or "application/octet-stream")
+        try:
+            name = part.get_filename() or ""
+        except (ValueError, TypeError):
+            name = ""
+        rows.append({
+            "name": str(name) or ("attachment-%d%s"
+                                  % (index, mimetypes.guess_extension(content_type) or "")),
+            "size": len(payload),
+            "contentType": content_type,
+            "key": str(index),
+        })
+    return rows
+
+
+def attachment(account, token, message_id, key):
+    """(filename, bytes, content type) for one file, fetched whole.
+
+    Its own round trip, with the forward's cap rather than the pane's: the 2 MB
+    the reading pane reads is enough to draw a message and not enough to save
+    a 5 MB PDF out of it.
+    """
+    parsed, _prefix, cut = fetch_parsed(account, token, message_id, FORWARD_FETCH_BYTES)
+    wanted = str(key or "").strip()
+    for index, part in enumerate(message_parts(parsed)):
+        if str(index) != wanted or not is_attachment(part):
+            continue
+        try:
+            payload = part.get_payload(decode=True) or b""
+        except (ValueError, TypeError, AssertionError) as error:
+            raise TransportError("attachment_failed",
+                                 "That file could not be decoded: " + _text(error))
+        name = ""
+        try:
+            name = part.get_filename() or ""
+        except (ValueError, TypeError):
+            name = ""
+        content_type = str(part.get_content_type() or "application/octet-stream")
+        return (str(name) or "attachment%s" % (mimetypes.guess_extension(content_type) or ""),
+                payload, content_type)
+    if cut:
+        raise TransportError(
+            "attachment_too_deep",
+            "This message is bigger than %d MB and that file is past where the read stops."
+            % (FORWARD_FETCH_BYTES // 1048576))
+    raise TransportError("attachment_gone",
+                         "That file is not on this message any more. Refresh and try again.")
+
+
+def message_parts(message):
+    """`walk()`, as a list, so a position means the same thing twice."""
+    return list(message.walk())
+
+
 def has_html(message):
     """Whether the message carries a text/html part at all.
 
@@ -1006,9 +1156,16 @@ def snapshot(account, token, top, folder_id="", want_folders=True):
         close(client)
 
 
-def message(account, token, message_id, want_html):
-    """One message's headers and body, raw. graph.py renders it, the same way
-    it renders a Graph body, so both transports look identical in the pane."""
+def fetch_parsed(account, token, message_id, cap=MAX_MESSAGE_BYTES):
+    """(parsed message, FETCH prefix, whether the cap cut it off), in one trip.
+
+    Split out of `message` because a forward wants the same source and not the
+    same amount of it: the pane is happy with 2 MB of a message, a forward
+    needs the part of it that the attachments are in. Whether the cap cut it is
+    handed back rather than guessed at downstream - a truncated source parses
+    fine and simply has fewer files in it, which is not a thing to discover
+    after sending.
+    """
     mailbox, validity, uid = parse_id(message_id)
     client = None
     try:
@@ -1020,38 +1177,63 @@ def message(account, token, message_id, want_html):
                 "This message's folder was rebuilt since the list was fetched. Refresh and try again.",
             )
         try:
-            typ, data = client.uid("FETCH", uid, "(BODY.PEEK[]<0.%d>)" % MAX_MESSAGE_BYTES)
+            typ, data = client.uid("FETCH", uid, "(BODY.PEEK[]<0.%d>)" % cap)
         except imaplib.IMAP4.error as error:
             raise TransportError("message_failed", "Could not open this message: " + _text(error))
         items = fetch_items(data)
         if typ != "OK" or not items:
             raise TransportError("message_failed", "This message is no longer in %s" % mailbox)
-
-        parsed = parse_headers(items[0][1])
-        name, address = address_pair(parsed["From"] if "From" in parsed else None)
-        raw, is_html = body_of(parsed, want_html)
-        return {
-            "id": message_id,
-            "subject": header_str(parsed, "Subject").strip() or "(no subject)",
-            "from": name or address,
-            "fromAddress": address,
-            "to": address_rows(parsed["To"] if "To" in parsed else None),
-            "cc": address_rows(parsed["Cc"] if "Cc" in parsed else None),
-            "received": received_iso(items[0][0]) or header_str(parsed, "Date"),
-            "webLink": "",
-            "hasAttachments": any(
-                part.get_content_disposition() == "attachment" for part in parsed.walk()
-            ),
-            "raw": raw,
-            "isHtml": is_html,
-            # Whether markup exists, as opposed to whether it is what came
-            # back above: `body_of` prefers plain text, so a message with both
-            # parts answers is_html False and hasHtml True.
-            "hasHtml": has_html(parsed),
-            "inlineImages": inline_images(parsed),
-        }
+        literal = items[0][1] or b""
+        return parse_headers(literal), items[0][0], len(literal) >= cap
     finally:
         close(client)
+
+
+def shaped(parsed, prefix, message_id, want_html):
+    """One fetched message as the fields graph.py renders."""
+    name, address = address_pair(parsed["From"] if "From" in parsed else None)
+    raw, is_html = body_of(parsed, want_html)
+    return {
+        "id": message_id,
+        "subject": header_str(parsed, "Subject").strip() or "(no subject)",
+        "from": name or address,
+        "fromAddress": address,
+        "to": address_rows(parsed["To"] if "To" in parsed else None),
+        "cc": address_rows(parsed["Cc"] if "Cc" in parsed else None),
+        "received": received_iso(prefix) or header_str(parsed, "Date"),
+        "webLink": "",
+        "hasAttachments": any(is_attachment(part) for part in parsed.walk()),
+        "raw": raw,
+        "isHtml": is_html,
+        # Whether markup exists, as opposed to whether it is what came
+        # back above: `body_of` prefers plain text, so a message with both
+        # parts answers is_html False and hasHtml True.
+        "hasHtml": has_html(parsed),
+        "inlineImages": inline_images(parsed),
+        # Threading a reply needs the original's own Message-ID, and an opened
+        # message is the only place it can come from: the list row carries one
+        # but a message revealed from a notification never went through a list.
+        # It was missing here, so `compose` read it as "" and every reply over
+        # this transport went out with no In-Reply-To at all - landing beside
+        # the conversation in the recipient's client rather than in it.
+        "messageId": header_str(parsed, "Message-ID").strip(),
+        "references": reference_ids(parsed),
+        # Free here, where the source has already been fetched and parsed:
+        # names and sizes, no bytes. The bytes are one more round trip, made
+        # only when somebody clicks a file.
+        "attachments": attachment_rows(parsed),
+    }
+
+
+def message(account, token, message_id, want_html):
+    """One message's headers and body, raw. graph.py renders it, the same way
+    it renders a Graph body, so both transports look identical in the pane."""
+    parsed, prefix, cut = fetch_parsed(account, token, message_id)
+    shape = shaped(parsed, prefix, message_id, want_html)
+    # Said rather than hidden: the pane reads 2 MB of a message, and a file
+    # past that is missing from the list above rather than merely unopenable.
+    shape["sourceTruncated"] = cut
+    return shape
 
 
 # --------------------------------------------------------------------------
@@ -1239,11 +1421,34 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
 
     `attachments` is [(name, bytes)], already read and size-checked by the
     caller so that both transports refuse the same files for the same reasons.
+
+    A forward also carries whatever the original was carrying. Graph's forward
+    is built by Outlook out of attachments already sitting in the mailbox, so
+    it has always done this; here the message is assembled locally, and for a
+    long time it was assembled out of the original's *text* alone - the files
+    were dropped, nothing said so, and the forward looked complete in Sent
+    Items. So the original is fetched whole for a forward, its attachments are
+    re-attached, and a message too large for that is refused rather than sent
+    short.
     """
     new = mode == "new"
+    forward = mode == "forward"
     # Not fetched for a new message: there is no original, and asking the
     # server for message id "" is a round trip that can only fail.
-    original = {} if new else message(account, token, message_id, want_html=False)
+    original, carried = {}, []
+    if not new:
+        parsed, prefix, cut = fetch_parsed(
+            account, token, message_id,
+            FORWARD_FETCH_BYTES if forward else MAX_MESSAGE_BYTES)
+        original = shaped(parsed, prefix, message_id, want_html=False)
+        if forward:
+            if cut:
+                raise TransportError(
+                    "forward_too_large",
+                    "This message is bigger than %d MB. Forwarding it from here would leave "
+                    "its attachments behind, so nothing has been sent."
+                    % (FORWARD_FETCH_BYTES // 1048576))
+            carried = [(name, body) for name, body, _type in attached_files(parsed)]
     me = username_of(account)
 
     copies = [address for address in (cc_addresses or []) if address]
@@ -1294,10 +1499,16 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
     # under the original in the recipient's client, as though they had been
     # copied on it all along. Inventing a reference to nothing does the same to
     # a new message.
-    original_id = "" if (new or mode == "forward") else str(original.get("messageId") or "").strip()
+    original_id = "" if (new or forward) else str(original.get("messageId") or "").strip()
     if original_id:
         note["In-Reply-To"] = original_id
-        note["References"] = original_id
+        # The original's own chain, then the original: a reply that names only
+        # its parent threads in most clients and breaks the chain for the ones
+        # that walk References, which is what a long thread is held together by.
+        chain = [str(ref) for ref in (original.get("references") or []) if ref]
+        if original_id not in chain:
+            chain.append(original_id)
+        note["References"] = " ".join(chain)
     if new:
         body_text = str(comment or "")
     elif mode == "forward":
@@ -1306,11 +1517,22 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
         body_text = "%s\n\n%s" % (str(comment or ""), quote_original(original))
     note.set_content(body_text)
 
+    # What was picked off this machine, then what the original was carrying.
+    # That order is the one a reader expects: the file this message is about
+    # comes before the history it is being forwarded with.
+    files = list(attachments or []) + list(carried)
+    weight = sum(len(body or b"") for _name, body in files)
+    if weight > FORWARD_TOTAL_CAP:
+        raise TransportError(
+            "attachment_too_large",
+            "This would be a %d MB message, and the server will refuse it. Nothing has been "
+            "sent." % (weight // 1048576))
+
     # add_attachment turns this into multipart/mixed, which is why set_content
     # has to have run first. The type is guessed from the name and falls back to
     # octet-stream: a wrong guess is a file the recipient has to open by hand, a
     # missing one is a mail some servers refuse.
-    for name, body in (attachments or []):
+    for name, body in files:
         guessed, _ = mimetypes.guess_type(name)
         maintype, _, subtype = (guessed or "application/octet-stream").partition("/")
         note.add_attachment(body, maintype=maintype, subtype=subtype or "octet-stream",
@@ -1327,7 +1549,8 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
                 raise TransportError("draft_failed", "Could not save the draft: " + _text(error))
             if typ != "OK":
                 raise TransportError("draft_failed", "Could not save the draft: " + _text(data))
-            return {"ok": True, "mode": mode, "drafted": True, "id": "", "webLink": "", "warning": ""}
+            return {"ok": True, "mode": mode, "drafted": True, "id": "", "webLink": "",
+                    "warning": "", "carried": [name for name, _body in carried]}
         finally:
             close(client)
 
@@ -1372,7 +1595,8 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
         close(client)
 
     return {"ok": True, "mode": mode, "drafted": False,
-            "id": "" if new else message_id, "warning": warning}
+            "id": "" if new else message_id, "warning": warning,
+            "carried": [name for name, _body in carried]}
 
 
 # --------------------------------------------------------------------------

@@ -15,6 +15,11 @@ Rectangle {
   // slightly off inside the pill.
   property string icon: ""
   property string detail: ""
+  // A ceiling for the label, for a pill whose text is not a word somebody
+  // here chose: an attachment is named by whoever sent it, and one of those
+  // names is as long as it likes. 0 means "as wide as the text", which is
+  // every other pill in the plugin.
+  property real maxLabelWidth: 0
   property color dotColor: "transparent"
   property bool selected: false
   property bool faded: false
@@ -58,6 +63,8 @@ Rectangle {
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
       font.bold: true
+      width: root.maxLabelWidth > 0 ? Math.min(implicitWidth, root.maxLabelWidth) : implicitWidth
+      elide: root.maxLabelWidth > 0 ? Text.ElideMiddle : Text.ElideNone
       anchors.verticalCenter: parent.verticalCenter
     }
 

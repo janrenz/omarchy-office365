@@ -244,7 +244,20 @@ Item {
     var answered = false
     for (var i = 0; i < aliases.length; i++) {
       var data = hub.dataFor(aliases[i], folderIdFor(aliases[i]))
-      if (!data) continue
+      if (!data) {
+        // Nothing for this folder yet. Rather than drop the mailbox - which
+        // took its folder tree off the screen for as long as the fetch took,
+        // and the tree is what was just clicked in - its last answer stands
+        // in, marked, and the model leaves the folder's own mail out of it.
+        var last = hub.staleDataFor(aliases[i])
+        if (!last) continue
+        var standIn = {}
+        for (var field in last) standIn[field] = last[field]
+        standIn.stale = true
+        accounts.push(standIn)
+        answered = true
+        continue
+      }
       accounts.push(data)
       answered = true
     }
@@ -405,6 +418,10 @@ Item {
     }
     previewImages = false
     previewHtmlChoice = ""
+    // A "Saved to ~/Downloads/..." line is about the message it was saved
+    // from, and this is a different one.
+    attachmentQueue = []
+    clearAttachmentNotes()
     previewLoading = true
     previewKey = hub.requestBody(mail.alias, mail.id, bodyModeFor(mail), demo, false)
   }
@@ -487,6 +504,8 @@ Item {
   }
 
   function closePreview() {
+    attachmentQueue = []
+    clearAttachmentNotes()
     previewImages = false
     previewHtmlChoice = ""
     holdOnly("")
@@ -944,7 +963,13 @@ Item {
         root.openUrl(String(parsed.webLink || ""), String(root.composeAlias))
         root.composeNotice = parsed.warning ? String(parsed.warning) : "Draft opened in Outlook"
       } else {
-        root.composeNotice = "Sent"
+        // Say what rode along with it. A forward on the IMAP path used to drop
+        // the original's attachments without a word, and "Sent" was the last
+        // thing said before it did - so the count is worth the two lines.
+        var carried = parsed.carried && parsed.carried.length ? parsed.carried.length : 0
+        root.composeNotice = carried > 0
+          ? ("Sent, with " + carried + (carried === 1 ? " file" : " files"))
+          : "Sent"
       }
       root.cancelCompose()
       // A reply changes the conversation and a forward marks nothing, but both
@@ -958,6 +983,128 @@ Item {
   // Set when a send failed for want of permission, so the window can say what
   // to do about it rather than repeating the error.
   property bool composeSendBlocked: false
+
+  // ---- the files a message carries ------------------------------------
+  //
+  // Names and sizes arrive with the body, which costs this transport nothing
+  // and the other one a request it only makes for a message that says it has
+  // something. The bytes are a second call, made when somebody clicks a file,
+  // and they never come through here: the helper writes the file and answers
+  // with a path. A megabyte of PDF converted to JSON, parsed into a QML value
+  // and written back out again would be a slow way to do what `open()` does.
+  readonly property var previewAttachments: previewDetail && previewDetail.attachments
+                                            ? previewDetail.attachments : []
+  // Whether that list is all of them. Over IMAP the pane reads 2 MB of a
+  // message, and a file past that is missing from the list rather than merely
+  // unopenable - which is worth saying out loud rather than showing a message
+  // with one attachment as a message with none.
+  readonly property bool attachmentsPartial: !!previewDetail
+                                             && previewDetail.attachmentsPartial === true
+  // The file being fetched, by key, so the row that was clicked is the row
+  // that shows it is working.
+  property string attachmentBusy: ""
+  property string attachmentNotice: ""
+  property string attachmentError: ""
+  // Keys still to fetch, because one helper call carries one file and `s`
+  // asks for all of them. A queue rather than several processes at once: each
+  // call is a fetch of the whole message on the IMAP path, and three of those
+  // in parallel is three times the mailbox for no gain.
+  property var attachmentQueue: []
+  // Whether what is being fetched should be opened afterwards, and how many
+  // have landed, for a notice that can say "2 files" rather than naming the
+  // last one and leaving the rest to be guessed at.
+  property bool attachmentOpen: true
+  property int attachmentSaved: 0
+
+  function clearAttachmentNotes() {
+    attachmentNotice = ""
+    attachmentError = ""
+  }
+
+  // Save one file, and open it. Two things rather than one because that is
+  // what a click on an attachment means everywhere else: the file is on the
+  // machine afterwards, in the folder everything else downloads into, and
+  // whatever opens that kind of file is looking at it.
+  function saveAttachment(key, andOpen) {
+    var wanted = String(key || "")
+    if (!previewMail || wanted === "") return
+    startAttachments([wanted], andOpen !== false)
+  }
+
+  // Every file at once, which is what the keyboard asks for: picking one of
+  // four with a key would need a cursor in a strip of pills, and "all of
+  // them" is what somebody pressing a single key for attachments means.
+  // Nothing is opened - four applications coming up unasked is not a save.
+  function saveAllAttachments() {
+    if (!previewMail) return
+    var keys = []
+    for (var i = 0; i < previewAttachments.length; i++) {
+      var key = String(previewAttachments[i].key || "")
+      if (key !== "") keys.push(key)
+    }
+    if (keys.length === 0) return
+    startAttachments(keys, false)
+  }
+
+  function startAttachments(keys, andOpen) {
+    if (attachmentProc.running) return
+    clearAttachmentNotes()
+    attachmentQueue = keys
+    attachmentOpen = andOpen === true
+    attachmentSaved = 0
+    pumpAttachments()
+  }
+
+  function pumpAttachments() {
+    if (attachmentProc.running || attachmentQueue.length === 0 || !previewMail) {
+      attachmentBusy = ""
+      return
+    }
+    var wanted = String(attachmentQueue[0])
+    attachmentQueue = attachmentQueue.slice(1)
+    attachmentBusy = wanted
+    var command = ["python3", helper(), "attachment",
+                   "--account", String(previewMail.alias),
+                   "--id", String(previewMail.id),
+                   "--key", wanted]
+    if (demo) command.push("--demo")
+    attachmentProc.command = command
+    attachmentProc.running = true
+  }
+
+  Process {
+    id: attachmentProc
+    running: false
+    stdout: StdioCollector { id: attachmentOut; waitForEnd: true }
+    stderr: StdioCollector { id: attachmentErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.attachmentBusy = ""
+      var parsed = Model.parseJson(attachmentOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        // Whatever is left in the queue is abandoned: the reason one file
+        // could not be fetched - signed out, message gone - is the reason the
+        // next one cannot either, and four copies of it is not four answers.
+        root.attachmentQueue = []
+        root.attachmentError = parsed && parsed.error
+          ? String(parsed.error.message)
+          : Model.oneLine(attachmentErr.text || "Could not save that file", 160)
+        return
+      }
+      var path = String(parsed.path || "")
+      // The helper writes the short form of the path: it is the side that
+      // knows what $HOME is.
+      var where = String(parsed.display || path)
+      root.attachmentSaved += 1
+      root.attachmentNotice = root.attachmentSaved > 1
+        ? ("Saved " + root.attachmentSaved + " files to " + Model.folderOf(where))
+        : (where === "" ? "Saved" : "Saved to " + where)
+      // xdg-open and not the mailbox's openCommand: that one is a browser,
+      // chosen so a link opens in the profile the mailbox belongs to, and a
+      // PDF is not a link. Detached, because whatever opens it outlives this.
+      if (root.attachmentOpen && path !== "") Quickshell.execDetached(["xdg-open", path])
+      root.pumpAttachments()
+    }
+  }
 
   // ---- folders --------------------------------------------------------
   //

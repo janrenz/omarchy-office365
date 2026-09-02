@@ -47,6 +47,21 @@ Column {
   property bool actionRunning: false
   property string actionError: ""
 
+  // What the message is carrying: [{name, size, contentType, key}], as the
+  // helper listed it. `attachmentsPartial` is whether that list is all of
+  // them - over IMAP the pane reads two megabytes of a message, and a file
+  // further in than that is missing from the list rather than merely
+  // unopenable. `attachmentBusy` is the key of the one being fetched.
+  property var attachments: []
+  property bool attachmentsPartial: false
+  property string attachmentBusy: ""
+  property string attachmentNotice: ""
+  property string attachmentError: ""
+
+  // One file, asked for by key. What the host does with it - save it, open it
+  // - is the host's business; this only says which one was clicked.
+  signal attachmentRequested(string key)
+
   signal openRequested()
   signal closeRequested()
   signal markRequested(bool read)
@@ -203,6 +218,69 @@ Column {
       singleLine: true
       text: root.when(root.detail ? root.detail.received : (root.mail ? root.mail.received : ""))
       color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+  }
+
+  // ---- what the message is carrying ----
+  //
+  // Under the headers, above the message. The paperclip on the list row used
+  // to be the only sign an attachment existed at all: the pane never showed
+  // one, nothing fetched one, and the file could not be reached from here by
+  // any route. First thing somebody wants on opening such a message is the
+  // file, so it goes where they are already looking.
+  //
+  // A click saves it and opens it, which is the one action a click on an
+  // attachment means everywhere else. A save that only saves leaves the
+  // reader hunting for what they just saved.
+  Column {
+    width: parent.width
+    spacing: Style.spacing.xxs
+    visible: root.attachments.length > 0 || root.attachmentsPartial
+             || root.attachmentNotice !== "" || root.attachmentError !== ""
+
+    Flow {
+      width: parent.width
+      spacing: Style.spacing.sm
+
+      Repeater {
+        model: root.attachments
+
+        FilterPill {
+          required property var modelData
+
+          label: String(modelData.name || "file")
+          detail: Model.fileSize(modelData.size)
+          // Bounded, because this label is the one string in the pane that
+          // whoever sent the message chose the length of.
+          maxLabelWidth: Math.max(Style.space(80), root.width - Style.space(140))
+          selected: root.attachmentBusy === String(modelData.key)
+          // While one is being fetched the others are not what is happening.
+          faded: root.attachmentBusy !== "" && root.attachmentBusy !== String(modelData.key)
+          fg: root.fg
+          accent: root.accent
+          fontFamily: root.fontFamily
+          onClicked: root.attachmentRequested(String(modelData.key))
+        }
+      }
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      visible: text !== ""
+      wrapMode: Text.WordWrap
+      text: {
+        if (root.attachmentError !== "") return root.attachmentError
+        if (root.attachmentNotice !== "") return root.attachmentNotice
+        if (root.attachmentsPartial)
+          return root.attachments.length > 0
+            ? "This message is longer than the pane reads, so it may carry more than these."
+            : "This message carries files, further into it than the pane reads."
+        return ""
+      }
+      color: root.attachmentError !== "" ? root.accent : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
     }

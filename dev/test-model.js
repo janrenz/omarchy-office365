@@ -687,6 +687,56 @@ group("folderMoveTargets - where a folder can go", () => {
         Model.folderMoveTargets([view], "other", "arch"), [])
 })
 
+group("accountViews - last folder's answer, standing in", () => {
+  // Switching folder makes a new fetch key, and a new key has no data until
+  // the server answers. The mailbox used to drop out of the snapshot for those
+  // seconds, and its folder tree collapsed to a single Inbox row - the tree
+  // being the thing that had just been clicked in. Its last answer stands in
+  // now, marked `stale`, and this is what may be taken from it and what may
+  // not.
+  const answer = {
+    alias: "uds", ok: true, username: "jan@example.de", write: true, send: true,
+    folders: [{ id: "inbox", name: "Inbox", isInbox: true },
+              { id: "archive", name: "Archive", isInbox: false },
+              { id: "history", name: "Conversation History", isInbox: false }],
+    folderId: "archive", folderName: "Archive",
+    mail: [{ id: "1", subject: "in the folder we just left", read: false }],
+    unreadCount: 6038, unreadKnown: true,
+    events: [{ id: "e1", subject: "standup" }],
+    capabilities: { focused: true }
+  }
+  const build = (data) =>
+    Model.accountViews([{ account: "uds" }], { accounts: [data] }, {}, "#fff", {}, true)[0]
+
+  const fresh = build(answer)
+  const standIn = build(Object.assign({}, answer, { stale: true }))
+
+  check("the tree is kept, which is the whole point",
+        standIn.folders.map((f) => f.id), ["inbox", "archive", "history"])
+  check("and so is who the mailbox is",
+        [standIn.username, standIn.write, standIn.send], ["jan@example.de", true, true])
+  check("and its agenda, which no folder switch changes",
+        standIn.events.length, 1)
+
+  // The rows are the folder that was open a moment ago. Drawing them under the
+  // new folder's name says "this is what is in Archive" about somebody's inbox.
+  check("the mail is not kept", standIn.mail, [])
+  check("nor is the folder it came from",
+        [standIn.folderId, standIn.folderName], ["inbox", ""])
+  check("the fresh answer keeps both",
+        [fresh.mail.length, fresh.folderId], [1, "archive"])
+
+  // The count is the inbox's own on the Graph path, so it is no more stale
+  // than the tree - and a merged total that dips by six thousand and comes
+  // back reads as a glitch.
+  check("the unread count stays put", standIn.unreadCount, 6038)
+
+  check("a mailbox standing in reads as busy, because it is",
+        [standIn.busy, fresh.busy], [true, false])
+  check("and says which of the two it is",
+        [standIn.stale, fresh.stale], [true, false])
+})
+
 group("accountViews - the Focused/Other split", () => {
   // Outlook computes Focused/Other server-side and hands it over through Graph
   // alone. An IMAP mailbox says every row is focused because there is nothing
@@ -1025,6 +1075,22 @@ group("the merged view - one folder, every mailbox", () => {
         Model.unifiedFolderName("sentitems"), "Sent")
   check("something that is not a merged folder has none",
         Model.unifiedFolderName("Archiv"), "")
+})
+
+// ---------------------------------------------------------------- file sizes
+//
+// What the reading pane writes beside an attachment's name. The question it
+// answers is whether this is a page or a presentation, which is why the units
+// change rather than the number growing.
+group("a file size a person can read", () => {
+  check("bytes, while there are few enough to matter", Model.fileSize(512), "512 B")
+  check("kilobytes for a page of PDF", Model.fileSize(176433), "172 KB")
+  check("one decimal below ten, so 1.4 MB is not rounded to 1", Model.fileSize(1468006), "1.4 MB")
+  check("and none above it, because nobody needs 12.3", Model.fileSize(12.7 * 1024 * 1024), "13 MB")
+  check("nothing at all for a size that is not one", Model.fileSize(0), "")
+  check("the folder a saved file went into", Model.folderOf("~/Downloads/scan.pdf"), "~/Downloads")
+  check("and a bare name has none", Model.folderOf("scan.pdf"), "scan.pdf")
+  check("or for one that is not a number", Model.fileSize("what"), "")
 })
 
 console.log(`\n${checks - failures}/${checks} passed`)

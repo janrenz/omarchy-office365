@@ -769,6 +769,47 @@ def graph_inline_images(token, message_id, markup):
     return found
 
 
+# What a message carries, as names and sizes. The reading pane draws this and
+# nothing else until somebody clicks a file: an attachment list is one request,
+# an attachment is another, and the second one is not worth making for the mail
+# nobody opens the paperclip on.
+ATTACHMENT_LIST_CAP = 40
+
+
+def graph_attachment_rows(token, message_id):
+    """[{name, size, contentType, key}] for one Graph message.
+
+    Inline images are left out. They are the pictures the body points at with
+    `cid:` - a logo, a signature - and listing them as files puts three of them
+    in front of a reader who was told the message had one attachment.
+
+    A referenceAttachment is a link to a file on OneDrive rather than a file:
+    it is listed, because it is what the sender attached, and saving one is
+    refused with a reason rather than half-done.
+    """
+    status, items, _payload, complete = graph_collect(
+        token,
+        "/me/messages/" + urllib.parse.quote(message_id, safe="") + "/attachments",
+        {"$select": "id,name,size,contentType,isInline"},
+        cap=ATTACHMENT_LIST_CAP,
+    )
+    if status != 200:
+        return [], False
+    rows = []
+    for item in items:
+        if item.get("isInline") is True \
+                and str(item.get("contentType") or "").lower().startswith("image/"):
+            continue
+        rows.append({
+            "name": str(item.get("name") or "attachment"),
+            "size": int(item.get("size") or 0),
+            "contentType": str(item.get("contentType") or "application/octet-stream"),
+            "key": str(item.get("id") or ""),
+            "kind": str(item.get("@odata.type") or "").split(".")[-1],
+        })
+    return rows, complete
+
+
 def graph_error(payload, fallback):
     if not isinstance(payload, dict):
         return fallback
@@ -2182,6 +2223,12 @@ def cmd_message(args):
             "received": message["received"],
             "webLink": message["webLink"],
             "hasAttachments": message["hasAttachments"],
+            # Names and sizes, out of the source already fetched - no extra
+            # round trip on this transport. `attachmentsPartial` is the honest
+            # part: the pane reads 2 MB of a message, and a file past that is
+            # missing from this list rather than merely unopenable.
+            "attachments": message.get("attachments") or [],
+            "attachmentsPartial": bool(message.get("sourceTruncated")),
             "body": body,
             "truncated": truncated,
             "bodyFormat": body_format,
@@ -2216,6 +2263,12 @@ def cmd_message(args):
     if want_html and served_html:
         policy = ImagePolicy(graph_inline_images(token, args.id, raw), load_images)
     body, truncated, body_format = render_body(raw, served_html, want_html, policy)
+    # One more request, and only for a message that says it has something: the
+    # list is not in the message resource, and asking for it on every mail
+    # would be a request per read for the answer "none".
+    attachments, attachments_complete = ([], True)
+    if bool(payload.get("hasAttachments")):
+        attachments, attachments_complete = graph_attachment_rows(token, args.id)
     out(
         {
             "ok": True,
@@ -2228,6 +2281,8 @@ def cmd_message(args):
             "received": payload.get("receivedDateTime", ""),
             "webLink": payload.get("webLink", ""),
             "hasAttachments": bool(payload.get("hasAttachments")),
+            "attachments": attachments,
+            "attachmentsPartial": not attachments_complete,
             # Capped above: a preview pane cannot show a novel, and the Open
             # button is one click away for the whole thing.
             "body": body,
@@ -3102,6 +3157,154 @@ def cmd_list(_args):
     out({"ok": True, "accounts": accounts})
 
 
+# Where a saved attachment goes. The reader asked for a file, and a file they
+# cannot find afterwards is not saved so much as moved: the download folder is
+# where everything else on the machine puts one.
+def download_dir():
+    named = str(os.environ.get("XDG_DOWNLOAD_DIR") or "").strip()
+    if named:
+        return os.path.expanduser(named)
+    # user-dirs.dirs is what the desktop actually reads, and it is one line to
+    # parse. Its value is shell text: XDG_DOWNLOAD_DIR="$HOME/Downloads".
+    dirs = os.path.join(
+        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "user-dirs.dirs")
+    try:
+        with open(dirs, encoding="utf-8") as handle:
+            for line in handle:
+                if not line.startswith("XDG_DOWNLOAD_DIR"):
+                    continue
+                value = line.partition("=")[2].strip().strip('"').strip("'")
+                if value:
+                    return os.path.expanduser(value.replace("$HOME", os.path.expanduser("~")))
+    except OSError:
+        pass
+    return os.path.expanduser("~/Downloads")
+
+
+def safe_filename(name, fallback="attachment"):
+    """A sender's filename, made safe to write.
+
+    The name arrives from whoever sent the mail, which makes it the one string
+    here that somebody else chose: a `/` in it would write outside the folder,
+    a leading dot would hide the file, and `..` would climb out of it. Only the
+    basename survives, and it is bounded - some mailers send a hundred
+    characters of hex.
+    """
+    text = str(name or "").replace("\\", "/")
+    text = os.path.basename(text).strip()
+    text = re.sub(r"[\x00-\x1f\x7f]", "", text)
+    text = text.lstrip(".")
+    text = re.sub(r"\s+", " ", text).strip()
+    if text in ("", ".", ".."):
+        text = fallback
+    if len(text) > 120:
+        stem, dot, extension = text.rpartition(".")
+        text = (stem[:110] + dot + extension[:9]) if dot else text[:120]
+    return text
+
+
+def write_download(name, blob, into=""):
+    """Write one file where the reader will find it, without overwriting.
+
+    A second copy of the same attachment becomes `name (2).pdf` rather than
+    replacing the first: the reader may still be reading it, and a save that
+    silently overwrites is a save that loses somebody's work.
+    """
+    folder = os.path.expanduser(str(into or "").strip()) or download_dir()
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError as error:
+        fail("save_failed", "Could not use %s: %s" % (folder, error))
+    stem, dot, extension = safe_filename(name).rpartition(".")
+    if not dot:
+        stem, extension = safe_filename(name), ""
+    path = os.path.join(folder, safe_filename(name))
+    count = 2
+    while os.path.exists(path):
+        candidate = "%s (%d)%s%s" % (stem, count, dot, extension)
+        path = os.path.join(folder, candidate)
+        count += 1
+    try:
+        with open(path, "wb") as handle:
+            handle.write(blob)
+    except OSError as error:
+        fail("save_failed", "Could not write %s: %s" % (path, error))
+    return path
+
+
+def display_path(path):
+    """The path as a person reads it: `~/Downloads/thing.pdf`.
+
+    Here rather than in QML because this is where $HOME is known, and a
+    "Saved to /home/someone/Downloads/..." line is longer than the pane it has
+    to fit in.
+    """
+    home = os.path.expanduser("~")
+    text = str(path or "")
+    if home and text.startswith(home + os.sep):
+        return os.path.join("~", os.path.relpath(text, home))
+    return text
+
+
+def cmd_attachment(args):
+    """Save one file off one message.
+
+    Bytes never travel through the widget: the helper writes the file and
+    answers with its path, which is also the only thing QML has any use for.
+    """
+    if getattr(args, "demo", False):
+        fail("demo", "A demo message carries no files to save")
+
+    account = read_json(state_path(args.account))
+    if not account:
+        fail("auth_required", "Not signed in")
+    try:
+        token, account = access_token(args.account, account)
+    except AccountError as error:
+        fail(error.code, error.message)
+
+    if transport_of(account) == TRANSPORT_IMAP:
+        name, blob, content_type = imap_run(
+            need_imap().attachment, account, token, args.id, args.key)
+        path = write_download(name, blob, args.into)
+        out({"ok": True, "path": path, "display": display_path(path),
+             "name": os.path.basename(path),
+             "bytes": len(blob), "contentType": content_type})
+        return
+
+    status, payload = graph_get(
+        token,
+        "/me/messages/" + urllib.parse.quote(args.id, safe="")
+        + "/attachments/" + urllib.parse.quote(args.key, safe=""),
+        None,
+    )
+    if status != 200:
+        fail("attachment_failed", graph_error(payload, "Could not fetch that file"))
+    kind = str((payload or {}).get("@odata.type") or "")
+    encoded = (payload or {}).get("contentBytes")
+    if encoded is None:
+        # An itemAttachment is a whole message attached to this one and a
+        # referenceAttachment is a link to somebody's OneDrive. Neither is a
+        # file this can write, and saying which it is beats "failed".
+        if kind.endswith("referenceAttachment"):
+            fail("attachment_is_a_link",
+                 "That is a link to a file on OneDrive rather than a file, and it opens where "
+                 "it lives rather than saving from here.")
+        if kind.endswith("itemAttachment"):
+            fail("attachment_is_a_message",
+                 "That attachment is another message rather than a file. Saving one is not "
+                 "something this can do yet.")
+        fail("attachment_failed", "Outlook sent no content for that file")
+    try:
+        blob = base64.b64decode(encoded)
+    except (ValueError, base64.binascii.Error) as error:
+        fail("attachment_failed", "That file could not be decoded: %s" % error)
+    path = write_download((payload or {}).get("name") or "attachment", blob, args.into)
+    out({"ok": True, "path": path, "display": display_path(path),
+         "name": os.path.basename(path), "bytes": len(blob),
+         "contentType": str((payload or {}).get("contentType") or "application/octet-stream")})
+
+
 def cmd_remove(args):
     removed = False
     for kind in ("account", "pending"):
@@ -3175,6 +3378,15 @@ def main():
                               "servers, which tells them it was read. Pictures it carries "
                               "itself are shown either way.")
     message.set_defaults(func=cmd_message)
+
+    attachment = with_account("attachment", "save one file off a message")
+    attachment.add_argument("--id", required=True, help="message id from a fetch")
+    attachment.add_argument("--key", required=True,
+                            help="the file's key, from the `attachments` list on `message`")
+    attachment.add_argument("--into", default="",
+                            help="where to write it; the download folder by default")
+    attachment.add_argument("--demo", action="store_true", help="refuse, and say why")
+    attachment.set_defaults(func=cmd_attachment)
 
     event = with_account("event", "one meeting, with who is coming and what they said")
     event.add_argument("--id", required=True, help="event id from a fetch")

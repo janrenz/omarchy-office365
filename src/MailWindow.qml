@@ -1132,6 +1132,11 @@ Item {
           else if (text === "a") root.askAgent()
           // c for compose, because r is Refresh here and always has been.
           else if (text === "c") root.startNewMessage()
+          // Every file the message carries. A key cannot point at one pill in
+          // a strip without a cursor to move through them, and "all of them"
+          // is what one key for attachments means anyway - so this saves, and
+          // the pills open.
+          else if (text === "s") mailView.saveAllAttachments()
           // Capital, because c is already Write. One key from anywhere, rather
           // than walking out to the far rung of the ladder with h.
           else if (text === "C") root.toggleAgenda()
@@ -1832,6 +1837,13 @@ Item {
                     return mailView.previewMail
                   }
                   detail: mailView.previewDetail
+                  // The files it carries, and the one being fetched.
+                  attachments: mailView.previewAttachments
+                  attachmentsPartial: mailView.attachmentsPartial
+                  attachmentBusy: mailView.attachmentBusy
+                  attachmentNotice: mailView.attachmentNotice
+                  attachmentError: mailView.attachmentError
+                  onAttachmentRequested: function(key) { mailView.saveAttachment(key, true) }
                   loading: mailView.previewLoading
                   error: mailView.previewError
                   // A window is taller than a dropdown, so the body gets to use

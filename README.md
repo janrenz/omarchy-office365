@@ -385,6 +385,22 @@ one. Click the message again, the ✕, or press Escape to go back to the agenda.
 Bodies are fetched one at a time, only when you open a message, and long ones
 scroll inside the pane rather than stretching the popup.
 
+**The files a message carries** are listed under the headers, with their sizes.
+Clicking one saves it into your download folder and opens it, the way clicking
+an attachment works everywhere else; `s` saves all of them without opening
+anything. A file that is already there is not overwritten - the second copy is
+`name (2).pdf`, because you may still be reading the first. Names and sizes
+cost nothing on a mailbox read over IMAP, where the source has already been
+fetched, and one request on the Graph path, made only for a message that says
+it has something. Nothing is fetched until you click.
+
+A message read over IMAP is read to two megabytes, which is where the pane
+stops; a file past that point is missing from the list rather than merely
+unopenable, and the pane says so rather than showing the message as carrying
+nothing. Two kinds of Outlook attachment cannot be saved from here and say
+which they are: a message attached to a message, and a link to a file on
+OneDrive.
+
 **Flag** raises Outlook's own follow-up flag on the message, and **Unflag**
 clears it - the flag Outlook draws in its own column, so a message flagged here
 is flagged in Outlook and on the phone. Over IMAP it is the `\Flagged` keyword,
@@ -396,6 +412,15 @@ Flagging is a write, so it needs the same permission marking and moving do -
 see [Sign-in and your data](#sign-in-and-your-data).
 
 ### Answering it, and writing one of your own
+
+A forward carries what the original was carrying. On the Graph path Outlook
+builds the forward out of attachments already in the mailbox, and always did;
+over IMAP the message is assembled here, and for a long time it was assembled
+out of the original's text alone - the files were dropped, nothing said so, and
+the forward looked complete in Sent Items. Now they ride along, up to 25 MB,
+which is roughly where a mail server stops taking them; past that it is refused
+by name rather than sent short, and so is a message too large to be read in
+full. The notice after sending says how many files went with it.
 
 **Reply**, **Reply all** and **Forward** lead the row of buttons under a
 message, and a box opens under the message rather than over it — quoting from
@@ -591,6 +616,7 @@ including inside a message, which is the one place they used to do nothing.
 | `x` | Delete the message under the cursor |
 | `m` | Move it to another folder |
 | `c` | Write a new message from the mailbox you are reading (`c` for compose, since `r` refreshes) |
+| `s` | Save every file this message carries into your download folder |
 | `a` | Hand this message to your coding agent — see below |
 | `F` | Flag it for follow-up, or clear the flag (capital, since `f` is the Focused filter) |
 | `u` / `f` | Only unread / only Focused |
@@ -825,6 +851,42 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.9.0 — 2026-09-02
+
+- **A forward carries the original's attachments over IMAP.** It never did.
+  The message was assembled here out of the original's headers and text, the
+  files were left behind, and nothing said so - the forward looked complete in
+  Sent Items and arrived without the document it was about. Graph's forward is
+  built by Outlook out of attachments already in the mailbox, so that path was
+  never affected, which is the worst kind of difference: the same button, doing
+  two different things, on two mailboxes in the same window. The original is
+  now fetched whole rather than to the reading pane's 2 MB, its files are
+  re-attached, and a message that will not fit is refused by name instead of
+  sent short. Inline images - the logo a signature points at with `cid:` - are
+  left out, because forwarding somebody's letterhead as a document is not
+  carrying their attachments.
+- **The files a message carries are in the reading pane.** Until now the only
+  trace of an attachment anywhere in the plugin was the paperclip on the list
+  row: the pane never showed one, nothing ever fetched one, and there was no
+  route to the file at all. They are listed under the headers with their sizes
+  now. Clicking one saves it to your download folder and opens it; `s` saves
+  all of them; an existing file is never overwritten.
+- **A reply over IMAP is threaded again.** `In-Reply-To` was read from a field
+  the opened message never carried, so every reply from this transport went out
+  with no threading headers at all and landed beside the conversation in the
+  recipient's client rather than in it. It carries the original's own
+  `Message-ID` now, and the `References` chain the original arrived with.
+- **A folder tree no longer disappears while a folder opens.** Switching
+  folder starts a new fetch, and the mailbox had no data under the new key
+  until it answered - so it dropped out of the snapshot entirely and its tree
+  collapsed to a single Inbox row for as long as the server took, which on a
+  large mailbox is seconds. The tree is the same tree in every folder, so the
+  last answer now stands in for it, along with the mailbox's name, what it may
+  do and its agenda. The mail itself is not stood in for: those rows are the
+  folder you just left, and drawing them under the new folder's name would say
+  "this is what is in Archive" about your inbox. The list shows its
+  placeholder rows, as it already did.
 
 ### 1.8.0 — 2026-09-02
 

@@ -95,10 +95,17 @@ function accountViews(configs, snapshot, palette, fallback, busyMap, loading) {
     var alias = String(config.account || "").trim()
     if (alias === "") continue
     var data = fetched[alias] || null
+    // Marked by Service.snapshot: the mailbox's last answer for another
+    // folder, standing in until the folder that was just clicked answers.
+    var stale = !!data && data.stale === true
     var short = String(config.short || "").trim() || alias.substring(0, 3).toUpperCase()
     views.push({
       alias: alias,
       short: short,
+      // Whether `data` is this mailbox's answer for the folder that is open,
+      // or its last answer for another one, standing in while the new fetch
+      // is on its way - see Store.staleDataFor.
+      stale: stale,
       color: resolveColor(config.color, palette, c, fallback),
       config: config,
       ok: !!data && data.ok === true,
@@ -106,7 +113,9 @@ function accountViews(configs, snapshot, palette, fallback, busyMap, loading) {
       // A mailbox is busy from the moment its sign-in completes until the
       // fetch that follows lands, and on a first load before any data exists.
       // Without this it would keep reading "sign in" while already signed in.
-      busy: busy[alias] === true || (!data && loading === true),
+      // A stand-in answer is busy by definition: it is what is on screen
+      // while the folder that was asked for is being fetched.
+      busy: busy[alias] === true || stale || (!data && loading === true),
       username: data && data.username ? data.username : "",
       displayName: data && data.displayName ? data.displayName : "",
       errorCode: data && data.error ? String(data.error.code || "") : "",
@@ -117,7 +126,17 @@ function accountViews(configs, snapshot, palette, fallback, busyMap, loading) {
       // sending is a grant of its own, so a mailbox can be able to write a
       // draft and not able to send it.
       send: !!data && data.send === true,
-      mail: data && data.mail ? data.mail : [],
+      // The one part of a stand-in answer that must not be shown: these rows
+      // are the folder that was open before the click, and drawing them under
+      // the new folder's name says "this is what is in Archive" about the
+      // contents of the inbox.
+      mail: stale || !data || !data.mail ? [] : data.mail,
+      // Kept from a stand-in answer, unlike the rows: this is the mailbox's
+      // inbox count on the Graph path rather than the open folder's, so it is
+      // no more stale than the tree beside it - and a merged total that dips
+      // by six thousand for a second and comes back reads as a glitch. Over
+      // IMAP it is a floor counted from the rows that arrived, which
+      // unreadKnown already says out loud.
       unreadCount: data && data.unreadCount ? Number(data.unreadCount) : 0,
       // False when the inbox would not say, and unreadCount is only a floor
       // taken from the rows that did arrive.
@@ -126,9 +145,14 @@ function accountViews(configs, snapshot, palette, fallback, busyMap, loading) {
       // The mailbox's folder tree, and which folder the rows above came from.
       // Empty until the first fetch answers, which is why the sidebar falls
       // back to showing the inbox alone rather than nothing at all.
+      //
+      // The tree is kept from a stand-in answer - it is the same tree in every
+      // folder, and it disappearing on every folder switch is what this is
+      // for. Which folder answered is not kept: nothing should claim to be
+      // showing the folder it was showing a moment ago.
       folders: (data && data.folders) || [],
-      folderId: data && data.folderId ? String(data.folderId) : "inbox",
-      folderName: data && data.folderName ? String(data.folderName) : "",
+      folderId: !stale && data && data.folderId ? String(data.folderId) : "inbox",
+      folderName: !stale && data && data.folderName ? String(data.folderName) : "",
       // Whether Outlook's Focused/Other split means anything for this mailbox.
       // Outlook computes the split server-side and hands it over through Graph
       // alone; an IMAP mailbox has no such thing, and every row it sends says
@@ -1487,6 +1511,32 @@ function addressList(value) {
 // removed and the default takes over again - see config.py.
 function addressListText(list) {
   return (list || []).join(", ")
+}
+
+// A file size somebody can read at a glance, in the units that answer the
+// question being asked of it: whether this is a page or a presentation. One
+// decimal below ten so 1.4 MB does not round to "1 MB", none above it because
+// nobody needs 12.3.
+function fileSize(bytes) {
+  var size = Number(bytes)
+  if (!isFinite(size) || size <= 0) return ""
+  if (size < 1024) return size + " B"
+  var units = ["KB", "MB", "GB"]
+  var unit = -1
+  do {
+    size = size / 1024
+    unit++
+  } while (size >= 1024 && unit < units.length - 1)
+  var rounded = size < 10 ? Math.round(size * 10) / 10 : Math.round(size)
+  return String(rounded) + " " + units[unit]
+}
+
+// The folder a path is in, for a line about several files saved into it. Text
+// rather than filesystem: this is a label, and the path came from the helper.
+function folderOf(path) {
+  var text = String(path || "")
+  var cut = text.lastIndexOf("/")
+  return cut > 0 ? text.substring(0, cut) : text
 }
 
 function oneLine(text, maxLength) {

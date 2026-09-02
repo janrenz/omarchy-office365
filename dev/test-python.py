@@ -10,6 +10,7 @@ tokens. Both would look like the plugin working.
 
 import base64
 import contextlib
+import email.policy
 import re
 import io
 import json
@@ -17,6 +18,7 @@ import os
 import sys
 import tempfile
 import unittest
+from email.message import EmailMessage
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -25,6 +27,48 @@ import config  # noqa: E402
 import graph  # noqa: E402
 
 PLUGIN = "caseonline.omarchy.office365"
+
+
+# An INTERNALDATE the way imaplib hands one over, so `received_iso` has
+# something real to read: the arrival time is what both transports report, and
+# the Date: header is the sender's clock.
+IMAP_PREFIX = b'1 (UID 7 INTERNALDATE "01-Sep-2026 10:00:00 +0000" BODY[]<0>'
+
+
+def imap_message(subject="Rechnung", sender="Her Name <her@example.com>",
+                 to="Me <me@example.com>", cc='"Renz, Jan" <jan@x.de>',
+                 message_id="<abc@example.com>", body="the original body",
+                 attachments=(), references="", html=""):
+    """One message as it arrives over IMAP, parsed the way a fetch parses it.
+
+    A real source rather than a dict written by hand. The dict was how these
+    tests came to assert on a `messageId` key that the shipped code never put
+    there - so every reply over this transport went out unthreaded while the
+    suite stayed green.
+    """
+    import imapmail
+    note = EmailMessage(policy=email.policy.SMTP)
+    note["From"] = sender
+    note["To"] = to
+    if cc:
+        note["Cc"] = cc
+    note["Subject"] = subject
+    note["Message-ID"] = message_id
+    note["Date"] = "Tue, 01 Sep 2026 12:00:00 +0200"
+    if references:
+        note["References"] = references
+    note.set_content(body)
+    if html:
+        note.add_alternative(html, subtype="html")
+    for name, payload, content_type in attachments:
+        maintype, _, subtype = content_type.partition("/")
+        note.add_attachment(payload, maintype=maintype, subtype=subtype, filename=name)
+    return imapmail.parse_headers(note.as_bytes())
+
+
+def imap_fetch(source, cut=False):
+    """A `fetch_parsed` stand-in for one message."""
+    return lambda account, token, message_id, cap=None: (source, IMAP_PREFIX, cut)
 
 
 def layout(*entries):
@@ -1018,11 +1062,7 @@ class ImapAttachments(unittest.TestCase):
     def build(self, attachments):
         import imapmail
         sent = {}
-
-        def fake_message(account, token, message_id, want_html=False):
-            return {"subject": "Rechnung", "fromAddress": "her@example.com",
-                    "to": [], "cc": [], "messageId": "<abc@example.com>",
-                    "body": "the original", "received": ""}
+        source = imap_message(body="the original", cc="")
 
         class FakeSMTP:
             def __init__(self, *a, **k):
@@ -1043,8 +1083,8 @@ class ImapAttachments(unittest.TestCase):
             def quit(self):
                 pass
 
-        original = (imapmail.message, imapmail.smtplib.SMTP, imapmail.connect)
-        imapmail.message = fake_message
+        original = (imapmail.fetch_parsed, imapmail.smtplib.SMTP, imapmail.connect)
+        imapmail.fetch_parsed = imap_fetch(source)
         imapmail.smtplib.SMTP = FakeSMTP
         # Filing a copy in Sent Items is best effort; refusing the connection
         # here exercises the warning rather than the failure.
@@ -1053,7 +1093,7 @@ class ImapAttachments(unittest.TestCase):
             result = imapmail.compose({"username": "me@example.com"}, "token", "1",
                                       "reply", "here you go", [], False, attachments)
         finally:
-            imapmail.message, imapmail.smtplib.SMTP, imapmail.connect = original
+            imapmail.fetch_parsed, imapmail.smtplib.SMTP, imapmail.connect = original
         return result, sent.get("note")
 
     def test_a_file_becomes_a_multipart_part_with_its_name_and_type(self):
@@ -1102,9 +1142,9 @@ class ImapNewMessage(unittest.TestCase):
         sent = {}
         asked = []
 
-        def fake_message(account, token, message_id, want_html=False):
+        def fake_fetch(account, token, message_id, cap=None):
             asked.append(message_id)
-            return {}
+            return imap_message(), IMAP_PREFIX, False
 
         class FakeSMTP:
             def __init__(self, *a, **k):
@@ -1125,8 +1165,8 @@ class ImapNewMessage(unittest.TestCase):
             def quit(self):
                 pass
 
-        original = (imapmail.message, imapmail.smtplib.SMTP, imapmail.connect)
-        imapmail.message = fake_message
+        original = (imapmail.fetch_parsed, imapmail.smtplib.SMTP, imapmail.connect)
+        imapmail.fetch_parsed = fake_fetch
         imapmail.smtplib.SMTP = FakeSMTP
         # Filing the Sent copy is best effort; refusing the connection here
         # exercises the warning rather than the failure.
@@ -1138,7 +1178,7 @@ class ImapNewMessage(unittest.TestCase):
                 draft, None,
                 kwargs.pop("subject_line", "Rechnung"), kwargs.pop("cc", None))
         finally:
-            imapmail.message, imapmail.smtplib.SMTP, imapmail.connect = original
+            imapmail.fetch_parsed, imapmail.smtplib.SMTP, imapmail.connect = original
         return result, sent.get("note"), asked
 
     def test_nothing_is_fetched_because_there_is_no_original(self):
@@ -1583,15 +1623,11 @@ class ImapForward(unittest.TestCase):
     client as though they had been copied on it all along.
     """
 
-    def build(self, mode="forward", to=None):
+    def build(self, mode="forward", to=None, attachments=(), cut=False, own=None,
+              references=""):
         import imapmail
         sent = {}
-        original = {"subject": "Rechnung", "fromAddress": "her@example.com",
-                    "from": "Her Name",
-                    "to": [{"name": "Me", "address": "me@example.com"}],
-                    "cc": [{"name": "Renz, Jan", "address": "jan@x.de"}],
-                    "messageId": "<abc@example.com>", "raw": "the original body",
-                    "received": "2026-09-01T10:00:00+00:00", "isHtml": False}
+        source = imap_message(attachments=attachments, references=references)
 
         class FakeSMTP:
             def __init__(self, *a, **k):
@@ -1612,16 +1648,17 @@ class ImapForward(unittest.TestCase):
             def quit(self):
                 pass
 
-        saved = (imapmail.message, imapmail.smtplib.SMTP, imapmail.connect)
-        imapmail.message = lambda *a, **k: original
+        saved = (imapmail.fetch_parsed, imapmail.smtplib.SMTP, imapmail.connect)
+        imapmail.fetch_parsed = imap_fetch(source, cut=cut)
         imapmail.smtplib.SMTP = FakeSMTP
         imapmail.connect = lambda *a, **k: (_ for _ in ()).throw(OSError("no imap"))
         try:
-            imapmail.compose({"username": "me@example.com"}, "token", "1", mode,
-                             "FYI", to if to is not None else ["third@example.org"],
-                             False, None, "", None)
+            self.result = imapmail.compose(
+                {"username": "me@example.com"}, "token", "1", mode,
+                "FYI", to if to is not None else ["third@example.org"],
+                False, own, "", None)
         finally:
-            imapmail.message, imapmail.smtplib.SMTP, imapmail.connect = saved
+            imapmail.fetch_parsed, imapmail.smtplib.SMTP, imapmail.connect = saved
         return sent["note"]
 
     def body_of(self, note):
@@ -1658,6 +1695,155 @@ class ImapForward(unittest.TestCase):
         body = self.body_of(self.build(mode="reply", to=[]))
         self.assertNotIn("2026-09-01T10:00:00", body)
         self.assertIn("Sep 2026", body)
+
+    def test_a_reply_is_threaded_by_the_id_on_the_message_itself(self):
+        # The id used to be read off a key `message()` did not return, so this
+        # went out empty and the reply landed beside the conversation. The list
+        # row has one, but a message opened from a notification never went
+        # through a list.
+        note = self.build(mode="reply", to=[])
+        self.assertEqual(note["In-Reply-To"], "<abc@example.com>")
+
+    def test_the_reference_chain_is_the_originals_plus_the_original(self):
+        note = self.build(mode="reply", to=[], references="<one@x.de> <two@x.de>")
+        self.assertEqual(note["References"],
+                         "<one@x.de> <two@x.de> <abc@example.com>")
+
+
+class ImapForwardCarriesItsAttachments(unittest.TestCase):
+    """The files the original was carrying go with the forward.
+
+    Graph's forward is built by Outlook out of attachments already in the
+    mailbox, so that path has always carried them. Here the message is
+    assembled locally, and it was assembled out of the original's text alone:
+    the files were dropped, nothing said so, and the forward looked complete in
+    Sent Items. That is the bug these cover.
+    """
+
+    PDF = ("quote.pdf", b"%PDF-1.4 the invoice", "application/pdf")
+
+    def build(self, mode="forward", attachments=(PDF,), own=None, cut=False,
+              cap=None):
+        import imapmail
+        sent = {}
+        source = imap_message(attachments=attachments)
+
+        class FakeSMTP:
+            def __init__(self, *a, **k):
+                pass
+
+            def ehlo(self):
+                pass
+
+            def starttls(self):
+                pass
+
+            def auth(self, *a, **k):
+                pass
+
+            def send_message(self, note):
+                sent["note"] = note
+
+            def quit(self):
+                pass
+
+        saved = (imapmail.fetch_parsed, imapmail.smtplib.SMTP, imapmail.connect,
+                 imapmail.FORWARD_TOTAL_CAP)
+        imapmail.fetch_parsed = imap_fetch(source, cut=cut)
+        imapmail.smtplib.SMTP = FakeSMTP
+        imapmail.connect = lambda *a, **k: (_ for _ in ()).throw(OSError("no imap"))
+        if cap is not None:
+            imapmail.FORWARD_TOTAL_CAP = cap
+        try:
+            result = imapmail.compose({"username": "me@example.com"}, "token", "1",
+                                      mode, "FYI", ["third@example.org"], False, own)
+        finally:
+            (imapmail.fetch_parsed, imapmail.smtplib.SMTP, imapmail.connect,
+             imapmail.FORWARD_TOTAL_CAP) = saved
+        return result, sent.get("note")
+
+    def files(self, note):
+        return [(part.get_filename(), part.get_payload(decode=True))
+                for part in note.walk() if part.get_filename()]
+
+    def test_the_forward_carries_the_originals_file(self):
+        _result, note = self.build()
+        self.assertEqual(self.files(note), [("quote.pdf", b"%PDF-1.4 the invoice")])
+
+    def test_the_type_survives_rather_than_becoming_octet_stream(self):
+        _result, note = self.build()
+        part = [p for p in note.walk() if p.get_filename() == "quote.pdf"][0]
+        self.assertEqual(part.get_content_type(), "application/pdf")
+
+    def test_the_result_names_what_rode_along(self):
+        result, _note = self.build()
+        self.assertEqual(result["carried"], ["quote.pdf"])
+
+    def test_a_reply_does_not_carry_them(self):
+        # A reply goes back to somebody who already has the file.
+        result, note = self.build(mode="reply")
+        self.assertEqual(self.files(note), [])
+        self.assertEqual(result["carried"], [])
+
+    def test_a_file_of_your_own_comes_before_the_ones_being_forwarded(self):
+        _result, note = self.build(own=[("cover.txt", b"see attached")])
+        self.assertEqual([name for name, _body in self.files(note)],
+                         ["cover.txt", "quote.pdf"])
+
+    def test_the_body_is_still_the_forwarded_message(self):
+        _result, note = self.build()
+        body = note.get_body(("plain",)).get_content()
+        self.assertIn("FYI", body)
+        self.assertIn("---------- Forwarded message ----------", body)
+        self.assertIn("the original body", body)
+
+    def test_a_signature_logo_is_not_forwarded_as_a_document(self):
+        # The awkward real case: `Content-Disposition: attachment` on a part
+        # the body points at with `cid:`. Plenty of senders do exactly that,
+        # so the Content-ID has to be tested first or every forward carries
+        # somebody's logo as though it were a file.
+        import imapmail
+        note = EmailMessage(policy=email.policy.SMTP)
+        note["From"] = "her@example.com"
+        note.set_content("hello")
+        note.add_attachment(b"\x89PNG", maintype="image", subtype="png",
+                            filename="logo.png")
+        for part in note.walk():
+            if part.get_filename() == "logo.png":
+                part["Content-ID"] = "<logo@x.de>"
+        parsed = imapmail.parse_headers(note.as_bytes())
+        self.assertEqual(parsed.get_payload()[1].get_content_disposition(), "attachment")
+        self.assertEqual(imapmail.attached_files(parsed), [])
+        # And a message with nothing attached has nothing to carry.
+        self.assertEqual(imapmail.attached_files(imap_message()), [])
+
+    def test_a_part_named_only_on_its_content_type_still_counts(self):
+        # Senders leave Content-Disposition off and name the file on the type.
+        # Trusting the disposition alone loses real documents.
+        import imapmail
+        note = EmailMessage(policy=email.policy.SMTP)
+        note["From"] = "her@example.com"
+        note.set_content("see attached")
+        note.add_attachment(b"data", maintype="application", subtype="pdf",
+                            filename="named.pdf")
+        for part in note.walk():
+            if part.get_filename() == "named.pdf":
+                del part["Content-Disposition"]
+                part.set_param("name", "named.pdf")
+        files = imapmail.attached_files(imapmail.parse_headers(note.as_bytes()))
+        self.assertEqual([name for name, _body, _type in files], ["named.pdf"])
+
+    def test_a_message_the_read_cap_cut_is_refused_rather_than_sent_short(self):
+        import imapmail
+        with self.assertRaises(imapmail.TransportError) as caught:
+            self.build(cut=True)
+        self.assertEqual(caught.exception.code, "forward_too_large")
+
+    def test_a_forward_the_server_would_refuse_is_refused_here_by_weight(self):
+        import imapmail
+        with self.assertRaises(imapmail.TransportError) as caught:
+            self.build(cap=8)
+        self.assertEqual(caught.exception.code, "attachment_too_large")
 
 
 class UnifiedFolderOverImap(unittest.TestCase):
