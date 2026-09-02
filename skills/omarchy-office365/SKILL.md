@@ -91,15 +91,26 @@ being answered.
     printf '%s' '{"comment":"..."}' | python3 $HELPER compose --account FWU --id 'AAMkAD…' --mode reply --stdin
     printf '%s' '{"comment":"..."}' | python3 $HELPER compose --account FWU --id 'AAMkAD…' --mode reply --stdin --attach ~/plan.pdf
     python3 $HELPER compose --account FWU --id 'AAMkAD…' --mode reply --comment "..." --draft
+    printf '%s' '{"to":"her@example.com","cc":"","subject":"...","comment":"..."}' | python3 $HELPER compose --account FWU --mode new --stdin
     python3 $HELPER mark    --account FWU --id 'AAMkAD…' --read
     python3 $HELPER flag    --account FWU --id 'AAMkAD…' --flag
     python3 $HELPER move    --account FWU --id 'AAMkAD…' --folder archive
     python3 $HELPER delete  --account FWU --id 'AAMkAD…'
 
-What you wrote goes on **stdin** (`{"comment": …, "to": …}`): anyone on this
-machine can read another process's command line for as long as it runs.
-`--comment` and `--to` still work for running it by hand. `--demo` on `compose`
-answers as if it had been sent and sends nothing.
+What you wrote goes on **stdin** (`{"comment": …, "to": …, "cc": …, "subject":
+…}`): anyone on this machine can read another process's command line for as
+long as it runs, and a subject line is as much the user's words as the body is.
+`--comment`, `--to`, `--cc` and `--subject` still work for running it by hand.
+`--demo` on `compose` answers as if it had been sent and sends nothing.
+
+`--mode new` writes a message that answers nothing, and is the one mode that
+takes no `--id`: the subject and every recipient come from you, nothing is
+quoted, and it starts a conversation rather than joining one. It needs the same
+send permission a reply does. There is **no draft route back into the window
+for a new message** - the window's `agentDraft` contract is reply-shaped - so
+do not compose one on the user's behalf unless they asked for that exact mail
+to be sent; offer to write it in the window instead, where they can read it
+before pressing Send.
 
 `--attach` sends the reply with a file on it (Graph's /reply takes no
 attachment, so the helper builds a draft, attaches, and sends it). Read the

@@ -36,6 +36,7 @@ Column {
     ["Ctrl-f / Ctrl-b", "A screen", "Scrolling"],
     ["g / G", "To the top / to the bottom", "Scrolling"],
 
+    ["c", "Write a new message from this mailbox", "Doing"],
     ["x", "Delete the message under the cursor", "Doing"],
     ["m", "Move it to another folder", "Doing"],
     ["a", "Hand this message to your coding agent", "Doing"],

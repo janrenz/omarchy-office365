@@ -362,6 +362,39 @@ been read. A collapsed conversation wears one if any message in it does.
 Flagging is a write, so it needs the same permission marking and moving do -
 see [Sign-in and your data](#sign-in-and-your-data).
 
+### Answering it, and writing one of your own
+
+**Reply**, **Reply all** and **Forward** lead the row of buttons under a
+message, and a box opens under the message rather than over it — quoting from
+a message you can no longer see is how the wrong thing gets quoted. Shift+Enter
+or Ctrl+Enter posts it, Escape backs out, and Enter is a newline.
+
+They used to be there and be unreachable. The row keeps what fits and puts the
+rest behind a **+n more**, ordered by priority, and the priority had **Open**
+first, the formatting offers next and **Forward** somewhere after **Mark read**
+— so on the window's reading column all three answers sat behind a **+8 more**
+on any message with markup in it. Answering the message is what a message that
+has just been read is for, so the three of them come first now and **Open** —
+which leaves for Outlook — went down with the rest.
+
+**Write** in the window's top-right corner, or `c`, starts a message that
+answers nothing: **To**, **Cc**, a subject, and the reading column to write it
+in. It goes out from the mailbox you are reading, which the line above the box
+names, since a window can be carrying several. This was the plugin's biggest
+hole — writing a fresh mail meant leaving for Outlook — and it is closed on
+both transports: Graph sends the whole message in one request to `/sendMail`,
+and over IMAP it is assembled here and handed to SMTP, with a copy filed in
+Sent Items because client submission does not do that for you.
+
+A new message carries no `In-Reply-To`: it starts a conversation rather than
+joining one, and a reference to nothing would have some clients file it under a
+thread that does not exist.
+
+Sending needs permission the plugin does not ask for by default — see
+[Sign-in and your data](#sign-in-and-your-data). **Save as draft** needs less
+than sending does and is always offered, so a mailbox signed in for reading and
+writing can still write the message and finish it in Outlook.
+
 ### Sending a file with a reply
 
 **Attach** in the reply box picks a file, and what is attached shows as a chip
@@ -501,6 +534,7 @@ including inside a message, which is the one place they used to do nothing.
 | `g` / `G` | To the top / to the bottom |
 | `x` | Delete the message under the cursor |
 | `m` | Move it to another folder |
+| `c` | Write a new message from the mailbox you are reading (`c` for compose, since `r` refreshes) |
 | `a` | Hand this message to your coding agent — see below |
 | `F` | Flag it for follow-up, or clear the flag (capital, since `f` is the Focused filter) |
 | `u` / `f` | Only unread / only Focused |
@@ -735,6 +769,41 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.5.0 — 2026-09-02
+
+- **You can write a mail here now.** The plugin could answer mail and could not
+  start any: a fresh message meant leaving for Outlook, which is the one thing
+  this widget exists not to make you do. **Write** in the window's header, or
+  `c`, opens **To**, **Cc**, a subject and a body in the reading column, from
+  the mailbox you are reading. Graph hands the whole thing to `/sendMail` in
+  one request — attachments included, so it needs none of the
+  draft-attach-send dance a reply needs — and the IMAP path assembles the MIME
+  itself, sends it over SMTP and files a copy in Sent Items, since client
+  submission does not. **Save as draft** works the same way it does on a reply,
+  and needs less permission than sending, so a mailbox that may not send can
+  still write.
+- **Reply, Reply all and Forward were unreachable on a real message.** They
+  were in the reading pane all along, but the row of buttons keeps only what
+  fits and orders by priority — and the priority put **Open** first, the two
+  formatting offers next, and **Forward** after **Mark read** and **Flag**. On
+  the window's 510-pixel reading column that left all three answers behind a
+  **+8 more** on any message with markup in it, which is most mail. The three
+  of them lead now, grouped, and **Open** went down with the rest: it leaves
+  for Outlook, and the point of the buttons above it is that the answer can be
+  written here.
+- **Saving a draft also sent it.** `out()` does not exit in `graph.py` — only
+  `fail()` does — and `cmd_compose` was missing the `return` after two of its
+  answers. So on a Graph mailbox that may send, **Save as draft** created the
+  draft and then went on to send the message; and a reply with a file on it was
+  sent twice, once as the addressed draft and again through `/reply` without
+  the attachment. Both paths now stop when they are done, and there are tests
+  that let `out()` print rather than raise, which is what hid this from every
+  other test in the file.
+- **A reply with no message to reply to is refused up front.** `--id` was
+  required by the parser, which is what `--mode new` had to give up; without a
+  guard in its place a missing id would have built a request URL with an empty
+  id in it and let Outlook explain.
 
 ### 1.4.0 — 2026-09-02
 

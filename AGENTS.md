@@ -155,6 +155,12 @@ keeps using the old client id or authority.
   command ends at its `out(...)`. In `graph.py` only `fail()` exits: every
   `out(...)` needs the `return` after it, and code copied across from the chat
   plugins will happily print an answer and then carry on and make the request.
+  This is not hypothetical: `cmd_compose` was missing two of them, so **Save as
+  draft** created the draft and then sent the message, and a reply with a file
+  went out twice. The test stubs make `out()` raise, which hides exactly this —
+  `ComposeStopsWhenItIsDone` in `dev/test-python.py` lets it print instead and
+  counts the requests, and any new command with more than one `out()` wants the
+  same treatment.
 - **`compose` reaches the mailbox unless `--demo` says otherwise**, and the
   window passes `--demo` when the widget has `demo` on. That line was added
   after a dev harness whose fixture alias was `work` - a real signed-in mailbox
@@ -184,10 +190,14 @@ keeps using the old client id or authority.
   reply, measured here - and then writes that hostname into a header the
   recipient reads. `imapmail.compose` passes the mailbox's own domain. Any new
   header built from the local machine deserves the same suspicion.
-- **`compose` only replies, replies-all and forwards.** There is no "new
-  message" — writing a fresh mail means leaving for Outlook, and the
-  `--draft` path opens Outlook by design. That is the plugin's biggest hole, and
-  it is the kind of hole worth closing rather than documenting.
+- **`compose --mode new` is the one mode with no original.** The other three
+  name Graph endpoints that hang off a message, which is why `new` is not in
+  `COMPOSE_MODES`: there is no `createReply` to ask for it, so the whole message
+  is assembled and handed to `/me/sendMail` (or POSTed to `/me/messages` for a
+  draft) in one request — attachments inside it, so none of the
+  draft-attach-send dance a reply needs. `--id` is therefore optional and
+  guarded per mode instead. Over IMAP the difference is what is *left out*:
+  nothing is fetched, nothing is quoted, and there is no `In-Reply-To`.
 - **`MailList.qml` is a `ListView` on purpose**, and the comment at the top says
   why a `Repeater` over a plain array was worse. The Slack and Teams plugins have
   not made that change yet; if you are porting UI between them, port this too.

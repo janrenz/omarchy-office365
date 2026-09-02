@@ -1145,8 +1145,9 @@ def quote_original(original):
     return "On %s, %s wrote:\n%s" % (when, who, quoted_lines)
 
 
-def compose(account, token, message_id, mode, comment, to_addresses, draft, attachments=None):
-    """Reply, reply all or forward - sent over SMTP, or left as a draft.
+def compose(account, token, message_id, mode, comment, to_addresses, draft, attachments=None,
+            subject_line="", cc_addresses=None):
+    """Reply, reply all, forward, or write a message of your own.
 
     Graph builds the quoting, the recipients and the threading headers itself
     (createReply and friends); over SMTP all of that has to be assembled here.
@@ -1154,34 +1155,49 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
     at all - so a mailbox that consented to IMAP but not SMTP.Send can still
     write, and finish the message in Outlook.
 
+    `mode == "new"` is the message that answers nothing: nothing is fetched,
+    nothing is quoted, there is no In-Reply-To to thread it by, and the subject
+    is `subject_line` rather than the original's with a prefix on it.
+
     `attachments` is [(name, bytes)], already read and size-checked by the
     caller so that both transports refuse the same files for the same reasons.
     """
-    original = message(account, token, message_id, want_html=False)
+    new = mode == "new"
+    # Not fetched for a new message: there is no original, and asking the
+    # server for message id "" is a round trip that can only fail.
+    original = {} if new else message(account, token, message_id, want_html=False)
     me = username_of(account)
 
-    subject = original.get("subject") or ""
-    if mode == "forward":
-        prefix = "Fwd: "
+    copies = [address for address in (cc_addresses or []) if address]
+
+    if new:
+        subject = str(subject_line or "")
         recipients = list(to_addresses or [])
     else:
-        prefix = "Re: "
-        sender = original.get("fromAddress") or ""
-        recipients = list(to_addresses or ([sender] if sender else []))
-        if mode == "reply-all":
-            for person in (original.get("to") or []) + (original.get("cc") or []):
-                address = person.get("address") or ""
-                # Replying to everybody should not mean replying to yourself.
-                if address and address.lower() != me.lower() and address not in recipients:
-                    recipients.append(address)
+        subject = original.get("subject") or ""
+        if mode == "forward":
+            prefix = "Fwd: "
+            recipients = list(to_addresses or [])
+        else:
+            prefix = "Re: "
+            sender = original.get("fromAddress") or ""
+            recipients = list(to_addresses or ([sender] if sender else []))
+            if mode == "reply-all":
+                for person in (original.get("to") or []) + (original.get("cc") or []):
+                    address = person.get("address") or ""
+                    # Replying to everybody should not mean replying to yourself.
+                    if address and address.lower() != me.lower() and address not in recipients:
+                        recipients.append(address)
+        if not subject.lower().startswith(prefix.lower().strip()):
+            subject = prefix + subject
     if not recipients:
         raise TransportError("no_recipient", "There is nobody to send this to")
-    if not subject.lower().startswith(prefix.lower().strip()):
-        subject = prefix + subject
 
     note = EmailMessage(policy=email.policy.SMTP)
     note["From"] = me
     note["To"] = ", ".join(recipients)
+    if copies:
+        note["Cc"] = ", ".join(copies)
     note["Subject"] = subject
     note["Date"] = email.utils.formatdate(localtime=True)
     # domain= is not decoration. make_msgid() without it calls socket.getfqdn(),
@@ -1193,11 +1209,15 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
     note["Message-ID"] = email.utils.make_msgid(
         domain=(me.rpartition("@")[2] or str(account.get("smtp_host") or DEFAULT_SMTP_HOST)))
     # Threading, so the reply lands in the conversation rather than beside it.
-    original_id = str(original.get("messageId") or "").strip()
+    # A new message starts a conversation instead of joining one, so it carries
+    # neither header - inventing a reference to nothing would have some clients
+    # file it under a thread that does not exist.
+    original_id = "" if new else str(original.get("messageId") or "").strip()
     if original_id:
         note["In-Reply-To"] = original_id
         note["References"] = original_id
-    note.set_content("%s\n\n%s" % (str(comment or ""), quote_original(original)))
+    note.set_content(str(comment or "") if new
+                     else "%s\n\n%s" % (str(comment or ""), quote_original(original)))
 
     # add_attachment turns this into multipart/mixed, which is why set_content
     # has to have run first. The type is guessed from the name and falls back to
@@ -1264,7 +1284,8 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
     finally:
         close(client)
 
-    return {"ok": True, "mode": mode, "drafted": False, "id": message_id, "warning": warning}
+    return {"ok": True, "mode": mode, "drafted": False,
+            "id": "" if new else message_id, "warning": warning}
 
 
 # --------------------------------------------------------------------------

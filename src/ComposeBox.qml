@@ -5,7 +5,7 @@ import QtQuick.Dialogs
 import qs.Commons
 import qs.Ui
 
-// Writing a reply, a reply to everyone, or a forward.
+// Writing a reply, a reply to everyone, a forward - or a message of your own.
 //
 // Two ways out, because they need different permission from Microsoft. Send
 // needs Mail.Send, which a mailbox signed in for reading and writing does not
@@ -13,13 +13,30 @@ import qs.Ui
 // the draft with its quoting and recipients already right, and Outlook is
 // where it gets finished. A mailbox that cannot send is offered the draft and
 // told why, rather than shown a Send button that would come back 403.
+//
+// In `new` mode there is no message underneath and nothing is quoted, so the
+// two things a reply inherits from its original - who it goes to and what it
+// is about - are fields here instead. That is the only structural difference;
+// everything below treats the four modes alike.
 Column {
   id: root
 
   property string mode: "reply"
+  // What is being answered, for the line above the box. In `new` mode there is
+  // nothing to answer, so `subjectText` below is what the person is typing
+  // instead and this stays empty.
   property string subject: ""
-  // Recipients. Only a forward needs them; a reply already knows where it goes.
+  // Which mailbox this goes out from. Shown only in `new` mode: a reply
+  // obviously leaves from the mailbox the message arrived in, but a window
+  // carrying several mailboxes gives no other clue which one a fresh message
+  // is being written from.
+  property string fromAddress: ""
+  // Recipients. A forward and a new message need them; a reply already knows
+  // where it goes.
   property bool needsRecipient: false
+  // A subject line and a Cc field, which only a message with no original has
+  // any use for.
+  property bool needsSubject: false
   property bool canSend: false
   property bool running: false
   property string error: ""
@@ -32,6 +49,12 @@ Column {
   property color accent: Color.accent
   property string fontFamily: Style.font.family
 
+  // How tall the text box is. A reply is a strip under the message it is
+  // answering and wants no more than this; a new message has the whole column
+  // to itself, and the host says so rather than leaving somebody to write a
+  // mail through a slot.
+  property real bodyHeight: Style.space(120)
+
   // Files to go with it, as paths. The host owns the list; this draws it and
   // says what was asked for.
   property var attachments: []
@@ -43,17 +66,37 @@ Column {
   signal cancelRequested()
   signal permissionRequested()
   signal toEdited(string value)
+  signal ccEdited(string value)
+  signal subjectEdited(string value)
   signal bodyEdited(string value)
 
   spacing: Style.spacing.sm
 
   readonly property string title: {
+    if (mode === "new") return "New message"
     if (mode === "forward") return "Forward"
     if (mode === "reply-all") return "Reply to everyone"
     return "Reply"
   }
 
+  // The line above the box. A reply names what it is answering; a new message
+  // has nothing to name, so it says which mailbox it is leaving from instead.
+  readonly property string heading: {
+    if (mode === "new")
+      return root.fromAddress === "" ? root.title : (root.title + " · from " + root.fromAddress)
+    return root.subject === "" ? root.title : (root.title + " · " + root.subject)
+  }
+
   function focusBody() { body.forceActiveFocus() }
+
+  // Where the cursor should start. A reply already knows where it is going, so
+  // the body is the only thing left to write; a message that does not begins
+  // at the address, which is the field that would otherwise be filled last and
+  // by mouse.
+  function focusFirst() {
+    if (toField.visible) toField.forceActiveFocus()
+    else body.forceActiveFocus()
+  }
 
   // Text this box should open holding - a draft a coding agent wrote. Applied
   // once, on completion, rather than bound: the binding belongs to what the
@@ -93,7 +136,7 @@ Column {
 
   Text {
     width: parent.width
-    text: root.subject === "" ? root.title : (root.title + " · " + root.subject)
+    text: root.heading
     textFormat: Text.PlainText
     elide: Text.ElideRight
     color: root.fg
@@ -112,9 +155,31 @@ Column {
     onTextChanged: root.toEdited(text)
   }
 
+  // Cc and the subject, in the order an envelope reads. Both only where there
+  // is no original to have supplied them.
+  TextField {
+    id: ccField
+    width: parent.width
+    visible: root.needsSubject
+    placeholderText: "Cc — comma separated, or leave it empty"
+    foreground: root.fg
+    accent: root.accent
+    onTextChanged: root.ccEdited(text)
+  }
+
+  TextField {
+    id: subjectField
+    width: parent.width
+    visible: root.needsSubject
+    placeholderText: "Subject"
+    foreground: root.fg
+    accent: root.accent
+    onTextChanged: root.subjectEdited(text)
+  }
+
   Rectangle {
     width: parent.width
-    height: Style.space(120)
+    height: root.bodyHeight
     radius: Style.space(5)
     color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06)
     border.width: Style.space(1)
@@ -128,7 +193,9 @@ Column {
 
       TextArea {
         id: body
-        placeholderText: "Your message — the original is quoted underneath by Outlook"
+        placeholderText: root.mode === "new"
+                         ? "Your message"
+                         : "Your message — the original is quoted underneath by Outlook"
         wrapMode: TextArea.Wrap
         color: root.fg
         placeholderTextColor: root.dim
@@ -254,7 +321,7 @@ Column {
         enabled: !root.running,
         trigger: function() { attachDialog.open() } },
 
-      { text: "Save as draft", tooltip: "Builds it in Outlook and opens it there",
+      { text: "Save as draft", tooltip: "Leaves it in Drafts, to finish in Outlook",
         enabled: !root.running,
         trigger: function() { root.draftRequested() } },
 

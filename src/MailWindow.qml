@@ -223,6 +223,14 @@ Item {
   // two to disagree.
   readonly property string activeAlias: mailView.activeAlias
 
+  // The address a message being written goes out from, for the line above the
+  // box. The alias is a name this widget made up; the mailbox's own address is
+  // what tells somebody which of several mailboxes they are writing from.
+  readonly property string composeFrom: {
+    var view = mailView.viewFor(mailView.composeAlias)
+    return view && view.username !== "" ? String(view.username) : String(mailView.composeAlias)
+  }
+
   readonly property string folderTitle: {
     if (!mailView.configured) return "Office 365"
     var name = mailView.folderNameFor(activeAlias)
@@ -590,6 +598,25 @@ Item {
     mailView.composeText = String(text || "")
     if (composeBox.item && typeof composeBox.item.setBody === "function")
       composeBox.item.setBody(mailView.composeText)
+  }
+
+  // Writing a message that answers nothing. The mailbox is the one being read:
+  // this window can carry several, and a fresh message has no row to say which
+  // of them it should leave from.
+  //
+  // Any picker or half-written reply already on screen goes first - two things
+  // wanting the same column is how one of them ends up drawn under the other.
+  function startNewMessage() {
+    if (folderActing || moving) return
+    if (mailView.composing) mailView.cancelCompose()
+    var alias = root.activeAlias
+    if (alias === "" || !mailView.canWrite(alias)) return
+    // The reading pane is where it is written, so what was in it stands aside
+    // the same way it does for a meeting.
+    mailView.closePreview()
+    mailView.closeMeeting()
+    folderDrawer = false
+    mailView.startNewMessage(alias)
   }
 
   function flagAtCursor() {
@@ -1008,6 +1035,8 @@ Item {
           else if (text === "r") mailView.refresh()
           else if (text === "m") root.moveAtCursor()
           else if (text === "a") root.askAgent()
+          // c for compose, because r is Refresh here and always has been.
+          else if (text === "c") root.startNewMessage()
           // Capital, because f is already the Focused filter.
           else if (text === "F") root.flagAtCursor()
           else if (text === "?") root.showHelp = !root.showHelp
@@ -1112,6 +1141,20 @@ Item {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.spacing.sm
+
+              // Leading, because it is the only thing in this row that makes
+              // something rather than filtering what is already there. Gone on
+              // a read-only mailbox: even a draft is a write, so the button
+              // would open a box that could not post.
+              FilterPill {
+                icon: "\u{F0954}"   // nf-md-pencil_plus_outline
+                label: "Write"
+                visible: mailView.configured && mailView.canWrite(root.activeAlias)
+                fg: Color.foreground
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: root.startNewMessage()
+              }
 
               // With no sidebar there is nothing to click a folder in, and the
               // keys that reach the tree are not something to have to know
@@ -1234,8 +1277,11 @@ Item {
               ? Math.max(Style.space(300), Math.min(Style.space(440), rest * 0.42)) : rest
             readonly property real readerWidth: showReader
               ? rest - listWidth - spacing * 2 - Style.space(1) : rest
-            // Whether the list is standing aside for the reading pane.
-            readonly property bool listGivesWay: !showReader && mailView.previewMail !== null
+            // Whether the list is standing aside for the reading pane - or for
+            // a message being written, which wants the same column and in a
+            // window too narrow for two of them wants the list's.
+            readonly property bool listGivesWay: !showReader
+              && (mailView.previewMail !== null || mailView.composingNew)
 
             // The tree when there is no sidebar to put it in: the full width
             // of the window, over the mail, until a folder is picked or
@@ -1420,6 +1466,72 @@ Item {
               height: columns.height
               visible: !columns.folderPicking && (columns.showReader || columns.listGivesWay)
 
+              // One definition of the box for the two places it opens: under
+              // the message being answered, and alone in the column when there
+              // is no message because it is being written from nothing. They
+              // differ in where they sit and how tall the text is, not in what
+              // the box does, so they share it rather than repeating thirty
+              // lines of wiring twice and drifting apart.
+              Component {
+                id: composeForm
+
+                ComposeBox {
+                  width: columns.readerWidth
+                  mode: mailView.composeMode
+                  subject: mailView.composeMail ? String(mailView.composeMail.subject || "") : ""
+                  fromAddress: root.composeFrom
+                  needsRecipient: mailView.composeNeedsRecipient
+                  needsSubject: mailView.composingNew
+                  // A reply is a strip under the message it answers. A new
+                  // message has the column to itself and no reason to be
+                  // written through a slot.
+                  bodyHeight: mailView.composingNew
+                    ? Math.max(Style.space(160), columns.height - Style.space(320))
+                    : Style.space(120)
+                  canSend: mailView.canSend(mailView.composeAlias)
+                  running: mailView.composeRunning
+                  error: mailView.composeError
+                  sendBlocked: mailView.composeSendBlocked
+                  fg: Color.foreground
+                  accent: Color.accent
+                  fontFamily: Style.font.family
+                  attachments: mailView.composeAttachments
+                  onAttachRequested: function(path) { mailView.attachToCompose(path) }
+                  onDetachRequested: function(index) { mailView.detachFromCompose(index) }
+                  onToEdited: function(value) { mailView.composeTo = value }
+                  onCcEdited: function(value) { mailView.composeCc = value }
+                  onSubjectEdited: function(value) { mailView.composeSubject = value }
+                  onBodyEdited: function(value) { mailView.composeText = value }
+                  onSendRequested: mailView.submitCompose(false)
+                  onDraftRequested: mailView.submitCompose(true)
+                  onCancelRequested: mailView.cancelCompose()
+                  onPermissionRequested: {
+                    if (mailView.composeAlias !== "") mailView.startLogin(mailView.composeAlias, true)
+                  }
+                  initialBody: mailView.composeText
+                  Component.onCompleted: {
+                    if (initialBody !== "") setBody(initialBody)
+                    Qt.callLater(focusFirst)
+                  }
+                }
+              }
+
+              // A message being written from nothing, where the agenda and a
+              // meeting go: it is the thing being looked at, and the same
+              // column is the only one wide enough to write in.
+              ScrollView {
+                anchors.fill: parent
+                clip: true
+                visible: mailView.composingNew
+
+                Loader {
+                  id: newMessageBox
+                  width: columns.readerWidth
+                  active: mailView.composingNew
+                  sourceComponent: composeForm
+                }
+              }
+
               // Nothing open, so the column shows the calendar.
               //
               // It used to say "Select a message" at a column of empty space,
@@ -1432,6 +1544,7 @@ Item {
                 anchors.fill: parent
                 spacing: Style.spacing.md
                 visible: mailView.previewMail === null && !mailView.meetingOpen
+                         && !mailView.composingNew
 
                 Text {
                   width: parent.width
@@ -1600,40 +1713,15 @@ Item {
 
                 // Rebuilt for each message rather than kept and cleared, so a
                 // reply can never open holding what was typed at the last one.
+                // Only the three answering modes: a message that answers
+                // nothing has no message to sit under, and is loaded into the
+                // column above instead.
                 Loader {
                   id: composeBox
                   width: parent.width
-                  active: mailView.composing
+                  active: mailView.composing && !mailView.composingNew
                   visible: active
-                  sourceComponent: ComposeBox {
-                    width: composeBox.width
-                    mode: mailView.composeMode
-                    subject: mailView.composeMail ? String(mailView.composeMail.subject || "") : ""
-                    needsRecipient: mailView.composeNeedsRecipient
-                    canSend: !!mailView.composeMail && mailView.canSend(mailView.composeMail.alias)
-                    running: mailView.composeRunning
-                    error: mailView.composeError
-                    sendBlocked: mailView.composeSendBlocked
-                    fg: Color.foreground
-                    accent: Color.accent
-                    fontFamily: Style.font.family
-                    attachments: mailView.composeAttachments
-                    onAttachRequested: function(path) { mailView.attachToCompose(path) }
-                    onDetachRequested: function(index) { mailView.detachFromCompose(index) }
-                    onToEdited: function(value) { mailView.composeTo = value }
-                    onBodyEdited: function(value) { mailView.composeText = value }
-                    onSendRequested: mailView.submitCompose(false)
-                    onDraftRequested: mailView.submitCompose(true)
-                    onCancelRequested: mailView.cancelCompose()
-                    onPermissionRequested: {
-                      if (mailView.composeMail) mailView.startLogin(mailView.composeMail.alias, true)
-                    }
-                    initialBody: mailView.composeText
-                    Component.onCompleted: {
-                      if (initialBody !== "") setBody(initialBody)
-                      Qt.callLater(focusBody)
-                    }
-                  }
+                  sourceComponent: composeForm
                 }
               }
             }

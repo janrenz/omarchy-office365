@@ -743,14 +743,24 @@ Item {
   // draft is always offered and Send appears when the mailbox can.
   property string composeMode: ""
   property var composeMail: null
+  // Which mailbox this is going out from. Read off the message being answered
+  // for the other three modes, and its own property because a new message has
+  // no message to read it off - the window says which mailbox it is writing
+  // from, and that is the only place the alias comes from.
+  property string composeAlias: ""
   property string composeTo: ""
+  property string composeCc: ""
+  property string composeSubject: ""
   property string composeText: ""
   property bool composeRunning: false
   property string composeError: ""
   property string composeNotice: ""
 
   readonly property bool composing: composeMode !== ""
-  readonly property bool composeNeedsRecipient: composeMode === "forward"
+  // A message with no original: nothing is quoted, and who it goes to and what
+  // it is about have to be typed rather than inherited.
+  readonly property bool composingNew: composeMode === "new"
+  readonly property bool composeNeedsRecipient: composeMode === "forward" || composingNew
 
   function canSend(alias) {
     var view = viewFor(String(alias || ""))
@@ -785,7 +795,28 @@ Item {
     if (!mail) return
     composeMode = String(mode || "reply")
     composeMail = mail
+    composeAlias = String(mail.alias || "")
     composeTo = ""
+    composeCc = ""
+    composeSubject = ""
+    composeText = ""
+    composeAttachments = []
+    composeError = ""
+    composeNotice = ""
+  }
+
+  // A message that answers nothing. There is no row to hang it off, so the
+  // mailbox is named outright - and it has to be one this host is showing, or
+  // the helper would be asked to send from an account nobody picked.
+  function startNewMessage(alias) {
+    var name = String(alias || activeAlias)
+    if (name === "" || !viewFor(name)) return
+    composeMode = "new"
+    composeMail = null
+    composeAlias = name
+    composeTo = ""
+    composeCc = ""
+    composeSubject = ""
     composeText = ""
     composeAttachments = []
     composeError = ""
@@ -795,7 +826,10 @@ Item {
   function cancelCompose() {
     composeMode = ""
     composeMail = null
+    composeAlias = ""
     composeTo = ""
+    composeCc = ""
+    composeSubject = ""
     composeText = ""
     composeAttachments = []
     composeError = ""
@@ -804,11 +838,15 @@ Item {
   // asDraft: build it in Outlook and open it there, rather than sending from
   // here. Also the fallback when the mailbox may not send.
   function submitCompose(asDraft) {
-    if (!composing || composeRunning || !composeMail || pluginDir === "") return
-    var alias = String(composeMail.alias || "")
+    if (!composing || composeRunning || pluginDir === "") return
+    // Every mode but `new` is an answer to a row, and without one there is
+    // nothing to answer.
+    if (!composingNew && !composeMail) return
+    var alias = String(composeAlias || "")
     if (alias === "") return
     if (composeNeedsRecipient && composeTo.trim() === "" ) {
-      composeError = "A forward needs somebody to forward it to"
+      composeError = composingNew ? "A new message needs somebody to send it to"
+                                  : "A forward needs somebody to forward it to"
       return
     }
     composeRunning = true
@@ -816,12 +854,14 @@ Item {
     composeNotice = ""
     // What was written goes over stdin; only the ids stay on the command line.
     // Anyone on this machine can read /proc/<pid>/cmdline for as long as the
-    // call runs, and a reply is somebody's words - see composeProc below.
+    // call runs, and a reply is somebody's words - see composeProc below. The
+    // subject goes the same way: a subject line is as much somebody's words as
+    // the body is.
     var command = ["python3", helper(), "compose",
                    "--account", alias,
-                   "--id", String(composeMail.id),
                    "--mode", composeMode,
                    "--stdin"]
+    if (!composingNew) command = command.concat(["--id", String(composeMail.id)])
     if (asDraft === true) command.push("--draft")
     // A harness runs with this on. Without it, pressing Send there reaches the
     // mailbox with a real token - see graph.py's demo line in cmd_compose.
@@ -837,7 +877,9 @@ Item {
     running: false
     stdinEnabled: true
     onStarted: composeProc.write(JSON.stringify({ comment: root.composeText,
-                                                  to: root.composeTo }) + "\n")
+                                                  to: root.composeTo,
+                                                  cc: root.composeCc,
+                                                  subject: root.composeSubject }) + "\n")
     stdout: StdioCollector { id: composeOut; waitForEnd: true }
     stderr: StdioCollector { id: composeErr; waitForEnd: true }
     onExited: function(exitCode) {
@@ -856,7 +898,7 @@ Item {
       if (parsed.drafted === true) {
         // The draft is on the server with its quoting and recipients already
         // right; Outlook is where it gets finished.
-        root.openUrl(String(parsed.webLink || ""), String(root.composeMail ? root.composeMail.alias : ""))
+        root.openUrl(String(parsed.webLink || ""), String(root.composeAlias))
         root.composeNotice = parsed.warning ? String(parsed.warning) : "Draft opened in Outlook"
       } else {
         root.composeNotice = "Sent"
@@ -864,7 +906,8 @@ Item {
       root.cancelCompose()
       // A reply changes the conversation and a forward marks nothing, but both
       // are worth a fresh look - a sent reply usually means the message is
-      // dealt with.
+      // dealt with. A new message lands in Sent, which is a folder this window
+      // can be looking at.
       root.refresh()
     }
   }

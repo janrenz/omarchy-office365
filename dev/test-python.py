@@ -1088,6 +1088,95 @@ class ImapAttachments(unittest.TestCase):
         self.assertTrue(note["Message-ID"].endswith("@example.com>"), note["Message-ID"])
 
 
+class ImapNewMessage(unittest.TestCase):
+    """A message written from nothing, over SMTP.
+
+    Everything Graph would assemble - the subject, the recipients, the
+    headers - is assembled here, and for a new message that means leaving out
+    the two things a reply is defined by: the quoted original and the
+    In-Reply-To that files it under a conversation.
+    """
+
+    def build(self, draft=False, **kwargs):
+        import imapmail
+        sent = {}
+        asked = []
+
+        def fake_message(account, token, message_id, want_html=False):
+            asked.append(message_id)
+            return {}
+
+        class FakeSMTP:
+            def __init__(self, *a, **k):
+                pass
+
+            def ehlo(self):
+                pass
+
+            def starttls(self):
+                pass
+
+            def auth(self, *a, **k):
+                pass
+
+            def send_message(self, note):
+                sent["note"] = note
+
+            def quit(self):
+                pass
+
+        original = (imapmail.message, imapmail.smtplib.SMTP, imapmail.connect)
+        imapmail.message = fake_message
+        imapmail.smtplib.SMTP = FakeSMTP
+        # Filing the Sent copy is best effort; refusing the connection here
+        # exercises the warning rather than the failure.
+        imapmail.connect = lambda *a, **k: (_ for _ in ()).throw(OSError("no imap"))
+        try:
+            result = imapmail.compose(
+                {"username": "me@example.com"}, "token", "", "new",
+                kwargs.pop("comment", "here it is"), kwargs.pop("to", ["her@example.com"]),
+                draft, None,
+                kwargs.pop("subject_line", "Rechnung"), kwargs.pop("cc", None))
+        finally:
+            imapmail.message, imapmail.smtplib.SMTP, imapmail.connect = original
+        return result, sent.get("note"), asked
+
+    def test_nothing_is_fetched_because_there_is_no_original(self):
+        _result, _note, asked = self.build()
+        self.assertEqual(asked, [])
+
+    def test_the_subject_is_the_one_that_was_typed_with_no_prefix_on_it(self):
+        _result, note, _asked = self.build()
+        self.assertEqual(note["Subject"], "Rechnung")
+
+    def test_it_starts_a_conversation_rather_than_joining_one(self):
+        _result, note, _asked = self.build()
+        self.assertIsNone(note["In-Reply-To"])
+        self.assertIsNone(note["References"])
+
+    def test_the_body_is_what_was_written_and_nothing_is_quoted_under_it(self):
+        _result, note, _asked = self.build(comment="Anbei die Rechnung.")
+        self.assertEqual(note.get_body(("plain",)).get_content().strip(),
+                         "Anbei die Rechnung.")
+
+    def test_copies_become_a_cc_header_and_are_absent_when_there_are_none(self):
+        _result, note, _asked = self.build(cc=["him@example.com"])
+        self.assertEqual(note["Cc"], "him@example.com")
+        _result, bare, _asked = self.build()
+        self.assertIsNone(bare["Cc"])
+
+    def test_nobody_to_send_it_to_is_refused(self):
+        import imapmail
+        with self.assertRaises(imapmail.TransportError) as caught:
+            self.build(to=[])
+        self.assertEqual(caught.exception.code, "no_recipient")
+
+    def test_the_answer_carries_no_message_id_because_there_was_none(self):
+        result, _note, _asked = self.build()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["id"], "")
+
+
 class Compose(unittest.TestCase):
     """Replying, replying to everyone, and forwarding.
 
@@ -1212,6 +1301,186 @@ class Compose(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "send_failed")
         self.assertEqual(result["error"]["message"], "Message too large")
+
+
+class NewMessage(unittest.TestCase):
+    """A message that answers nothing.
+
+    The plugin could only ever reply, reply to everyone or forward: writing a
+    fresh mail meant leaving for Outlook. It has no original to hang off, so
+    there is no createReply to ask for one - the whole message is assembled
+    here and handed over in one request.
+    """
+
+    def run_compose(self, scopes="Mail.ReadWrite Mail.Send", write=True, responses=None,
+                    attach=None, **overrides):
+        self.calls = []
+        queue = list(responses or [(202, {})])
+
+        def http(url, method="GET", data=None, json_body=None, headers=None, timeout=20):
+            self.calls.append({"url": url, "method": method, "body": json_body})
+            return queue.pop(0) if queue else (202, {})
+
+        args = ComposeArgs()
+        args.mode = "new"
+        args.id = ""
+        args.to = "her@example.com"
+        args.subject = "Rechnung"
+        args.cc = ""
+        args.attach = attach or []
+        for key, value in overrides.items():
+            setattr(args, key, value)
+
+        patched = {
+            "read_json": lambda *a, **k: {"write": write, "scopes": scopes},
+            "access_token": lambda alias, account: ("token", account),
+            "http": http,
+            "out": lambda payload: (_ for _ in ()).throw(Emitted(payload)),
+        }
+        original = {name: getattr(graph, name) for name in patched}
+        for name, stub in patched.items():
+            setattr(graph, name, stub)
+        try:
+            graph.cmd_compose(args)
+        except Emitted as emitted:
+            return emitted.payload
+        finally:
+            for name, value in original.items():
+                setattr(graph, name, value)
+        raise AssertionError("cmd_compose emitted nothing")
+
+    def test_it_goes_out_in_one_request_carrying_the_whole_message(self):
+        result = self.run_compose()
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["drafted"])
+        self.assertEqual(len(self.calls), 1)
+        self.assertTrue(self.calls[0]["url"].endswith("/me/sendMail"))
+        body = self.calls[0]["body"]
+        self.assertTrue(body["saveToSentItems"])
+        self.assertEqual(body["message"]["subject"], "Rechnung")
+        self.assertEqual(body["message"]["toRecipients"],
+                         [{"emailAddress": {"address": "her@example.com"}}])
+
+    def test_the_body_is_text_because_that_is_what_was_typed(self):
+        # contentType HTML would take somebody's angle brackets for markup.
+        self.run_compose(comment="1 < 2 & you know it")
+        body = self.calls[0]["body"]["message"]["body"]
+        self.assertEqual(body["contentType"], "Text")
+        self.assertEqual(body["content"], "1 < 2 & you know it")
+
+    def test_copies_go_as_ccRecipients_and_are_left_out_when_there_are_none(self):
+        self.run_compose(cc="him@example.com; them@example.org")
+        self.assertEqual(
+            self.calls[0]["body"]["message"]["ccRecipients"],
+            [{"emailAddress": {"address": "him@example.com"}},
+             {"emailAddress": {"address": "them@example.org"}}])
+        self.run_compose()
+        self.assertNotIn("ccRecipients", self.calls[0]["body"]["message"])
+
+    def test_a_copy_that_is_not_an_address_is_refused_before_sending(self):
+        result = self.run_compose(cc="notanaddress")
+        self.assertEqual(result["error"]["code"], "bad_recipient")
+        self.assertIn("notanaddress", result["error"]["message"])
+        self.assertEqual(self.calls, [])
+
+    def test_nobody_to_send_it_to_is_refused_before_the_network(self):
+        result = self.run_compose(to="")
+        self.assertEqual(result["error"]["code"], "no_recipient")
+        self.assertEqual(self.calls, [])
+
+    def test_an_attachment_rides_inside_it_rather_than_through_a_draft(self):
+        # /sendMail takes the whole message, so the draft-attach-send dance a
+        # reply needs is not needed here.
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "quote.pdf")
+        with open(path, "wb") as handle:
+            handle.write(b"%PDF-1.4")
+        result = self.run_compose(attach=[path])
+        self.assertEqual(result["attached"], ["quote.pdf"])
+        self.assertEqual(len(self.calls), 1)
+        files = self.calls[0]["body"]["message"]["attachments"]
+        self.assertEqual(files[0]["@odata.type"], "#microsoft.graph.fileAttachment")
+        self.assertEqual(base64.b64decode(files[0]["contentBytes"]), b"%PDF-1.4")
+
+    def test_a_draft_is_a_post_to_the_collection_and_needs_no_send_permission(self):
+        result = self.run_compose(
+            scopes="Mail.ReadWrite", draft=True,
+            responses=[(201, {"id": "D9", "webLink": "https://outlook/d9"})])
+        self.assertTrue(result["drafted"])
+        self.assertEqual(result["webLink"], "https://outlook/d9")
+        self.assertEqual(self.calls[0]["method"], "POST")
+        self.assertTrue(self.calls[0]["url"].endswith("/me/messages"))
+
+    def test_a_mailbox_without_send_is_told_before_the_request(self):
+        result = self.run_compose(scopes="Mail.ReadWrite")
+        self.assertEqual(result["error"]["code"], "send_permission_required")
+        self.assertEqual(self.calls, [])
+
+    def test_an_answer_with_no_message_to_answer_is_refused(self):
+        # The other way round: --mode reply without --id used to build a URL
+        # with an empty id in it and let Outlook explain.
+        result = self.run_compose(mode="reply", id="")
+        self.assertEqual(result["error"]["code"], "no_id")
+        self.assertEqual(self.calls, [])
+
+
+class ComposeStopsWhenItIsDone(unittest.TestCase):
+    """out() does not exit in this helper, and cmd_compose forgot to return.
+
+    Both were real: --draft printed the draft and then went on to send the
+    message, and a reply carrying a file was sent twice - once as the addressed
+    draft and again through /reply without the attachment. The stub that raises
+    on out() hid it from every other test here, so these let out() do what it
+    really does and count the requests.
+    """
+
+    def run_compose(self, responses, **overrides):
+        self.calls = []
+        self.printed = []
+        queue = list(responses)
+
+        def http(url, method="GET", data=None, json_body=None, headers=None, timeout=20):
+            self.calls.append({"url": url, "method": method, "body": json_body})
+            return queue.pop(0) if queue else (202, {})
+
+        args = ComposeArgs()
+        args.attach = []
+        for key, value in overrides.items():
+            setattr(args, key, value)
+
+        patched = {
+            "read_json": lambda *a, **k: {"write": True,
+                                          "scopes": "Mail.ReadWrite Mail.Send"},
+            "access_token": lambda alias, account: ("token", account),
+            "http": http,
+            "out": self.printed.append,
+        }
+        original = {name: getattr(graph, name) for name in patched}
+        for name, stub in patched.items():
+            setattr(graph, name, stub)
+        try:
+            graph.cmd_compose(args)
+        finally:
+            for name, value in original.items():
+                setattr(graph, name, value)
+
+    def test_saving_a_draft_does_not_also_send_it(self):
+        self.run_compose([(201, {"id": "D1", "webLink": "https://outlook/d1"})], draft=True)
+        self.assertEqual(len(self.printed), 1)
+        self.assertTrue(self.printed[0]["drafted"])
+        self.assertEqual([call["url"].rsplit("/", 1)[-1] for call in self.calls],
+                         ["createReply"])
+
+    def test_a_reply_with_a_file_is_sent_once(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "quote.pdf")
+        with open(path, "wb") as handle:
+            handle.write(b"%PDF-1.4")
+        self.run_compose([(201, {"id": "D1"}), (201, {}), (202, {})], attach=[path])
+        self.assertEqual(len(self.printed), 1)
+        self.assertEqual([call["url"].rsplit("/", 1)[-1] for call in self.calls],
+                         ["createReply", "attachments", "send"])
+        self.assertFalse(any(call["url"].endswith("/reply") for call in self.calls))
 
 
 class Recipients(unittest.TestCase):

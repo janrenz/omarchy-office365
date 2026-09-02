@@ -2742,6 +2742,15 @@ COMPOSE_MODES = {
     "forward": ("forward", "createForward"),
 }
 
+# A message that answers nothing. It is deliberately not in COMPOSE_MODES:
+# those three name Graph endpoints that hang off an original message, and this
+# one has no original - which is also why the subject and every recipient have
+# to come from the person writing it rather than from a message being quoted.
+NEW_MODE = "new"
+
+# Everything `compose --mode` will take.
+COMPOSE_CHOICES = sorted(list(COMPOSE_MODES) + [NEW_MODE])
+
 
 def recipient_list(value):
     """Addresses typed into a To field, as Graph recipients.
@@ -2761,6 +2770,35 @@ def recipient_list(value):
             continue
         addresses.append({"emailAddress": {"address": part}})
     return addresses, bad
+
+
+def new_message(subject, comment, recipients, copies, files):
+    """A whole message as one Graph object, ready to draft or to send.
+
+    Plain text, not HTML: what the reply box collects is text, and handing
+    Graph `contentType: HTML` would mean a person's angle brackets arriving as
+    markup - or being swallowed. Attachments ride along inside it, which is why
+    a new message needs none of the draft-then-attach-then-send dance a reply
+    does: /sendMail carries the whole thing in one request, while /reply takes
+    a comment and nothing else.
+    """
+    message = {
+        "subject": subject,
+        "body": {"contentType": "Text", "content": comment},
+        "toRecipients": recipients,
+    }
+    if copies:
+        message["ccRecipients"] = copies
+    if files:
+        message["attachments"] = [
+            {
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": name,
+                "contentBytes": base64.b64encode(body).decode("ascii"),
+            }
+            for name, body in files
+        ]
+    return message
 
 
 def read_stdin_json():
@@ -2784,34 +2822,51 @@ def read_stdin_json():
 
 
 def cmd_compose(args):
-    """Reply, reply all or forward - sent, or left as a draft in Outlook.
+    """Reply, reply all, forward, or write a message of your own.
 
     Sending needs Mail.Send, which a mailbox signed in for reading and writing
     does not have. Rather than refuse, --draft asks Graph to build the draft
     (with its quoting and recipients already right) and returns its webLink, so
     the message can be finished in Outlook. That path needs only Mail.ReadWrite.
+
+    `--mode new` is the one that answers nothing: no --id, and the subject and
+    recipients come from the person instead of from an original.
     """
+    new = args.mode == NEW_MODE
     mode = COMPOSE_MODES.get(args.mode)
-    if not mode:
+    if not mode and not new:
         fail("bad_mode", "Unknown compose mode: %s" % args.mode)
-    send_path, draft_path = mode
+    send_path, draft_path = mode if mode else ("", "")
 
     # What was written, and who it goes to, off stdin when the window asks for
     # that - see read_stdin_json. --comment and --to stay for running this by
     # hand. Read first and checked exactly as before: the address guard and the
     # attachment reads below still happen before anything reaches the network.
+    #
+    # The subject and the copies come the same way. A subject line is as much
+    # somebody's words as the body is, and argv is readable by anyone on this
+    # machine - see read_stdin_json.
     comment = str(args.comment or "")
     to = str(args.to or "")
+    cc = str(getattr(args, "cc", "") or "")
+    subject = str(getattr(args, "subject", "") or "")
     if getattr(args, "stdin", False):
         payload = read_stdin_json()
         comment = str(payload.get("comment") or comment)
         to = str(payload.get("to") or to)
+        cc = str(payload.get("cc") or cc)
+        subject = str(payload.get("subject") or subject)
 
     recipients, bad = recipient_list(to)
-    if bad:
-        fail("bad_recipient", "Not an email address: %s" % ", ".join(bad[:3]))
+    copies, bad_copies = recipient_list(cc)
+    if bad or bad_copies:
+        fail("bad_recipient", "Not an email address: %s" % ", ".join((bad + bad_copies)[:3]))
     if args.mode == "forward" and not recipients:
         fail("no_recipient", "A forward needs somebody to forward it to")
+    if new and not recipients:
+        fail("no_recipient", "A new message needs somebody to send it to")
+    if not new and not str(args.id or "").strip():
+        fail("no_id", "A %s needs the message it is answering" % args.mode)
 
     # Read before the account is touched: a file that cannot be attached is
     # worth saying so about before a token is refreshed for it.
@@ -2827,6 +2882,7 @@ def cmd_compose(args):
         # teams.py's, where it does - so the return is what actually stops this.
         out({"ok": True, "sent": not bool(args.draft), "drafted": bool(args.draft),
              "comment": bool(comment), "recipients": len(recipients),
+             "copies": len(copies), "subject": subject,
              "attachments": len(files), "demo": True})
         return
 
@@ -2842,6 +2898,7 @@ def cmd_compose(args):
 
     if transport_of(account) == TRANSPORT_IMAP:
         addresses = [entry["emailAddress"]["address"] for entry in recipients]
+        copy_addresses = [entry["emailAddress"]["address"] for entry in copies]
         if not args.draft and not can_send(account):
             # Said before the request rather than after SMTP refuses the
             # sign-in, so the window can offer the draft instead.
@@ -2849,11 +2906,43 @@ def cmd_compose(args):
                  "This mailbox consented to IMAP but not to SMTP.Send. Save this as a draft, "
                  "or sign in again to allow sending.")
         out(imap_run(need_imap().compose, account, token, args.id, args.mode,
-                     comment, addresses, bool(args.draft), files))
+                     comment, addresses, bool(args.draft), files,
+                     subject, copy_addresses))
+        return
+
+    headers = {"Authorization": "Bearer " + token}
+
+    if new:
+        message = new_message(subject, comment, recipients, copies, files)
+        if args.draft:
+            # POST to the collection, which is what makes a draft: there is no
+            # createReply to ask for one. Needs only Mail.ReadWrite, so a
+            # mailbox that may not send can still write and finish in Outlook.
+            status, payload = http(GRAPH + "/me/messages", method="POST",
+                                   json_body=message, headers=headers)
+            if status not in (200, 201):
+                fail("draft_failed", graph_error(payload, "Could not create the draft"))
+            out({"ok": True, "mode": args.mode, "drafted": True,
+                 "id": str((payload or {}).get("id") or ""),
+                 "webLink": (payload or {}).get("webLink", ""), "warning": ""})
+            return
+        if not can_send(account):
+            fail("send_permission_required",
+                 "This mailbox is signed in without permission to send. Sign in again to allow it, "
+                 "or save this as a draft and finish it in Outlook.")
+        status, payload = http(GRAPH + "/me/sendMail", method="POST",
+                               json_body={"message": message, "saveToSentItems": True},
+                               headers=headers)
+        if status == 403:
+            fail("send_permission_required",
+                 graph_error(payload, "This mailbox is not allowed to send. Sign in again to allow it."))
+        if status not in (200, 202, 204):
+            fail("send_failed", graph_error(payload, "Could not send this message"))
+        out({"ok": True, "mode": args.mode, "drafted": False, "id": "",
+             "attached": [name for name, _ in files]})
         return
 
     base = GRAPH + "/me/messages/" + urllib.parse.quote(args.id, safe="")
-    headers = {"Authorization": "Bearer " + token}
 
     if args.draft:
         status, payload = http(base + "/" + draft_path, method="POST",
@@ -2875,6 +2964,10 @@ def cmd_compose(args):
                 warning = graph_error(patch_payload, "Could not add the recipients to the draft")
         out({"ok": True, "mode": args.mode, "drafted": True, "id": draft_id,
              "webLink": (payload or {}).get("webLink", ""), "warning": warning})
+        # `out()` does not exit in this helper. Without this return the draft
+        # was printed and then sent as well, which is two messages for one
+        # press of a button that says "save".
+        return
 
     if not can_send(account):
         # Said before the request rather than after a 403, so the window can
@@ -2916,6 +3009,9 @@ def cmd_compose(args):
             fail("send_failed", graph_error(payload, "Could not send this message"))
         out({"ok": True, "mode": args.mode, "drafted": False, "id": args.id,
              "attached": [name for name, _ in files]})
+        # As above: the draft has already gone out, and falling through to
+        # /reply sent the whole thing a second time without the attachment.
+        return
 
     body = {"comment": comment}
     if recipients:
@@ -3062,13 +3158,15 @@ def main():
                       help="destination folder id from `folders`, or a well-known name such as archive")
     move.set_defaults(func=cmd_move)
 
-    compose = with_account("compose", "reply, reply all or forward a message")
-    compose.add_argument("--id", required=True, help="message id from a fetch")
-    compose.add_argument("--mode", required=True, choices=sorted(COMPOSE_MODES), help="what to write")
+    compose = with_account("compose", "reply, reply all, forward, or write a new message")
+    compose.add_argument("--id", default="", help="message id from a fetch; not used by --mode new")
+    compose.add_argument("--mode", required=True, choices=COMPOSE_CHOICES, help="what to write")
     compose.add_argument("--comment", default="", help="what to say above the quoted message")
     compose.add_argument("--stdin", action="store_true",
-                         help='read {"comment": "...", "to": "..."} from stdin, keeping the words out of argv')
-    compose.add_argument("--to", default="", help="recipients for a forward, comma separated")
+                         help='read {"comment", "to", "cc", "subject"} from stdin, keeping the words out of argv')
+    compose.add_argument("--to", default="", help="recipients for a forward or a new message, comma separated")
+    compose.add_argument("--cc", default="", help="carbon copies for a new message, comma separated")
+    compose.add_argument("--subject", default="", help="subject line for a new message")
     compose.add_argument("--attach", action="append", default=[],
                          help="a file to attach; repeat for more")
     compose.add_argument("--demo", action="store_true",

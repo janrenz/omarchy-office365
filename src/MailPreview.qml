@@ -340,8 +340,17 @@ Column {
   // makes this usable in the bar's popup as well as in the window.
   //
   // Order is priority: what is listed first is what survives on one line.
-  // Open leads because it is the one action that is always available, and
-  // Delete trails because reaching past a "+3 more" for it is a feature.
+  //
+  // The three ways of answering lead, because they are what a message that has
+  // just been read is for. They did not: Open led, the formatting offers came
+  // next, and Forward sat behind Mark read and Flag - which on the window's
+  // 510-pixel reading column meant Reply, Reply all and Forward were all
+  // behind "+8 more" on any message with markup in it. Open has moved down
+  // with the rest: it leaves for Outlook, and the point of the buttons above
+  // it is that the answer can be written here.
+  //
+  // Delete still trails, because reaching past a "+3 more" for it is a
+  // feature.
   ActionBar {
     width: parent.width
     fg: root.fg
@@ -351,6 +360,20 @@ Column {
     fontSize: Style.font.caption
 
     actions: [
+      // Writing needs the same Mail.ReadWrite that marking does - even a draft
+      // is a write - so these are absent on a read-only mailbox rather than
+      // present and failing. Forward keeps company with the other two: it is
+      // the third answer to a message, not a filing action.
+      { text: "Reply", visible: root.canCompose && root.canWrite,
+        enabled: !root.actionRunning,
+        trigger: function() { root.replyRequested() } },
+      { text: "Reply all", visible: root.canCompose && root.canWrite,
+        enabled: !root.actionRunning,
+        trigger: function() { root.replyAllRequested() } },
+      { text: "Forward", visible: root.canCompose && root.canWrite,
+        enabled: !root.actionRunning,
+        trigger: function() { root.forwardRequested() } },
+
       { text: "Open", trigger: function() { root.openRequested() } },
 
       // Reading a message as its sender laid it out is a choice made per
@@ -397,16 +420,6 @@ Column {
         enabled: !root.loading,
         trigger: function() { root.loadImagesRequested() } },
 
-      // Writing needs the same Mail.ReadWrite that marking does - even a draft
-      // is a write - so these are absent on a read-only mailbox rather than
-      // present and failing.
-      { text: "Reply", visible: root.canCompose && root.canWrite,
-        enabled: !root.actionRunning,
-        trigger: function() { root.replyRequested() } },
-      { text: "Reply all", visible: root.canCompose && root.canWrite,
-        enabled: !root.actionRunning,
-        trigger: function() { root.replyAllRequested() } },
-
       // Changing mail needs permission this plugin does not ask for by
       // default, so these appear only once a mailbox has granted it.
       { text: root.mail && root.mail.read ? "Mark unread" : "Mark read",
@@ -424,12 +437,9 @@ Column {
         danger: !!(root.mail && root.mail.flagged),
         trigger: function() { root.flagRequested(!(root.mail && root.mail.flagged)) } },
 
-      { text: "Forward", visible: root.canCompose && root.canWrite,
-        enabled: !root.actionRunning,
-        trigger: function() { root.forwardRequested() } },
-
       // Reading does not need write access and neither does asking about it,
-      // so this one keeps company with Open rather than with Reply.
+      // which is why this one is not gated on canWrite the way the three
+      // answers above are.
       { text: "Ask agent", tooltip: "Open your coding agent on this message",
         visible: root.canAgent,
         trigger: function() { root.agentRequested() } },
