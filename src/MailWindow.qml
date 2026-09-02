@@ -1202,7 +1202,10 @@ Item {
               // a read-only mailbox: even a draft is a write, so the button
               // would open a box that could not post.
               FilterPill {
-                icon: "\u{F0954}"   // nf-md-pencil_plus_outline
+                // A word, like the pills beside it. An icon here replaces the
+                // label rather than joining it - see FilterPill - and the one
+                // this had was a clock: F0954 is nf-md-clock_time_two, not the
+                // pencil the comment claimed. Checked by drawing it.
                 label: "Write"
                 visible: mailView.configured && mailView.canWrite(root.activeAlias)
                 fg: Color.foreground

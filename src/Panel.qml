@@ -384,7 +384,9 @@ Panel {
             // message to act on. It goes to the window like the rest: there is
             // nowhere in a dropdown to type a subject and a body.
             PanelActionButton {
-              iconText: "\u{F0954}"
+              // nf-md-pencil. Verified by rendering it: F0954, which this
+              // first had, is a clock.
+              iconText: "\u{F03EB}"
               tooltipText: "Write a new message — opens the window"
               foreground: root.fg
               visible: !!root.service && root.service.configured && !root.showSettings

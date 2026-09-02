@@ -805,6 +805,16 @@ journalctl --user -f | grep -i office365
 
 ## Changelog
 
+### 1.7.1 — 2026-09-02
+
+- **The Write button was a clock.** `F0954` is `nf-md-clock_time_two`, not the
+  pencil the comment beside it claimed, and an icon on one of the window's
+  header pills replaces its label rather than joining it — so "Write" in the
+  window was a lone clock face. The window's pill is a word now, like the
+  Folders, Unread and Threads pills beside it; the dropdown's icon-only button
+  is `F03EB`, which is a pencil. Both checked by drawing them rather than by
+  reading a table.
+
 ### 1.7.0 — 2026-09-02
 
 - **The dropdown and the window offer the same actions.** The dropdown's
