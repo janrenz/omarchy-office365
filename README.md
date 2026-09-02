@@ -817,6 +817,22 @@ journalctl --user -f | grep -i office365
 
 ## Changelog
 
+### 1.7.3 — 2026-09-02
+
+- **Clicking one mailbox's inbox showed the other mailbox's mail.** With two
+  mailboxes both sitting on their inboxes it changed nothing visible at all:
+  the merged row stayed lit, the title still said "all mailboxes", and the list
+  still held every mailbox's mail — so whichever mailbox is busier was what you
+  saw. The merged state was worked out from which folders were selected and
+  nothing else, so two mailboxes on the same folder read as "all mailboxes"
+  whether or not anybody had asked for that. It is a state you choose from the
+  merged rows now, not one the window falls into, and the list follows the
+  mailbox you picked. The pills and the folder tree both answer "which
+  mailbox", so they defer to whichever you used last — filtered to one mailbox,
+  clicking another's inbox shows that other one rather than staying put. The
+  agenda is deliberately left alone: picking a mail folder says nothing about
+  whose meetings to draw, and the pills still speak for the calendar.
+
 ### 1.7.2 — 2026-09-02
 
 - **Black text on a dark theme.** A formatted message was often unreadable

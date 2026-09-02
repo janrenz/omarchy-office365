@@ -121,8 +121,8 @@ Item {
   // the end, and a spinner at the bottom of it would never stop.
   readonly property bool moreToLoad: {
     if (wantedMails >= mailCeiling) return false
-    for (var i = 0; i < filteredViews.length; i++)
-      if ((filteredViews[i].mail || []).length >= wantedMails) return true
+    for (var i = 0; i < mailViews.length; i++)
+      if ((mailViews[i].mail || []).length >= wantedMails) return true
     return false
   }
 
@@ -323,6 +323,10 @@ Item {
 
   function toggleFilter(alias) {
     filterAlias = filterAlias === alias ? "" : alias
+    // The pill is now the newer answer to "which mailbox", so the folder tree's
+    // is spent. Without this, a pill clicked after a folder was picked would
+    // leave the list on the folder's mailbox and the lit pill saying otherwise.
+    pickedAlias = ""
   }
 
   function clearFilters() {
@@ -677,22 +681,57 @@ Item {
     return kept
   }
 
+  // Whose mail the list is showing: whichever mailbox was named most recently.
+  //
+  // Two controls answer the same question. The pills mean "only this
+  // mailbox's mail and meetings", and picking a folder under one mailbox in
+  // the tree is the same claim about the same thing. So the newer one wins -
+  // picking a folder here, toggling a pill there, which clears pickedAlias for
+  // exactly this reason - rather than one of them quietly losing. Whichever
+  // way round they are asked, clicking a mailbox's inbox shows that mailbox,
+  // which is the whole complaint this is here to answer.
+  //
+  // Empty means every mailbox: what the merged rows select, and the state the
+  // window opens in.
+  readonly property string mailAlias: pickedAlias !== "" ? pickedAlias : filterAlias
+
+  // Mail only, and off `views` rather than filteredViews - twice deliberate.
+  //
+  // Not filteredViews because that one is already narrowed to filterAlias, and
+  // narrowing it again by a mailbox the pill had filtered out leaves an empty
+  // list: pill on FWU, then FWU's own Archive picked in the tree, and nothing
+  // at all on screen. mailAlias is the single answer to "which mailbox"
+  // already, so this asks `views` once and is done.
+  //
+  // Mail only because the agenda and the timeline read filteredViews, and
+  // picking a mail folder says nothing about whose meetings to draw -
+  // narrowing there would empty the calendar of the other mailbox's day
+  // because somebody opened this mailbox's inbox. The pills still speak for
+  // the calendar; that is what they have always meant.
+  readonly property var mailViews: {
+    if (mailAlias === "") return views
+    var kept = []
+    for (var i = 0; i < views.length; i++)
+      if (String(views[i].alias) === mailAlias) kept.push(views[i])
+    return kept
+  }
+
   // Whether Focused/Other means anything for what is on screen. Any rather
   // than every: with a Graph mailbox and an IMAP one both showing, the filter
   // still does something to half the list - and unsplitMailboxes names the
   // half it cannot speak for, so nobody is left wondering why mail they did
   // not ask for is still there.
   readonly property bool canFocus: {
-    for (var i = 0; i < filteredViews.length; i++)
-      if (filteredViews[i].canFocus === true) return true
+    for (var i = 0; i < mailViews.length; i++)
+      if (mailViews[i].canFocus === true) return true
     return false
   }
 
   readonly property var unsplitMailboxes: {
     var out = []
-    for (var i = 0; i < filteredViews.length; i++)
-      if (filteredViews[i].canFocus !== true)
-        out.push(String(filteredViews[i].short || filteredViews[i].alias))
+    for (var i = 0; i < mailViews.length; i++)
+      if (mailViews[i].canFocus !== true)
+        out.push(String(mailViews[i].short || mailViews[i].alias))
     return out
   }
 
@@ -963,7 +1002,14 @@ Item {
   // Empty with a single mailbox, deliberately: "every mailbox" and "that
   // mailbox" are the same thing there, and a non-empty answer would make the
   // tree stop lighting the folder that is open.
-  readonly property string unifiedFolder: aliases.length > 1
+  //
+  // Empty, too, while one mailbox is the one being read. "All mailboxes" is a
+  // state somebody chooses from the merged rows - not one the window falls
+  // into because every mailbox happens to be sitting on the same folder.
+  // Without that, clicking Inbox under a mailbox already on its inbox changed
+  // nothing anyone could see: the merged row stayed lit, the title still said
+  // all mailboxes, and the list still held every mailbox's mail.
+  readonly property string unifiedFolder: aliases.length > 1 && pickedAlias === ""
     ? Model.unifiedFolder(aliases, selectedFolders) : ""
 
   readonly property var folderRows: Model.folderRows(views, selectedFolders,
@@ -1032,7 +1078,7 @@ Item {
   // flat list takes the newest `mails` of these; the threaded one groups all
   // of them and takes the newest `mails` conversations, which is why the cap
   // cannot be applied before the grouping.
-  readonly property var mailAll: Model.mergeMailAll(filteredViews, unreadOnly, listState, focusedOnly)
+  readonly property var mailAll: Model.mergeMailAll(mailViews, unreadOnly, listState, focusedOnly)
 
   // Empty unless the list is threaded, so nothing is grouped for a host that
   // will not draw it - the bar dropdown has no room to expand a conversation.
