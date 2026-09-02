@@ -287,9 +287,15 @@ Item {
   // ---- keyboard -----------------------------------------------------------
   //
   // A focus ladder, the same one the Teams window uses so what is learned in
-  // one works in the other: folders -> mail -> message. h and l step between
-  // the rungs, Escape walks back out one at a time, and j/k always mean down
-  // and up in whatever has focus.
+  // one works in the other: calendar -> folders -> mail -> message. h and l
+  // step between the rungs, Escape walks back out one at a time, and j/k
+  // always mean down and up in whatever has focus.
+  //
+  // The calendar is a rung rather than a fourth column, because it is not a
+  // column: it is what the reading pane shows when it is showing nothing else.
+  // Asking for it stands a message aside without closing it, and on a window
+  // too narrow for a reading pane at all it takes the list's place the way a
+  // message does - which is the only route to it there, and there was none.
   //
   // The message used to be the one place j and k did nothing: it was not a
   // cursor target at all, so a long mail could only be scrolled with the mouse.
@@ -450,6 +456,7 @@ Item {
     // The picker is over everything else, so it is what the keys reach.
     if (folderAction === "move") return folderOverlay.item ? folderOverlay.item.scroller : null
     if (moving) return movePicker.item ? movePicker.item.scroller : null
+    if (pane === "agenda") return agendaScroll
     if (pane === "message" && mailView.previewMail !== null) return readerScroll
     // folderPicking rather than folderDrawer: a tree that was asked for and
     // had room to become a sidebar is drawn by the sidebar's copy, and the
@@ -483,6 +490,13 @@ Item {
   // one that is.
   readonly property var folderPane: columns.showSidebar ? folders : drawerFolders
 
+  // The calendar, from wherever you are. On a wide window this is a step
+  // sideways - the agenda is in the reading pane whenever no message is - and
+  // the message it stands in front of stays open, so Escape brings it back.
+  function toggleAgenda() {
+    focusPane(pane === "agenda" ? "mail" : "agenda")
+  }
+
   function toggleFolderDrawer() {
     if (folderDrawer) {
       folderDrawer = false
@@ -513,6 +527,9 @@ Item {
     if (folderActing) return
     if (moving) { if (movePicker.item) movePicker.item.tree.moveCursor(step); return }
     if (pane === "folders") { folderPane.moveCursor(step); return }
+    // The agenda has no cursor to walk - an event is not a row - so down and
+    // up scroll it, the way they do in a message.
+    if (pane === "agenda") { scrollBy(agendaScroll, step * lineStep); return }
     // In the message, down and up scroll it rather than moving off it.
     if (pane === "message" && mailView.previewMail !== null) {
       scrollBy(readerScroll, step * lineStep)
@@ -535,6 +552,9 @@ Item {
     if (folderActing) return
     if (moving) { if (movePicker.item) movePicker.item.tree.activateCursor(); return }
     if (pane === "folders") { folderPane.activateCursor(); return }
+    // Nothing sits under a cursor here, and the list behind the calendar is
+    // not what Return was pressed at.
+    if (pane === "agenda") return
     if (pane === "message") return
     var rows = mailView.mail
     if (mailCursor >= 0 && mailCursor < rows.length) {
@@ -710,6 +730,15 @@ Item {
     // A tree that was asked for is the layer Escape takes back first, whether
     // it ended up over the list or beside it.
     if (folderDrawer) { folderDrawer = false; pane = "mail"; return }
+    // The calendar, and whatever was opened out of it, before the mail behind
+    // it. A message left open while the agenda was asked for is not what
+    // Escape was pressed at, and the rungs below would close it unseen.
+    if (pane === "agenda") {
+      if (mailView.meetingOpen) { mailView.closeMeeting(); return }
+      if (mailView.selectedEvent) { mailView.selectEvent(null); return }
+      pane = "mail"
+      return
+    }
     // Back to the list with the message still open. Escape again closes it -
     // one rung at a time, rather than shutting the message outright.
     if (pane === "message") { pane = "mail"; return }
@@ -1054,11 +1083,15 @@ Item {
           if (dy !== 0) { root.moveCursor(dy); return }
           // Nothing to step between: the picker is the whole window.
           if (root.moving) return
-          // Left steps back towards the folders, right steps in towards the
-          // message, one rung per press.
-          if (dx < 0) root.focusPane(root.pane === "message" ? "mail" : "folders")
-          else if (dx > 0) {
-            if (root.pane === "folders") root.focusPane("mail")
+          // Left steps back towards the folders and the calendar beyond them,
+          // right steps in towards the message, one rung per press.
+          if (dx < 0) {
+            if (root.pane === "message") root.focusPane("mail")
+            else if (root.pane === "mail") root.focusPane("folders")
+            else if (root.pane === "folders") root.focusPane("agenda")
+          } else if (dx > 0) {
+            if (root.pane === "agenda") root.focusPane("folders")
+            else if (root.pane === "folders") root.focusPane("mail")
             else if (mailView.previewMail !== null) root.focusPane("message")
           }
         }
@@ -1099,6 +1132,9 @@ Item {
           else if (text === "a") root.askAgent()
           // c for compose, because r is Refresh here and always has been.
           else if (text === "c") root.startNewMessage()
+          // Capital, because c is already Write. One key from anywhere, rather
+          // than walking out to the far rung of the ladder with h.
+          else if (text === "C") root.toggleAgenda()
           // Capital, because f is already the Focused filter.
           else if (text === "F") root.flagAtCursor()
           else if (text === "?") root.showHelp = !root.showHelp
@@ -1114,7 +1150,15 @@ Item {
           // ---- header ----
           Item {
             width: parent.width
-            height: header.implicitHeight
+            // The taller of the two rows, not the title's alone. The pills are
+            // the row that grows - one more control, or an unread count that
+            // has reached five digits - and once they no longer fit beside
+            // even an elided title, `header` is anchored to a right edge left
+            // of its own left one: its implicitHeight goes to zero, and this
+            // Item took the title, every pill and the whole header off the
+            // window with it. Nothing is printed when that happens, which is
+            // most of why it took a while to find.
+            height: Math.max(header.implicitHeight, headerActions.implicitHeight)
 
             Row {
               id: header
@@ -1235,6 +1279,22 @@ Item {
                 accent: Color.accent
                 fontFamily: Style.font.family
                 onClicked: root.toggleFolderDrawer()
+              }
+
+              // With no reading pane there is no agenda on screen and nothing
+              // to click in it, and a calendar that cannot be reached at all is
+              // worse than one that borrows the mail's column while it is being
+              // read. Keyed on the width, like Folders above, because this is
+              // also the control that puts it away again.
+              FilterPill {
+                icon: "\u{F00ED}"   // nf-md-calendar
+                label: "Calendar"    // the name of a pill that shows a glyph
+                visible: !columns.showReader && mailView.configured
+                selected: root.pane === "agenda"
+                fg: Color.foreground
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: root.toggleAgenda()
               }
 
               FilterPill {
@@ -1368,7 +1428,13 @@ Item {
             // a message being written, which wants the same column and in a
             // window too narrow for two of them wants the list's.
             readonly property bool listGivesWay: !showReader
-              && (mailView.previewMail !== null || mailView.composingNew)
+              && (mailView.previewMail !== null || mailView.composingNew
+                  || root.pane === "agenda")
+            // The calendar asked for by name. It goes where the reading pane's
+            // content goes, so it stands in front of a message rather than
+            // beside it - and on a window with no reading pane the line above
+            // hands it the list's column.
+            readonly property bool agendaFront: root.pane === "agenda"
 
             // The tree when there is no sidebar to put it in: the full width
             // of the window, over the mail, until a folder is picked or
@@ -1631,8 +1697,8 @@ Item {
               Column {
                 anchors.fill: parent
                 spacing: Style.spacing.md
-                visible: mailView.previewMail === null && !mailView.meetingOpen
-                         && !mailView.composingNew
+                visible: !mailView.meetingOpen && !mailView.composingNew
+                         && (columns.agendaFront || mailView.previewMail === null)
 
                 Text {
                   width: parent.width
@@ -1652,6 +1718,16 @@ Item {
                   width: parent.width
                   height: parent.height - y
                   clip: true
+                  // Said outright, because a ScrollView works its content size
+                  // out from a single child and this one has two - the grid and
+                  // the list, whichever the setting asks for. With two it
+                  // measured nothing, and an agenda longer than the pane could
+                  // not be scrolled at all: not with j and k, not with the
+                  // wheel. Never less than the pane itself, so a short agenda
+                  // does not become scrollable by a pixel or two.
+                  contentWidth: width
+                  contentHeight: Math.max(height, grid ? agendaGrid.implicitHeight
+                                                       : agendaRows.implicitHeight)
 
                   // The drawn grid where the setting asks for it and the column
                   // is wide enough to draw one - a three-day grid in 200 pixels
@@ -1661,6 +1737,7 @@ Item {
                                                && columns.readerWidth >= Style.space(520)
 
                   AgendaTimeline {
+                    id: agendaGrid
                     width: agendaScroll.width
                     visible: agendaScroll.grid
                     grid: mailView.timeline
@@ -1678,6 +1755,7 @@ Item {
                   }
 
                   AgendaList {
+                    id: agendaRows
                     width: agendaScroll.width
                     visible: !agendaScroll.grid
                     agenda: mailView.agenda
@@ -1731,7 +1809,7 @@ Item {
               Column {
                 anchors.fill: parent
                 spacing: Style.spacing.md
-                visible: mailView.previewMail !== null
+                visible: mailView.previewMail !== null && !columns.agendaFront
 
               ScrollView {
                 id: readerScroll

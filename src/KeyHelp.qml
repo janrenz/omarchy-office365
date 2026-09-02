@@ -26,10 +26,11 @@ Column {
   readonly property var bindings: [
     ["j / k", "Down and up, in whatever has focus", "Moving"],
     ["Enter", "Open the message, and follow it in", "Moving"],
-    ["h", "Back a step: message to list, list to folders", "Moving"],
-    ["l", "In a step: folders to list, list to message", "Moving"],
+    ["h", "Back a step: message, list, folders, calendar", "Moving"],
+    ["l", "In a step: calendar, folders, list, message", "Moving"],
+    ["C", "The calendar, from anywhere - Esc brings the mail back", "Moving"],
     ["Tab", "Between the folders and the list", "Moving"],
-    ["Esc", "Back one step: reply, folders, message, list, window", "Moving"],
+    ["Esc", "Back one step: reply, folders, calendar, message, list, window", "Moving"],
 
     ["Page up / down", "A screenful of whatever has focus", "Scrolling"],
     ["Ctrl-d / Ctrl-u", "Half a screen", "Scrolling"],

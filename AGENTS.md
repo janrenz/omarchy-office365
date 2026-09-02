@@ -237,6 +237,21 @@ keeps using the old client id or authority.
   not made that change yet; if you are porting UI between them, port this too.
 - **`TEXT_BODY_CAP` governs how much of a body the reading pane shows.** When
   weighing a display limit against a preview/bandwidth cost, display wins.
+- **The window's header collapses if the pills outgrow the width beside the
+  title.** `header` is anchored to `headerActions.left`; once the pills no
+  longer fit, that right edge is left of the row's own left one, its
+  `implicitHeight` goes to zero, and an `Item` sized `height:
+  header.implicitHeight` takes the title, every pill and the whole header off
+  the window. Nothing is printed - no binding loop, no TypeError - so it reads
+  as "my new pill broke the header" rather than "the header has no slack
+  left". It is `Math.max` of the two rows now, and a control added at the
+  widths where the header is fullest wants a glyph rather than a word: the
+  Calendar pill is `\u{F00ED}` for that reason, not for decoration.
+- **The agenda scroller holds two children**, the grid and the list, and a
+  `ScrollView` derives its content size from a single one. With two it measured
+  nothing, so an agenda taller than the pane could not be scrolled by anything
+  - keys or wheel. `contentHeight` is stated, from whichever child the
+  `agendaView` setting is showing.
 - **The window has no settings of its own.** It is one per plugin while the
   widget is multi-instance, so it reads a widget's configuration out of
   `shell.json`.

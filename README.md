@@ -290,6 +290,14 @@ start, and the window now has it too - in the reading pane's column, where it
 stands until a message or a meeting is opened. That column used to say "Select
 a message" at a third of a window's worth of empty space.
 
+On a window too narrow for a reading pane - a tiling compositor hands this
+one whatever width is left, and half a screen is not enough for three columns
+- there is no reading pane for the agenda to stand in, and there was no way to
+reach it at all. Now there is: press `C`, or click the calendar glyph in the
+header, and the agenda takes the mail list's column for as long as you are
+looking at it, the way an opened message does. A message you had open stays
+open behind it, and `Escape` brings it straight back.
+
 The agenda column is a day-grouped list by default, and can be a drawn
 time grid instead - hours down the side, days across, meetings at the size and
 position their times give them. Switch with **Show as** on the settings form's
@@ -562,19 +570,20 @@ Once the bar panel is up:
 
 Press `?` in the window for this list without leaving it.
 
-The window is a focus ladder rather than a bag of shortcuts: **folders → mail
-→ message**. `h` and `l` step between the rungs, `Escape` walks back out one
-rung at a time, and `j`/`k` always mean "down and up in whatever has focus" -
+The window is a focus ladder rather than a bag of shortcuts: **calendar →
+folders → mail → message**. `h` and `l` step between the rungs, `Escape` walks
+back out one rung at a time, and `j`/`k` always mean "down and up in whatever has focus" -
 including inside a message, which is the one place they used to do nothing.
 
 | Key | What it does |
 |---|---|
 | `j` / `k`, `↓` / `↑` | Down and up in whatever has focus: the folder tree, the list, or the message |
 | `Enter` | Open the message, and move focus into it |
-| `h` / `←` | Back a rung: message to list, list to folders |
-| `l` / `→` | In a rung: folders to list, list to message |
+| `h` / `←` | Back a rung: message to list, list to folders, folders to the calendar |
+| `l` / `→` | In a rung: calendar to folders, folders to list, list to message |
+| `C` | The calendar, from anywhere. `Escape` brings the mail back (capital, since `c` writes a message) |
 | `Tab` | Between the folder tree and the list |
-| `Escape` | Back one step: reply → folder tree → message → reading pane → window |
+| `Escape` | Back one step: reply → folder tree → calendar → message → reading pane → window |
 | `Page Up` / `Page Down` | A screenful of whatever has focus |
 | `Ctrl-u` / `Ctrl-d` | Half a screen |
 | `Ctrl-b` / `Ctrl-f` | A screen |
@@ -816,6 +825,31 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.8.0 — 2026-09-02
+
+- **The calendar is reachable on a narrow window.** The window's agenda lives
+  in the reading pane's column, and a window with no room for a reading pane -
+  which is most of them, under a tiling compositor - therefore had no agenda
+  and no way to ask for one: closing the message showed the list, and opening
+  one showed the message. The calendar is a rung of the focus ladder now,
+  outside the folder tree: `C` goes straight there from anywhere, `h` walks out
+  to it, and a calendar glyph appears in the header on exactly the widths where
+  the agenda has nowhere else to be. It borrows the list's column while you
+  read it, a message you had open stays open behind it, and `Escape` brings the
+  mail back. `j`/`k`, `g`/`G` and the page keys scroll it.
+- **An agenda longer than its pane can be scrolled.** It never could - not by
+  keys, not by the wheel. The scroller holds two children, the drawn grid and
+  the day-grouped list, and a `ScrollView` works its content size out from a
+  single one: with two it measured nothing and decided there was nothing to
+  scroll. It is told the size now.
+- **The window header no longer disappears when the pills outgrow it.** The
+  header's height came from the title alone, and once the row of pills no
+  longer fit beside even an elided title, the title was anchored to a right
+  edge left of its own left one - which collapsed the whole header, taking the
+  title, every pill and the Refresh button off the window with it, silently.
+  It is the taller of the two rows now. Adding a pill found this; a five-digit
+  unread count would have found it on its own.
 
 ### 1.7.4 — 2026-09-02
 
