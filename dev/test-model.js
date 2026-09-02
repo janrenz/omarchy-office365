@@ -865,5 +865,62 @@ group("recipient completion - the entry being typed, and what it matches", () =>
   check("no match is an empty list, not everything", addresses("zzz"), [])
 })
 
+group("the merged view - one folder, every mailbox", () => {
+  const views = [
+    { alias: "work", username: "me@work", short: "W", color: "blue", unreadCount: 3,
+      folders: [{ id: "INBOX", name: "Inbox", isInbox: true, unread: 3, depth: 0 },
+                { id: "Archiv", name: "Archiv", unread: 0, depth: 0 }] },
+    { alias: "home", username: "me@home", short: "H", color: "magenta", unreadCount: 2,
+      folders: [{ id: "inbox", name: "Inbox", isInbox: true, unread: 2, depth: 0 }] }
+  ]
+
+  // The state a window opens in: nothing has picked a folder, so every mailbox
+  // is on its inbox and the list is all of them merged. That was true all
+  // along and the window said "Inbox — me@work" about it.
+  check("nothing picked is every mailbox on its inbox",
+        Model.unifiedFolder(["work", "home"], {}), "inbox")
+  check("one mailbox moved off breaks it",
+        Model.unifiedFolder(["work", "home"], { work: "Archiv" }), "")
+  check("both on the same folder is merged again",
+        Model.unifiedFolder(["work", "home"], { work: "archive", home: "archive" }), "archive")
+  check("no mailboxes is nothing to merge", Model.unifiedFolder([], {}), "")
+  check("one mailbox agrees with itself, which the caller has to ignore",
+        Model.unifiedFolder(["work"], {}), "inbox")
+
+  const rows = (unified) => Model.folderRows(views, {}, "", unified)
+  const merged = (unified) => rows(unified).filter((r) => r.alias === "*")
+
+  check("the merged group is a header and the folders every mailbox has",
+        merged("inbox").map((r) => r.name),
+        ["All mailboxes", "Inbox", "Archive", "Sent", "Drafts", "Junk", "Deleted"])
+  // What travels is the well-known name, because no folder id means the same
+  // folder in two mailboxes - let alone across the two transports.
+  check("the merged rows carry well-known names rather than folder ids",
+        merged("inbox").filter((r) => r.kind === "folder").map((r) => r.id),
+        ["inbox", "archive", "sentitems", "drafts", "junkemail", "deleteditems"])
+  check("the merged inbox counts every mailbox's unread",
+        merged("inbox").filter((r) => r.id === "inbox")[0].unread, 5)
+  check("only the merged inbox has a count - nothing reports the other folders",
+        merged("inbox").filter((r) => r.id === "archive")[0].unread, 0)
+
+  check("the merged folder that is open is the one lit",
+        merged("archive").filter((r) => r.selected).map((r) => r.id), ["archive"])
+  // One folder lighting up two rows would say the window is in two places.
+  check("no mailbox's own row is lit while the merged view is open",
+        rows("inbox").filter((r) => r.alias !== "*" && r.selected).length, 0)
+  check("and they are lit again once the merged view is not what is open",
+        rows("").filter((r) => r.alias !== "*" && r.selected).map((r) => r.id),
+        ["INBOX", "inbox"])
+
+  // With one mailbox the merged group is that mailbox's tree drawn twice.
+  check("a single mailbox gets no merged group",
+        Model.folderRows([views[0]], {}, "", "").filter((r) => r.alias === "*").length, 0)
+
+  check("the merged folder has a name for the window's title",
+        Model.unifiedFolderName("sentitems"), "Sent")
+  check("something that is not a merged folder has none",
+        Model.unifiedFolderName("Archiv"), "")
+})
+
 console.log(`\n${checks - failures}/${checks} passed`)
 process.exit(failures ? 1 : 0)

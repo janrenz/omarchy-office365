@@ -311,12 +311,86 @@ function collectWarnings(views) {
 // open at once when only one of them is being looked at. Empty means no
 // mailbox is singled out and each shows its own, which is what folderNameFor
 // asks for.
-function folderRows(views, selected, activeAlias) {
+// The folders that mean the same thing in every mailbox, whichever transport
+// is behind it. The id is the name Graph already takes in a folder path, and
+// imapmail matches it against the mailbox's own localized names - see
+// GRAPH_WELL_KNOWN there. One folder *id* could never do this: an id names a
+// folder in one mailbox only.
+var UNIFIED_FOLDERS = [
+  { id: "inbox", name: "Inbox" },
+  { id: "archive", name: "Archive" },
+  { id: "sentitems", name: "Sent" },
+  { id: "drafts", name: "Drafts" },
+  { id: "junkemail", name: "Junk" },
+  { id: "deleteditems", name: "Deleted" }
+]
+
+// The folder every mailbox is on, or "" when they are not all on one.
+//
+// This is the state the window opens in - nothing has picked a folder, so
+// every mailbox is on its inbox and the list is the merged inbox of all of
+// them. It stopped being true the moment one folder was clicked in the tree,
+// and there was no way back to it and no way to ask for everybody's Archive,
+// which is what made a window carrying three mailboxes feel as though it had
+// lost the merged view the dropdown has.
+function unifiedFolder(aliases, selected) {
+  var list = aliases || []
+  if (list.length === 0) return ""
+  var chosenAll = selected || {}
+  var first = String(chosenAll[String(list[0])] || "inbox")
+  for (var i = 1; i < list.length; i++)
+    if (String(chosenAll[String(list[i])] || "inbox") !== first) return ""
+  return first
+}
+
+function totalUnread(views) {
+  var sum = 0
+  for (var i = 0; i < (views || []).length; i++) sum += Number(views[i].unreadCount || 0)
+  return sum
+}
+
+// The name a unified folder goes by, for the window's title.
+function unifiedFolderName(id) {
+  var wanted = String(id || "inbox")
+  for (var i = 0; i < UNIFIED_FOLDERS.length; i++)
+    if (UNIFIED_FOLDERS[i].id === wanted) return UNIFIED_FOLDERS[i].name
+  return ""
+}
+
+function folderRows(views, selected, activeAlias, unified) {
   var rows = []
   var list = views || []
   var multi = list.length > 1
   var chosenAll = selected || {}
   var active = String(activeAlias || "")
+  // What every mailbox is on, when they agree. Passed in rather than worked
+  // out here, so the caller and the tree cannot disagree about it.
+  var everywhere = String(unified || "")
+
+  // The merged view, above the per-mailbox trees. Only with more than one
+  // mailbox: with one, "all mailboxes" and that mailbox are the same tree
+  // drawn twice.
+  if (multi) {
+    rows.push({
+      kind: "account", key: "account:*", alias: "*",
+      name: "All mailboxes", short: "", color: "", depth: 0,
+      unread: totalUnread(list), selected: false
+    })
+    for (var u = 0; u < UNIFIED_FOLDERS.length; u++) {
+      var wanted = UNIFIED_FOLDERS[u]
+      rows.push({
+        kind: "folder", key: "*:" + wanted.id, alias: "*", id: wanted.id,
+        name: wanted.name,
+        // Only the inbox has a count worth showing: each mailbox reports its
+        // unread inbox count and says nothing about its other folders.
+        unread: wanted.id === "inbox" ? totalUnread(list) : 0,
+        total: 0, depth: 1, color: "", short: "",
+        isInbox: wanted.id === "inbox",
+        selected: everywhere === wanted.id,
+        placeholder: false, unifiedRow: true
+      })
+    }
+  }
 
   for (var i = 0; i < list.length; i++) {
     var view = list[i]
@@ -346,7 +420,8 @@ function folderRows(views, selected, activeAlias) {
         id: "inbox", name: view.folderName !== "" ? view.folderName : "Inbox",
         unread: view.unreadCount || 0, total: 0,
         depth: multi ? 1 : 0, color: view.color, short: view.short,
-        isInbox: true, selected: here && chosen === "inbox", placeholder: true
+        isInbox: true, placeholder: true,
+        selected: everywhere === "" && here && chosen === "inbox"
       })
       continue
     }
@@ -369,7 +444,8 @@ function folderRows(views, selected, activeAlias) {
         isInbox: isInbox,
         // "inbox" is the well-known name the fetch defaults to; the tree knows
         // the same folder by its real id, so both have to match the same row.
-        selected: here && (id === chosen || (chosen === "inbox" && isInbox)),
+        selected: everywhere === ""
+                  && here && (id === chosen || (chosen === "inbox" && isInbox)),
         placeholder: false
       })
     }

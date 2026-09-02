@@ -63,22 +63,49 @@ Item {
 
   // The rest of what the shell may deliver with a summon: a message to read -
   // what a clicked notification passes, as `account`, `folderId` and
-  // `messageId` - and a draft reply a coding agent wrote. Both have to survive
-  // arriving twice, because the shell drains its payload queue in a loop and
-  // delivers to a window that is already open.
+  // `messageId` - a draft reply a coding agent wrote, and an `action` to start
+  // on arrival. All of them have to survive arriving twice, because the shell
+  // drains its payload queue in a loop and delivers to a window that is
+  // already open.
+  //
+  // `action` is what makes the bar dropdown able to offer Reply, Forward, Move
+  // and the rest without being able to do any of them: the dropdown closes the
+  // moment you click away, so it hands the message here with the action
+  // already chosen rather than leaving those buttons off itself.
   function applyPayload(payload) {
     var alias = String(payload.account || "")
     var messageId = String(payload.messageId || "")
+    var action = String(payload.action || "")
     if (alias !== "") {
       // An empty folderId is the inbox, which is also what selectFolder makes
       // of it - and it is a no-op when that folder is already the one open.
       mailView.selectFolder(alias, String(payload.folderId || ""))
-      if (messageId !== "") revealMessage(alias, messageId)
+      if (messageId !== "") revealMessage(alias, messageId, action)
     }
     if (payload.draft) {
       agentDraftPending = payload.draft
       flushAgentDraft()
     }
+    // An action with no message to act on. Writing one is the only such action,
+    // and callLater because the mailbox that was just selected has to have
+    // become the active one before startNewMessage reads it.
+    if (messageId === "" && action === "new") Qt.callLater(root.startNewMessage)
+  }
+
+  // What to do with a message once it is on screen. Kept to the actions the
+  // dropdown cannot perform itself, so this is not a second way to do
+  // everything - the buttons in the reading pane are still the only ones.
+  function runAction(action, row) {
+    if (!row) return
+    if (action === "reply" || action === "reply-all" || action === "forward") {
+      if (mailView.canWrite(row.alias)) mailView.startCompose(action, row)
+      return
+    }
+    if (action === "move") {
+      if (mailView.canWrite(row.alias)) startMove(row)
+      return
+    }
+    if (action === "agent") askAgent()
   }
 
   // A message named by id alone. Switching folder is a fetch, so the row it
@@ -88,10 +115,15 @@ Item {
   // because it is the newer thing the person clicked.
   property string pendingMessageAlias: ""
   property string pendingMessageId: ""
+  // Held with the request rather than acted on at once: an action wants the
+  // message it acts on to be the one being read, and that is not true until
+  // the folder's fetch has landed.
+  property string pendingAction: ""
 
-  function revealMessage(alias, id) {
+  function revealMessage(alias, id, action) {
     pendingMessageAlias = String(alias || "")
     pendingMessageId = String(id || "")
+    pendingAction = String(action || "")
     flushPendingMessage()
   }
 
@@ -100,14 +132,19 @@ Item {
     var at = mailView.indexOfMail(pendingMessageId)
     if (at < 0) return
     var row = mailView.mail[at]
+    var action = pendingAction
     pendingMessageAlias = ""
     pendingMessageId = ""
+    pendingAction = ""
     pane = "mail"
     mailCursor = at
     // showPreview toggles the message it is already showing closed, which is
     // the opposite of what a notification asked for.
     if (!mailView.previewMail || String(mailView.previewMail.id) !== String(row.id))
       mailView.showPreview(row)
+    // After the pane has the message: startCompose and startMove both act on
+    // the row, and askAgent reads what is being previewed.
+    if (action !== "") Qt.callLater(function() { root.runAction(action, row) })
   }
 
   Connections {
@@ -233,6 +270,12 @@ Item {
 
   readonly property string folderTitle: {
     if (!mailView.configured) return "Office 365"
+    // Every mailbox on the same folder is the merged view, and naming one
+    // mailbox's address there was the whole reason a window showing three
+    // inboxes at once read as though it were showing one. It is also the state
+    // the window opens in, so this was the usual case, not the corner.
+    if (mailView.unifiedFolderName !== "")
+      return mailView.unifiedFolderName + " — all mailboxes"
     var name = mailView.folderNameFor(activeAlias)
     if (name === "") name = "Inbox"
     if (!combined) return name
@@ -338,6 +381,15 @@ Item {
     if (folderActing) return
     var row = folderUnderCursor()
     if (!row) return
+    // The merged rows at the top of the tree are every mailbox's version of one
+    // folder - see Model.folderRows - so there is no single folder there to
+    // make, rename, move or delete. Said, rather than falling through to
+    // "signed in for reading only", which is what a mailbox called "*" looks
+    // like from canWrite.
+    if (row.unifiedRow === true) {
+      mailView.noteActionError("Pick a folder inside a mailbox - these rows are every mailbox at once")
+      return
+    }
     var alias = String(row.alias || "")
     // Read-only is a sign-in choice rather than a fault, and it is written
     // nowhere else on this screen - so it is said rather than done silently.
@@ -667,7 +719,10 @@ Item {
   }
 
   function pickFolder(alias, folderId) {
-    mailView.selectFolder(alias, folderId)
+    // "*" is one of the merged rows at the top of the tree - see
+    // Model.folderRows - and means this folder in every mailbox.
+    if (String(alias) === "*") mailView.selectFolderEverywhere(folderId)
+    else mailView.selectFolder(alias, folderId)
     folderDrawer = false
     // The list underneath is about to be replaced; a cursor left pointing into
     // the old one would open a message from the folder just left.
@@ -1211,7 +1266,13 @@ Item {
                 label: "Focused"
                 detail: mailView.focusedOnly && mailView.unsplitMailboxes.length > 0
                         ? (mailView.unsplitMailboxes.join(", ") + ": all") : ""
-                visible: mailView.folderIdFor(root.activeAlias) === "inbox"
+                // Merged or not, the question is whether an inbox is what is
+                // on screen: with every mailbox on its inbox that is more true
+                // than ever, and reading it off one alias happened to give the
+                // right answer only because that alias was on its inbox too.
+                visible: (mailView.unifiedFolder !== ""
+                          ? mailView.unifiedFolder === "inbox"
+                          : mailView.folderIdFor(root.activeAlias) === "inbox")
                          && mailView.canFocus
                 selected: mailView.focusedOnly
                 fg: Color.foreground

@@ -1660,6 +1660,68 @@ class ImapForward(unittest.TestCase):
         self.assertIn("Sep 2026", body)
 
 
+class UnifiedFolderOverImap(unittest.TestCase):
+    """Asking every mailbox for the same folder at once.
+
+    No folder id means the same folder in two mailboxes, let alone across the
+    two transports - so what travels is the well-known name. Graph already takes
+    those in a folder path; over IMAP they have to be matched against names that
+    arrive in the mailbox's own language, which `move` already did and a fetch
+    did not, so the merged Archive would have shown the inbox.
+    """
+
+    FOLDERS = [{"id": "INBOX", "name": "Inbox", "isInbox": True},
+               {"id": "Archiv", "name": "Archiv", "isInbox": False},
+               {"id": "Gesendete Elemente", "name": "Gesendete Elemente", "isInbox": False}]
+
+    def open(self, folder_id, folders=None, names=None):
+        import imapmail
+        listed = names if names is not None else [row["name"] for row in self.FOLDERS]
+        saved = imapmail.list_folders
+        imapmail.list_folders = lambda client: [(name, "/", ()) for name in listed]
+        warnings = []
+        try:
+            chosen = imapmail.folder_to_open(
+                None, {}, self.FOLDERS if folders is None else folders, folder_id, warnings)
+        finally:
+            imapmail.list_folders = saved
+        return chosen, warnings
+
+    def test_nothing_and_inbox_both_mean_the_inbox(self):
+        self.assertEqual(self.open("")[0], "INBOX")
+        self.assertEqual(self.open("inbox")[0], "INBOX")
+
+    def test_a_path_this_mailbox_lists_is_that_folder(self):
+        chosen, warnings = self.open("Archiv")
+        self.assertEqual((chosen, warnings), ("Archiv", []))
+
+    def test_a_well_known_name_resolves_to_the_localized_folder(self):
+        # The whole point: the window says "archive" to every mailbox, and this
+        # one calls it Archiv.
+        chosen, warnings = self.open("archive")
+        self.assertEqual((chosen, warnings), ("Archiv", []))
+        chosen, _warnings = self.open("sentitems")
+        self.assertEqual(chosen, "Gesendete Elemente")
+
+    def test_a_path_wins_over_a_well_known_name_of_its_own(self):
+        # A mailbox that really has a folder called "archive" means that one.
+        folders = [{"id": "INBOX", "name": "Inbox", "isInbox": True},
+                   {"id": "archive", "name": "archive", "isInbox": False}]
+        chosen, warnings = self.open("archive", folders=folders)
+        self.assertEqual((chosen, warnings), ("archive", []))
+
+    def test_a_mailbox_whose_archive_is_named_something_unknown_says_so(self):
+        chosen, warnings = self.open("archive", names=["Inbox", "Ablage 2024"])
+        self.assertEqual(chosen, "INBOX")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("imapFolders.archive", warnings[0]["message"])
+
+    def test_a_folder_that_is_simply_gone_still_says_that(self):
+        chosen, warnings = self.open("Projekte")
+        self.assertEqual(chosen, "INBOX")
+        self.assertEqual(warnings[0]["message"], "That folder is gone - showing the inbox")
+
+
 class Recipients(unittest.TestCase):
     def test_the_separators_people_type_all_work(self):
         good, bad = graph.recipient_list("a@b.com, c@d.org; e@f.net\ng@h.io")

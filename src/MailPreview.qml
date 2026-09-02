@@ -26,6 +26,17 @@ Column {
   property bool canWrite: false
   property bool canCompose: false
   property bool canMove: false
+  // Whether this surface can carry the action out itself, or is handing the
+  // message to the window to do it.
+  //
+  // The bar dropdown offers the same actions the window does - a pane that
+  // silently has five fewer buttons than the same pane elsewhere is the sort
+  // of difference nobody can explain - but it cannot perform them: it closes
+  // the moment you click away, which is no place to write a reply or hold a
+  // folder tree open. So there it summons the window with the action already
+  // chosen, and says so in the tooltips rather than looking like it changed
+  // its mind about what a button does.
+  property bool actsHere: true
   // Whether to offer the coding-agent handover. Only the window sets this: the
   // bar dropdown has no reply box for a draft to come back into.
   property bool canAgent: false
@@ -85,6 +96,13 @@ Column {
   // Only where the reader still has a decision to make. With the setting on,
   // every message is already formatted and there is nothing to offer.
   readonly property bool htmlOffered: !htmlAlways && !!detail
+
+  // A tooltip that says where the action is going to happen. Saying it in the
+  // tooltip rather than in the label keeps the two panes' buttons named the
+  // same thing, which is the point of them being the same buttons.
+  function elsewhere(text) {
+    return root.actsHere ? text : (text + " — opens the window on it")
+  }
 
   function people(list) {
     var names = []
@@ -365,12 +383,15 @@ Column {
       // present and failing. Forward keeps company with the other two: it is
       // the third answer to a message, not a filing action.
       { text: "Reply", visible: root.canCompose && root.canWrite,
+        tooltip: root.elsewhere("Reply to this message"),
         enabled: !root.actionRunning,
         trigger: function() { root.replyRequested() } },
       { text: "Reply all", visible: root.canCompose && root.canWrite,
+        tooltip: root.elsewhere("Reply to everybody on this message"),
         enabled: !root.actionRunning,
         trigger: function() { root.replyAllRequested() } },
       { text: "Forward", visible: root.canCompose && root.canWrite,
+        tooltip: root.elsewhere("Send this message on to somebody else"),
         enabled: !root.actionRunning,
         trigger: function() { root.forwardRequested() } },
 
@@ -440,11 +461,13 @@ Column {
       // Reading does not need write access and neither does asking about it,
       // which is why this one is not gated on canWrite the way the three
       // answers above are.
-      { text: "Ask agent", tooltip: "Open your coding agent on this message",
+      { text: "Ask agent",
+        tooltip: root.elsewhere("Open your coding agent on this message"),
         visible: root.canAgent,
         trigger: function() { root.agentRequested() } },
 
-      { text: "Move\u2026", tooltip: "File it in another folder of this mailbox",
+      { text: "Move\u2026",
+        tooltip: root.elsewhere("File it in another folder of this mailbox"),
         visible: root.canMove && root.canWrite, enabled: !root.actionRunning,
         trigger: function() { root.moveRequested() } },
 

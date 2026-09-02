@@ -957,7 +957,39 @@ Item {
     return !hub.dataFor(awaitingFolderFor, folder) && !hub.errorFor(awaitingFolderFor, folder)
   }
 
-  readonly property var folderRows: Model.folderRows(views, selectedFolders, activeAlias)
+  // The folder every mailbox is on, when they are all on the same one - the
+  // merged view, which is the state a host opens in and had no way back to.
+  //
+  // Empty with a single mailbox, deliberately: "every mailbox" and "that
+  // mailbox" are the same thing there, and a non-empty answer would make the
+  // tree stop lighting the folder that is open.
+  readonly property string unifiedFolder: aliases.length > 1
+    ? Model.unifiedFolder(aliases, selectedFolders) : ""
+
+  readonly property var folderRows: Model.folderRows(views, selectedFolders,
+                                                     activeAlias, unifiedFolder)
+
+  // The name to call what is on screen, when it is every mailbox's version of
+  // one folder. Empty when they are not all on the same folder.
+  readonly property string unifiedFolderName: unifiedFolder === ""
+    ? "" : Model.unifiedFolderName(unifiedFolder)
+
+  // One folder, in every mailbox at once.
+  //
+  // A folder id names a folder in one mailbox only, so what travels is the
+  // well-known name - "archive", "sentitems" - which Graph already takes in a
+  // folder path and imapmail resolves against the mailbox's own localized
+  // names. Anything else would need one id to mean the same folder in two
+  // mailboxes, which no id does.
+  function selectFolderEverywhere(folderId) {
+    var id = String(folderId || "inbox")
+    if (aliases.length === 0) return
+    for (var i = 0; i < aliases.length; i++) selectFolder(String(aliases[i]), id)
+    // selectFolder records each mailbox as the one being read, which is right
+    // when a folder of one was picked and wrong here: nobody picked a mailbox,
+    // so the title and the tree should not name one.
+    pickedAlias = ""
+  }
 
   function folderIdFor(alias) {
     return String(selectedFolders[String(alias || "")] || "inbox")

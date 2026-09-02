@@ -60,6 +60,42 @@ Panel {
                                     && !service.loggingIn && pendingAccounts.length === 0
                                     && !showColumns && awaitingFirstData
   readonly property int columnGap: Style.spacing.xxl
+
+  // Hand this widget's mailboxes to the window: the same mail, with room for a
+  // folder tree, a reading pane that stays put, and somewhere to type.
+  //
+  // The instance id always rides along so the window opens THIS widget's
+  // mailboxes rather than whichever the bar happens to hold first. Everything
+  // else in the payload is what the window should do on arrival - see
+  // MailWindow.applyPayload.
+  function openWindow(payload) {
+    var body = payload || {}
+    var instance = String(root.setting("instance", "")).trim()
+    if (instance !== "") body.instance = instance
+    try {
+      Quickshell.execDetached(["omarchy-shell", "shell", "summon",
+                               "caseonline.omarchy.office365", JSON.stringify(body)])
+    } catch (e) {
+      console.warn("office365: summon threw: " + e)
+    }
+    // The dropdown has served its purpose the moment the window is up; leaving
+    // it open would put the same mail on screen twice.
+    root.close()
+  }
+
+  // The message being read, over there, with the action already chosen. What
+  // makes the dropdown able to offer Reply, Forward, Move and Ask agent
+  // without being a place any of them could happen.
+  function handOff(action) {
+    if (!root.service) return
+    var row = root.service.previewMail
+    if (!row) return
+    var alias = String(row.alias || "")
+    root.openWindow({ account: alias,
+                      folderId: String(root.service.folderIdFor(alias)),
+                      messageId: String(row.id),
+                      action: String(action) })
+  }
   readonly property bool previewing: !!service && service.previewMail !== null
   // A meeting opened for its details wants the same column a message does, so
   // the agenda stands aside for either of them.
@@ -344,26 +380,25 @@ Panel {
             // room for a folder tree and a reading pane that stays put. The
             // instance id goes with it so the window opens THIS widget's
             // mailboxes rather than whichever the bar happens to hold first.
+            // Writing a message, which is the one action here that needs no
+            // message to act on. It goes to the window like the rest: there is
+            // nowhere in a dropdown to type a subject and a body.
+            PanelActionButton {
+              iconText: "\u{F0954}"
+              tooltipText: "Write a new message — opens the window"
+              foreground: root.fg
+              visible: !!root.service && root.service.configured && !root.showSettings
+                       && root.service.canWrite(root.service.activeAlias)
+              onClicked: root.openWindow({ account: String(root.service.activeAlias),
+                                           action: "new" })
+            }
+
             PanelActionButton {
               iconText: "󰏌"
               tooltipText: "Open in a window"
               foreground: root.fg
               visible: !!root.service && root.service.configured && !root.showSettings
-              onClicked: {
-                var instance = String(root.setting("instance", "")).trim()
-                var payload = instance !== "" ? JSON.stringify({ instance: instance }) : "{}"
-                console.warn("office365: open-in-window clicked; payload=" + payload)
-                try {
-                  Quickshell.execDetached(["omarchy-shell", "shell", "summon",
-                                           "caseonline.omarchy.office365", payload])
-                  console.warn("office365: summon dispatched")
-                } catch (e) {
-                  console.warn("office365: summon threw: " + e)
-                }
-                // The dropdown has served its purpose the moment the window is
-                // up; leaving it open would put the same mail on screen twice.
-                root.close()
-              }
+              onClicked: root.openWindow({})
             }
 
             PanelActionButton {
@@ -809,6 +844,17 @@ Panel {
             fontFamily: root.fontFamily
             canWrite: !!root.service && !!root.service.previewMail
                       && root.service.canWrite(root.service.previewMail.alias)
+            // The same actions the window's pane offers. None of them happen
+            // here - see actsHere, and handOff above.
+            canCompose: true
+            canMove: true
+            canAgent: !!root.service && root.service.agentHandover
+            actsHere: false
+            onReplyRequested: root.handOff("reply")
+            onReplyAllRequested: root.handOff("reply-all")
+            onForwardRequested: root.handOff("forward")
+            onMoveRequested: root.handOff("move")
+            onAgentRequested: root.handOff("agent")
             actionRunning: !!root.service && root.service.actionRunning
             actionError: root.service ? root.service.actionError : ""
             onLinkActivated: function(url) {

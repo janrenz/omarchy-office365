@@ -28,7 +28,9 @@ src/Service.qml       One host's *view* of the store: filters, open folder,
                       message being read, a half-written reply.
 src/BarWidget.qml     The bar icon.
 src/Panel.qml         The bar dropdown: merged mail beside the merged agenda.
-src/MailWindow.qml    The window: folders, list, reading pane. ~1.2k lines.
+src/MailWindow.qml    The window: folders, list, reading pane. ~1.7k lines.
+src/RecipientField.qml
+                      A To/Cc field that completes from the address book.
 src/MailList.qml      A ListView, deliberately — read the comment at the top.
 src/MeetingPane.qml   One meeting: who is coming, what they said, and the
                       Accept/Maybe/Decline that used to mean opening Outlook.
@@ -233,6 +235,26 @@ keeps using the old client id or authority.
   the `Connections` on `mailView.mail` exist: the folder is fetched and the
   request answered when the list lands. `omarchy-shell shell call <id>
   agentDraft '<json>'` is the same draft route and returns what it made of it.
+- **The dropdown offers every action the window does and performs none of the
+  hard ones.** A pane that silently has five fewer buttons than the same pane
+  elsewhere is a difference nobody can explain, so `Panel.qml` sets
+  `canCompose`, `canMove` and `canAgent` like the window — and `actsHere:
+  false`, which puts "opens the window on it" in those tooltips. The buttons
+  call `handOff`, which summons the window with `{account, folderId, messageId,
+  action}`; `MailWindow.applyPayload` reveals the message and then runs the
+  action once the fetch has landed, which is why `pendingAction` rides with
+  `pendingMessageId` rather than being acted on at once. Adding an action to
+  the reading pane means deciding which surface performs it.
+- **"Every mailbox on the same folder" is a state, not a folder.** The window's
+  list has always been merged - `snapshot` walks every alias - but
+  `selectedFolders` is per mailbox, so clicking one folder in the tree broke the
+  merge with no way back, and the title said one mailbox's address about a list
+  holding three. `Model.unifiedFolder` derives the state, `folderRows` draws the
+  merged group above the per-mailbox trees with `alias: "*"`, and
+  `selectFolderEverywhere` sets them all. It sends the well-known *name*
+  ("archive", "sentitems"), never an id: no id means the same folder in two
+  mailboxes. `unifiedFolder` is deliberately "" for a single mailbox, or the
+  tree would stop lighting the folder that is open.
 - **The coding-agent handover is one setting away from not existing.**
   `agentHandover` gates the `a` key, the reading pane's button, the help entry
   and the inbound draft. A feature that reaches somebody's mail has to be

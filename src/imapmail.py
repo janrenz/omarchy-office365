@@ -909,6 +909,44 @@ def read_rows(client, mailbox, validity, spec, by_uid):
     return rows
 
 
+def folder_to_open(client, account, folders, folder_id, warnings):
+    """Which mailbox to SELECT for a fetch, from what the panel asked for.
+
+    Four answers, tried in that order because each is more specific than the
+    next: nothing or "inbox" is the inbox; a path this mailbox actually lists is
+    that folder; a well-known name - "archive", "sentitems" - is resolved
+    against the mailbox's own folder names; and anything else has gone.
+
+    The well-known branch is what lets the window ask every mailbox for the
+    same folder at once - see Service.selectFolderEverywhere. It cannot ask by
+    id, because no folder id means the same folder in two mailboxes, let alone
+    across the two transports. So the *name* travels, and each side resolves it:
+    Graph already takes these names in a folder path, and here they are matched
+    against names that arrive in the mailbox's own language.
+
+    A path is tried before a well-known name deliberately: a mailbox that really
+    does contain a folder called "Archive" means that one, and its path is what
+    the tree handed out.
+    """
+    inbox = next((row["id"] for row in folders if row["isInbox"]), "INBOX")
+    wanted = str(folder_id or "").strip()
+    if wanted in ("", "inbox"):
+        return inbox
+    if any(row["id"] == wanted for row in folders) or not folders:
+        return wanted
+    special = GRAPH_WELL_KNOWN.get(wanted.lower())
+    if special:
+        try:
+            return resolve_special(client, special, account)
+        except TransportError as error:
+            # A mailbox whose Archive is called something nobody here knows is
+            # worth saying so about, and worth still showing mail for.
+            warnings.append({"scope": "folders", "message": error.message})
+            return inbox
+    warnings.append({"scope": "folders", "message": "That folder is gone - showing the inbox"})
+    return inbox
+
+
 def snapshot(account, token, top, folder_id="", want_folders=True):
     """One mailbox's unread count, folder tree and newest mail.
 
@@ -933,14 +971,7 @@ def snapshot(account, token, top, folder_id="", want_folders=True):
                 )
 
         inbox = next((row["id"] for row in folders if row["isInbox"]), "INBOX")
-        wanted = str(folder_id or "").strip()
-        if wanted in ("", "inbox"):
-            mailbox = inbox
-        elif any(row["id"] == wanted for row in folders) or not folders:
-            mailbox = wanted
-        else:
-            warnings.append({"scope": "folders", "message": "That folder is gone - showing the inbox"})
-            mailbox = inbox
+        mailbox = folder_to_open(client, account, folders, folder_id, warnings)
 
         unread, _total = folder_counts(client, inbox)
         exists, validity = select(client, mailbox, readonly=True)

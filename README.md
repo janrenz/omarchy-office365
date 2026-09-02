@@ -240,6 +240,25 @@ Every mailbox is on some folder at all times — its inbox until you pick anothe
 sidebar. A highlight in each account reads as several things open at once when
 only one of them is what you are looking at.
 
+### All mailboxes at once
+
+With more than one mailbox, the tree opens with an **All mailboxes** group
+above the per-mailbox trees — Inbox, Archive, Sent, Drafts, Junk, Deleted —
+and each row means that folder in *every* mailbox at the same time. The inbox
+row carries the merged unread count, and the window's title says "Inbox — all
+mailboxes" so a list holding three mailboxes is not labelled with one address.
+
+That is the state the window opens in, and before this there was no way back to
+it: clicking a folder under one mailbox left the others on their inboxes, and
+nothing said so. Picking a merged row moves all of them together.
+
+It works by the folder's well-known name rather than its id, because no id
+means the same folder in two mailboxes. Graph takes those names in a folder
+path already; over IMAP they are matched against the mailbox's own folder
+names, which arrive in its own language. A mailbox whose Archive is called
+something the plugin does not recognise says so and shows its inbox — set it in
+`imapFolders` to fix that.
+
 ## Conversations
 
 **Threads** - in the window, and press **t** - folds the list by conversation.
@@ -343,6 +362,12 @@ signed in as the right person.
 ## Reading a message
 
 ![A message open beside the list, narrowed to unread](preview-reading.png)
+
+The reading pane offers the same actions in the dropdown as in the window. The
+ones the dropdown cannot carry out itself — Reply, Reply all, Forward, Move and
+Ask agent — open the window on that message with the action already started,
+and say so in their tooltips. A popup that closes the moment you click away is
+no place to write a reply.
 
 Clicking a mail opens it in the right-hand column, in place of the agenda:
 sender, recipients, when it arrived, and the message as plain text. **Open**
@@ -779,6 +804,31 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.7.0 — 2026-09-02
+
+- **The dropdown and the window offer the same actions.** The dropdown's
+  reading pane was missing Reply, Reply all, Forward, Move and Ask agent — not
+  because they made no sense there but because a popup that closes when you
+  click away is no place to write a reply or hold a folder tree open. Having
+  five fewer buttons than the same pane elsewhere is a difference nobody can
+  explain, so they are all there now, and the ones the dropdown cannot perform
+  open the window on that message with the action already started. Their
+  tooltips say so. **Write** joined the dropdown's header for the same reason.
+- **A unified inbox in the window, and a way back to it.** The window's list
+  was always merged across mailboxes — it just never said so, and clicking a
+  folder in the tree broke the merge with no way back. The tree now opens with
+  an **All mailboxes** group above the per-mailbox trees: Inbox, Archive, Sent,
+  Drafts, Junk and Deleted, each meaning that folder in *every* mailbox at
+  once, with the merged unread count on the inbox. The title says "Inbox — all
+  mailboxes" instead of naming one mailbox's address about a list holding
+  three.
+- **Under it, a well-known folder name now works for a fetch over IMAP**, not
+  only for a move. No folder id can mean the same folder in two mailboxes, so
+  what travels is the name — `archive`, `sentitems` — which Graph already takes
+  in a folder path and which IMAP matches against names that arrive in the
+  mailbox's own language. A mailbox whose Archive is called something the plugin
+  does not recognise says so and shows its inbox, as it already did for moves.
 
 ### 1.6.0 — 2026-09-02
 

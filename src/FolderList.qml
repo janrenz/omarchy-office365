@@ -112,7 +112,10 @@ Column {
         anchors.bottomMargin: Style.spacing.xxs
         width: Style.space(2)
         radius: width
-        color: line.modelData.color
+        // The merged rows at the top belong to no one mailbox and so have no
+        // hue. The plain foreground stands in: an empty colour string is black
+        // to Qt, which on a dark theme is a rail that is simply missing.
+        color: String(line.modelData.color) !== "" ? line.modelData.color : root.dim
         opacity: line.isHeader ? 1 : (line.selected ? 0.9 : 0.35)
         visible: root.rows.length > 0 && (line.isHeader || line.modelData.depth > 0 || line.selected
                                           || String(line.modelData.color) !== "")
