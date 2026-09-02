@@ -817,6 +817,19 @@ journalctl --user -f | grep -i office365
 
 ## Changelog
 
+### 1.7.4 — 2026-09-02
+
+- **The folder tree stopped vanishing every time you picked a folder.** In a
+  window too narrow for a sidebar the tree is drawn over the mail, and picking
+  a folder put it away — so browsing two folders meant opening the tree twice,
+  and on a half-screen window that was every time. There is a middle width now:
+  too narrow for the tree to be there unasked, wide enough for it to stand
+  beside the mail rather than over it. Ask for it there and it becomes a real
+  sidebar, the list gives up the width for it, and it stays where it is as you
+  pick. Only a window with no room for both still has the tree cover the mail,
+  and only there does picking a folder close it. Escape and the **Folders**
+  pill put it away in either case.
+
 ### 1.7.3 — 2026-09-02
 
 - **Clicking one mailbox's inbox showed the other mailbox's mail.** With two

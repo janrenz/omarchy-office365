@@ -451,7 +451,10 @@ Item {
     if (folderAction === "move") return folderOverlay.item ? folderOverlay.item.scroller : null
     if (moving) return movePicker.item ? movePicker.item.scroller : null
     if (pane === "message" && mailView.previewMail !== null) return readerScroll
-    if (pane === "folders") return folderDrawer ? drawerFolderScroll : folderScroll
+    // folderPicking rather than folderDrawer: a tree that was asked for and
+    // had room to become a sidebar is drawn by the sidebar's copy, and the
+    // keys have to act on the one on screen.
+    if (pane === "folders") return columns.folderPicking ? drawerFolderScroll : folderScroll
     return listScroll
   }
 
@@ -704,8 +707,8 @@ Item {
     // Innermost first. A half-written reply is the last thing that should go
     // when someone reaches for Escape.
     if (mailView.composing) { mailView.cancelCompose(); return }
-    // The tree is over the list rather than beside it, so it is the layer
-    // Escape should take back first.
+    // A tree that was asked for is the layer Escape takes back first, whether
+    // it ended up over the list or beside it.
     if (folderDrawer) { folderDrawer = false; pane = "mail"; return }
     // Back to the list with the message still open. Escape again closes it -
     // one rung at a time, rather than shutting the message outright.
@@ -723,7 +726,11 @@ Item {
     // Model.folderRows - and means this folder in every mailbox.
     if (String(alias) === "*") mailView.selectFolderEverywhere(folderId)
     else mailView.selectFolder(alias, folderId)
-    folderDrawer = false
+    // Only while the tree is covering the mail, where it stands between you
+    // and the folder just picked. Beside the mail it is in nobody's way, and
+    // taking it away at every click is what made picking a second folder mean
+    // opening the tree all over again.
+    if (columns.folderPicking) folderDrawer = false
     // The list underneath is about to be replaced; a cursor left pointing into
     // the old one would open a message from the folder just left.
     mailCursor = -1
@@ -1219,7 +1226,10 @@ Item {
               // about. Only there when the tree is not.
               FilterPill {
                 label: "Folders"
-                visible: !columns.showSidebar && mailView.configured
+                // Keyed on the width, not on showSidebar: asking for the tree
+                // makes showSidebar true, and this is the control that then
+                // has to still be here to put it away again.
+                visible: !columns.sidebarAlways && mailView.configured
                 selected: root.folderDrawer
                 fg: Color.foreground
                 accent: Color.accent
@@ -1325,13 +1335,26 @@ Item {
             // the mail in the folder - then the reading pane, which the list
             // gives way to while a message is open, the way the bar panel does
             // it. Nothing is ever squeezed below the width it needs to be read.
-            readonly property bool showSidebar: width >= Style.space(620)
+            // Wide enough that the tree is simply always there.
+            readonly property bool sidebarAlways: width >= Style.space(620)
+            // Not that wide, but wide enough for the tree to stand beside the
+            // mail rather than over it. So a tree that was asked for becomes a
+            // real sidebar and the list gives up the width for it, which is
+            // what stops the tree vanishing at every folder picked. 470 keeps
+            // the list at roughly the 300 that counts as a column elsewhere in
+            // here; below it there is no room for both and the tree has to
+            // cover the mail.
+            readonly property bool sidebarFits: width >= Style.space(470)
+            readonly property bool showSidebar: sidebarAlways
+              || (root.folderDrawer && sidebarFits)
             // The folder tree standing in for the columns, because there is no
             // room for it beside them.
             readonly property bool folderPicking: root.folderDrawer && !showSidebar
-            // A window widened back out has its sidebar again, and no reason
-            // to be holding the tree over the mail as well.
-            onShowSidebarChanged: if (showSidebar) root.folderDrawer = false
+            // A window widened back out has its sidebar without being asked,
+            // and no reason to be holding a tree open on top of that. Keyed on
+            // the width alone: on showSidebar it would fire the instant the
+            // tree was asked for and put it straight back away.
+            onSidebarAlwaysChanged: if (sidebarAlways) root.folderDrawer = false
             readonly property real sidebarWidth: showSidebar
               ? Math.max(Style.space(170), Math.min(Style.space(260), width * 0.2)) : 0
             readonly property real rest: width
