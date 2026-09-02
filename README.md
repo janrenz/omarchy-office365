@@ -476,6 +476,18 @@ labels rather than a letter. So it is shown as it was written, with a line
 under it saying why. Nothing is fetched from the sender to do it - the same
 sanitiser runs, and remote pictures are still blocked and counted.
 
+A message does not get to choose a colour the pane cannot draw. Outlook and
+Word write `color: black` into practically every span they emit, because they
+are laying the message out on white paper — so on a dark theme a formatted
+message arrived as black text on a near-black background, readable only by
+selecting it. Each colour a sender chose is now measured against the background
+it is actually being drawn on, and dropped if it cannot be read there, which
+lets that text fall back to the theme's own foreground. A colour that *is*
+readable is theirs to keep: the orange they used for a warning and the blue
+they used for a heading survive. Painted backgrounds do not — the pane supplies
+the background, and with none of the sender's left there is exactly one thing
+every colour has to be legible against.
+
 Formatting and pictures are separate decisions on purpose. Showing a message's
 layout costs nobody anything; fetching the pictures it points at on the
 sender's servers tells them you opened it, and that stays behind its own
@@ -804,6 +816,21 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.7.2 — 2026-09-02
+
+- **Black text on a dark theme.** A formatted message was often unreadable
+  unless you selected it, and the reason was in the message: Outlook and Word
+  write `color: black` — or `rgb(0, 0, 0)`, or Word's `windowtext` — into
+  almost every span, because they are laying it out on white paper. One
+  forwarded mail here carried 197 style attributes, 39 of them naming black.
+  Qt's rich text obeyed all of them. Each colour is now measured against the
+  background the pane actually draws on and dropped when it cannot be read
+  there, so that text inherits the theme's own foreground. Readable colours are
+  left alone, because they are the sender saying something; painted
+  backgrounds, `bgcolor` and `<font color>` are handled the same way.
+  The decision is made at render time rather than in the helper, so changing
+  theme re-colours what is already on screen instead of needing a re-fetch.
 
 ### 1.7.1 — 2026-09-02
 

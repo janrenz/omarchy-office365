@@ -154,6 +154,21 @@ keeps using the old client id or authority.
   Every default in `PollGate.qml` therefore means "go ahead": a gate that failed
   closed would swallow the first fetch after every shell start, which is the one
   that fills an empty panel.
+- **A formatted message brings its own colours, and they are for white paper.**
+  Outlook and Word put `color: black` (or `rgb(0, 0, 0)`, or `windowtext`) on
+  almost every span they emit; Qt's rich text obeys it, so on a dark theme the
+  body came out black on near-black and could only be read by selecting it.
+  `Model.legibleBody` measures each declaration against the pane's background
+  and drops the ones that fail, which lets that text inherit the pane's
+  foreground. It lives in `Model.js` beside `withLinkColor` for that function's
+  two reasons: the helper does not know the theme, and bodies are cached in the
+  store - so a decision made in Python would have to survive the user changing
+  theme. Backgrounds are dropped unconditionally, and that is what makes the
+  test correct rather than approximate: with none surviving there is one
+  background to judge against and no cascade to reconstruct from a regex.
+  `MailPreview` and `MeetingPane` call `bodyMarkup`, which is both passes in
+  the one order that works - the link colour is a default that a sender's own
+  anchor colour would beat, so the unreadable one has to be gone first.
 - **`out()` does not exit here.** In `slack.py` and `teams.py` it does, so a
   command ends at its `out(...)`. In `graph.py` only `fail()` exits: every
   `out(...)` needs the `return` after it, and code copied across from the chat

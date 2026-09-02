@@ -1591,6 +1591,178 @@ function withLinkColor(body, bodyFormat, color) {
   return "<style>a { color: " + safe + "; }</style>" + text
 }
 
+// --------------------------------------------------------------------------
+// a message may not choose a colour the pane cannot draw
+// --------------------------------------------------------------------------
+//
+// Outlook and Word write `color: rgb(0, 0, 0)` into practically every span
+// they emit, because they are laying the message out on white paper. Qt's rich
+// text obeys it, so an HTML-only message arrives as black text on the theme's
+// background - which on a dark theme is black on near-black, readable only by
+// selecting it. Measured on one forwarded mail: 197 style attributes, 39 of
+// them naming black.
+//
+// The sanitiser cannot decide this. It runs in the helper, where the theme is
+// not known, and the body it produces is cached in the store - so a decision
+// made there would also have to survive the user changing theme. So it is made
+// here, at render time, next to withLinkColor and for the same reasons.
+//
+// The rule is a contrast test rather than "strip every colour": the orange a
+// sender used for a warning and the blue they used for a heading are legible
+// on a dark background and are theirs to choose. Only a declaration that
+// cannot be read against the pane's own background is dropped, and dropping it
+// lets the text inherit the pane's foreground - which is legible by
+// construction. Backgrounds go unconditionally, and that is what makes the
+// test correct rather than approximate: with none of them surviving there is
+// exactly one background every colour can be judged against, and no cascade to
+// work out from a regex.
+//
+// 3.0 is WCAG's floor for large text and for anything graphical. 4.5 - the
+// body-text figure - drops mid-tone accents that are perfectly readable here,
+// and this is deciding "can it be read at all", not grading the design.
+var MIN_CONTRAST = 3.0
+
+// The colour names that turn up in real mail. Not the full CSS list: the point
+// is that anything unrecognised is left alone rather than guessed at, and a
+// name nobody's mail client writes is not worth the table.
+var CSS_NAMED_COLORS = {
+  black: [0, 0, 0], white: [255, 255, 255], red: [255, 0, 0], blue: [0, 0, 255],
+  green: [0, 128, 0], gray: [128, 128, 128], grey: [128, 128, 128],
+  silver: [192, 192, 192], maroon: [128, 0, 0], navy: [0, 0, 128],
+  purple: [128, 0, 128], teal: [0, 128, 128], olive: [128, 128, 0],
+  yellow: [255, 255, 0], fuchsia: [255, 0, 255], aqua: [0, 255, 255],
+  lime: [0, 255, 0],
+  // Word's own, and it means black on the paper it was written for.
+  windowtext: [0, 0, 0], buttontext: [0, 0, 0]
+}
+
+// [r, g, b] from what a stylesheet or a QML color can say, or null.
+//
+// Null is the useful answer for anything else - a gradient, a var(), a name
+// this does not know - because the caller leaves what it cannot read alone.
+function parseColor(value) {
+  var text = String(value || "").trim().toLowerCase()
+  if (text === "") return null
+  var named = CSS_NAMED_COLORS[text]
+  if (named) return named.slice()
+  var hex = text.match(/^#([0-9a-f]{3,8})$/)
+  if (hex) {
+    var digits = hex[1]
+    // #rgb and #rgba, each digit doubled.
+    if (digits.length === 3 || digits.length === 4)
+      return [parseInt(digits[0] + digits[0], 16),
+              parseInt(digits[1] + digits[1], 16),
+              parseInt(digits[2] + digits[2], 16)]
+    // #rrggbb, and Qt's own #aarrggbb - which is why the tail is taken from
+    // the right rather than the left: the extra pair is alpha and it leads.
+    if (digits.length === 6 || digits.length === 8) {
+      var rgb = digits.slice(digits.length - 6)
+      return [parseInt(rgb.slice(0, 2), 16), parseInt(rgb.slice(2, 4), 16),
+              parseInt(rgb.slice(4, 6), 16)]
+    }
+    return null
+  }
+  var func = text.match(/^rgba?\(([^)]*)\)$/)
+  if (func) {
+    var parts = func[1].split(/[\s,\/]+/).filter(function(part) { return part !== "" })
+    if (parts.length < 3) return null
+    var channels = []
+    for (var i = 0; i < 3; i++) {
+      var part = parts[i]
+      var number = parseFloat(part)
+      if (!isFinite(number)) return null
+      // A percentage channel is legal CSS and Outlook has been seen writing it.
+      channels.push(Math.max(0, Math.min(255, Math.round(
+        part.indexOf("%") >= 0 ? number * 255 / 100 : number))))
+    }
+    return channels
+  }
+  return null
+}
+
+// WCAG relative luminance, and the ratio between two of them.
+function relativeLuminance(rgb) {
+  var channels = []
+  for (var i = 0; i < 3; i++) {
+    var value = rgb[i] / 255
+    channels.push(value <= 0.03928 ? value / 12.92
+                                   : Math.pow((value + 0.055) / 1.055, 2.4))
+  }
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+}
+
+function contrastRatio(a, b) {
+  var first = relativeLuminance(a)
+  var second = relativeLuminance(b)
+  var lighter = Math.max(first, second)
+  var darker = Math.min(first, second)
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+// Whether text in this colour can be read on that background. Unreadable is
+// the only answer that changes anything, so a colour neither side can parse
+// counts as readable and is left as the sender wrote it.
+function readableOn(color, background) {
+  var text = parseColor(color)
+  var paper = parseColor(background)
+  if (!text || !paper) return true
+  return contrastRatio(text, paper) >= MIN_CONTRAST
+}
+
+// One declaration out of a style attribute, by property name.
+var _DECLARATION = /([a-z-]+)\s*:\s*([^;]*)(;|$)/gi
+
+// A body whose colours the pane can actually draw, given what it draws on.
+//
+// Only the message's own markup is touched - "linked" bodies are markup this
+// file wrote out of escaped plain text, so there is no sender colour in them
+// to argue with.
+function legibleBody(body, bodyFormat, background) {
+  var text = String(body || "")
+  if (bodyFormat !== "html" || text === "") return text
+  if (!parseColor(background)) return text
+
+  // Legacy attributes first: they are whole attributes rather than
+  // declarations, and <font color> is the one Word still writes.
+  text = text.replace(/\sbgcolor\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+  text = text.replace(/(<\s*font\b[^>]*?)\scolor\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+    function(all, head, quoted, dq, sq, bare) {
+      var value = dq !== undefined ? dq : (sq !== undefined ? sq : bare)
+      return readableOn(value, background) ? all : head
+    })
+
+  // The leading whitespace is part of the match, so an attribute that loses
+  // every declaration leaves no gap behind it in the tag.
+  return text.replace(/(\s*)style\s*=\s*("([^"]*)"|'([^']*)')/gi,
+    function(all, space, quoted, dq, sq) {
+      var value = dq !== undefined ? dq : sq
+      var quote = dq !== undefined ? '"' : "'"
+      var kept = []
+      var declaration
+      _DECLARATION.lastIndex = 0
+      while ((declaration = _DECLARATION.exec(value)) !== null) {
+        var property = declaration[1].toLowerCase()
+        var setting = declaration[2].trim()
+        // Every way of painting the paper, including the shorthand - which can
+        // carry a colour among other things, and is not worth taking apart
+        // when the pane supplies the background either way.
+        if (property === "background" || property === "background-color") continue
+        if (property === "color" && !readableOn(setting, background)) continue
+        kept.push(declaration[1] + ": " + setting)
+      }
+      if (kept.length === 0) return ""
+      return space + "style=" + quote + kept.join("; ") + quote
+    })
+}
+
+// The body as the pane should hand it to Qt: colours it can draw, and links in
+// the theme's own colour. One call, because both are the same decision - the
+// message is being drawn somewhere it was not written for - and doing them in
+// the wrong order would colour links this then threw away.
+function bodyMarkup(body, bodyFormat, linkColor, background) {
+  return withLinkColor(legibleBody(body, bodyFormat, background), bodyFormat, linkColor)
+}
+
 // A QML color as something Qt's CSS subset reads, or "" for anything else.
 //
 // Only a colour this file wrote reaches the markup: the value comes from

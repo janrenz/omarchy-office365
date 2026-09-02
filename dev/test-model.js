@@ -718,6 +718,111 @@ group("accountViews - the Focused/Other split", () => {
         build({ account: "fwu", transport: "imap" }, { alias: "fwu", ok: true }).canFocus, false)
 })
 
+group("legibleBody - a colour the pane cannot draw", () => {
+  // #140000 is a real Omarchy theme's background, and black on it comes out at
+  // a contrast ratio of 1.03 - the bug this exists for: the reader could see
+  // the message only by selecting it.
+  const DARK = "#140000"
+  const LIGHT = "#ffffff"
+
+  check("black on a near-black background is unreadable", Model.readableOn("black", DARK), false)
+  check("and readable on a white one", Model.readableOn("black", LIGHT), true)
+  check("the theme's own foreground is readable, which is what dropping falls back to",
+        Model.readableOn("#F9D78E", DARK), true)
+
+  // What Outlook and Word actually write, in every notation they write it in.
+  check("rgb() black is caught too",
+        Model.legibleBody('<span style="color: rgb(0, 0, 0); font-size: 12pt">hi</span>', "html", DARK),
+        '<span style="font-size: 12pt">hi</span>')
+
+  check("windowtext is Word for black",
+        Model.legibleBody("<span style='color:windowtext'>hi</span>", "html", DARK),
+        "<span>hi</span>")
+
+  check("a style attribute left with nothing in it goes as well",
+        Model.legibleBody('<p style="color:#000000">hi</p>', "html", DARK), "<p>hi</p>")
+
+  // The point of the contrast test rather than stripping every colour: a
+  // sender's readable choice is theirs.
+  check("a colour that can be read is the sender's to choose",
+        Model.legibleBody('<b style="color: rgb(254, 114, 53)">warning</b>', "html", DARK),
+        '<b style="color: rgb(254, 114, 53)">warning</b>')
+
+  check("and the same colour is dropped where it cannot be read",
+        Model.legibleBody('<b style="color: #fab326">warning</b>', "html", LIGHT),
+        "<b>warning</b>")
+
+  // Backgrounds go whatever they are: with none of them left there is exactly
+  // one background every colour is judged against.
+  check("a painted background is dropped even when it is readable",
+        Model.legibleBody('<td style="background-color: #ffffff; color: #000">x</td>', "html", DARK),
+        "<td>x</td>")
+
+  check("the background shorthand goes with it",
+        Model.legibleBody('<td style="background: #fff url(x)">x</td>', "html", DARK),
+        "<td>x</td>")
+
+  check("and so does the legacy attribute",
+        Model.legibleBody('<table bgcolor="#ffffff"><tr><td>x</td></tr></table>', "html", DARK),
+        "<table><tr><td>x</td></tr></table>")
+
+  check("<font color> is judged the same way",
+        Model.legibleBody('<font color="black" size="2">hi</font>', "html", DARK),
+        '<font size="2">hi</font>')
+
+  check("a readable <font color> is kept",
+        Model.legibleBody('<font color="#fab326">hi</font>', "html", DARK),
+        '<font color="#fab326">hi</font>')
+
+  // Only the sender's own markup. "linked" is markup Model.js wrote out of
+  // escaped plain text, so there is no sender colour in it to argue with.
+  check("a linked body is not touched",
+        Model.legibleBody('<span style="color:#000">hi</span>', "linked", DARK),
+        '<span style="color:#000">hi</span>')
+
+  check("neither is plain text",
+        Model.legibleBody("color: black", "text", DARK), "color: black")
+
+  check("an empty body stays empty", Model.legibleBody("", "html", DARK), "")
+
+  // A colour neither side can read is left as the sender wrote it: unreadable
+  // is the only verdict that changes anything.
+  check("a colour this cannot parse is left alone",
+        Model.legibleBody('<b style="color: var(--x)">hi</b>', "html", DARK),
+        '<b style="color: var(--x)">hi</b>')
+
+  check("a background this cannot parse means no judging at all",
+        Model.legibleBody('<b style="color:#000">hi</b>', "html", "not a colour"),
+        '<b style="color:#000">hi</b>')
+
+  // Qt hands a non-opaque colour over as #aarrggbb, and the alpha leads.
+  check("Qt's #aarrggbb is read from the right end",
+        Model.parseColor("#ff140000").join(","), "20,0,0")
+
+  check("#rgb shorthand doubles each digit", Model.parseColor("#f00").join(","), "255,0,0")
+
+  check("percentage channels are legal CSS",
+        Model.parseColor("rgb(100%, 0%, 0%)").join(","), "255,0,0")
+
+  check("rgba() alpha is ignored rather than refusing the colour",
+        Model.parseColor("rgba(0, 0, 0, 0.5)").join(","), "0,0,0")
+
+  check("a name this does not know is not guessed at",
+        Model.parseColor("rebeccapurple"), null)
+})
+
+group("bodyMarkup - both passes, in the order that works", () => {
+  // The link colour arrives as a style block in front of the body, and the
+  // legibility pass runs on the body first - a link whose own blue is dropped
+  // then falls back to that block, which is the whole point of doing it in
+  // this order.
+  const body = '<a href="https://e.com" style="color: blue">Sign in</a>'
+  const out = Model.bodyMarkup(body, "html", "#4b74d6", "#140000")
+  check("the theme's link colour leads", out.startsWith("<style>a { color: #4b74d6; }</style>"), true)
+  check("and the sender's unreadable blue is gone", out.indexOf("color: blue"), -1)
+  check("the anchor itself survives", out.indexOf('href="https://e.com"') > 0, true)
+})
+
 group("withLinkColor - links in the theme's colour", () => {
   // A TextEdit's rich text ignores palette.link and bakes Qt's #0000ff into
   // every anchor, so the colour has to arrive as markup in front of the body.

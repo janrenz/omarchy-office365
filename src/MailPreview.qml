@@ -20,6 +20,10 @@ Column {
   // a host that wants its links to sit differently against its ground can say
   // so without moving every other accented thing in the pane with it.
   property color linkColor: Color.accent
+  // What the body is drawn on, which is what decides whether a colour the
+  // sender chose can be read here at all - see Model.legibleBody. The theme's
+  // own background, because that is what is behind this pane in both hosts.
+  property color bg: Color.background
   property string fontFamily: Style.font.family
   property real maxBodyHeight: Style.space(360)
 
@@ -260,7 +264,8 @@ Column {
       width: parent.width
       readonly property string bodyFormat: root.detail ? String(root.detail.bodyFormat || "") : ""
       text: root.detail
-            ? Model.withLinkColor(String(root.detail.body || "").trim(), bodyFormat, root.linkColor)
+            ? Model.bodyMarkup(String(root.detail.body || "").trim(), bodyFormat,
+                               root.linkColor, root.bg)
             : ""
       color: root.fg
       // Link colour is SelectableText's business - through the palette, since
