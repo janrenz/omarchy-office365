@@ -1483,6 +1483,183 @@ class ComposeStopsWhenItIsDone(unittest.TestCase):
         self.assertFalse(any(call["url"].endswith("/reply") for call in self.calls))
 
 
+class RecipientsWithNames(unittest.TestCase):
+    """The bug that made forwarding not work.
+
+    recipient_list used to split the whole field on whitespace as well as on
+    commas, so "Jan Renz <jan@example.com>" arrived as three entries, two of
+    them without an @ - and the answer was `bad_recipient: Not an email
+    address: Jan, Renz`. A name comes with the address nearly every time it is
+    copied from anywhere, so forwarding to anybody whose address had not been
+    typed out by hand simply failed.
+    """
+
+    def addresses(self, value):
+        good, bad = graph.recipient_list(value)
+        return [entry["emailAddress"] for entry in good], bad
+
+    def test_a_name_and_address_is_one_recipient_with_its_name_kept(self):
+        good, bad = self.addresses("Jan Renz <jan@example.com>")
+        self.assertEqual(bad, [])
+        self.assertEqual(good, [{"address": "jan@example.com", "name": "Jan Renz"}])
+
+    def test_a_bare_address_still_works_and_carries_no_name(self):
+        good, bad = self.addresses("jan@example.com")
+        self.assertEqual((good, bad), ([{"address": "jan@example.com"}], []))
+
+    def test_a_comma_inside_a_quoted_name_does_not_split_it_in_two(self):
+        good, bad = self.addresses('"Renz, Jan" <jan@example.com>')
+        self.assertEqual(bad, [])
+        self.assertEqual(good, [{"address": "jan@example.com", "name": "Renz, Jan"}])
+
+    def test_outlooks_semicolons_and_everybody_elses_commas_both_work(self):
+        good, _bad = self.addresses("a@b.com; Someone Else <c@d.org>, e@f.net")
+        self.assertEqual([entry["address"] for entry in good],
+                         ["a@b.com", "c@d.org", "e@f.net"])
+
+    def test_a_separator_inside_angle_brackets_does_not_split_the_entry(self):
+        # The scan is what must hold this together. Whether an unquoted
+        # semicolon in a local part is then a routable address is a different
+        # question, and refusing it is right.
+        self.assertEqual(graph.split_address_list("<a;b@example.com>, k@example.org"),
+                         ["<a;b@example.com>", "k@example.org"])
+        self.assertEqual(graph.split_address_list('"Renz, Jan" <j@x.de>, k@example.org'),
+                         ['"Renz, Jan" <j@x.de>', "k@example.org"])
+
+    def test_something_that_is_not_an_address_is_still_refused(self):
+        good, bad = self.addresses("a@b.com, notanaddress")
+        self.assertEqual([entry["address"] for entry in good], ["a@b.com"])
+        self.assertEqual(bad, ["notanaddress"])
+
+    def test_what_was_refused_is_named_as_it_was_typed_not_as_fragments(self):
+        # "Not an email address: Jan, Renz" told nobody what to fix.
+        _good, bad = self.addresses("Jan Renz <not an address>")
+        self.assertEqual(bad, ["Jan Renz <not an address>"])
+
+    def test_the_imap_path_gets_a_header_it_can_use_verbatim(self):
+        good, _bad = graph.recipient_list('"Renz, Jan" <jan@example.com>, k@example.org')
+        self.assertEqual([graph.address_header(entry) for entry in good],
+                         ['"Renz, Jan" <jan@example.com>', "k@example.org"])
+
+    def test_a_forward_reaches_the_endpoint_with_the_name_on_it(self):
+        args = ComposeArgs()
+        args.mode = "forward"
+        args.to = "Jan Renz <jan@example.com>"
+        args.attach = []
+        calls = []
+
+        def http(url, method="GET", data=None, json_body=None, headers=None, timeout=20):
+            calls.append({"url": url, "body": json_body})
+            return (202, {})
+
+        patched = {
+            "read_json": lambda *a, **k: {"write": True, "scopes": "Mail.ReadWrite Mail.Send"},
+            "access_token": lambda alias, account: ("token", account),
+            "http": http,
+            "out": lambda payload: (_ for _ in ()).throw(Emitted(payload)),
+        }
+        original = {name: getattr(graph, name) for name in patched}
+        for name, stub in patched.items():
+            setattr(graph, name, stub)
+        try:
+            graph.cmd_compose(args)
+        except Emitted as emitted:
+            result = emitted.payload
+        finally:
+            for name, value in original.items():
+                setattr(graph, name, value)
+        self.assertTrue(result["ok"])
+        self.assertTrue(calls[0]["url"].endswith("/forward"))
+        self.assertEqual(calls[0]["body"]["toRecipients"],
+                         [{"emailAddress": {"address": "jan@example.com", "name": "Jan Renz"}}])
+
+
+class ImapForward(unittest.TestCase):
+    """A forward is not a reply to the message it forwards.
+
+    It goes to somebody who was never in the conversation, so it carries the
+    original's headers where a reply carries a quote - and it must not carry
+    In-Reply-To, which filed the forward under the original in the recipient's
+    client as though they had been copied on it all along.
+    """
+
+    def build(self, mode="forward", to=None):
+        import imapmail
+        sent = {}
+        original = {"subject": "Rechnung", "fromAddress": "her@example.com",
+                    "from": "Her Name",
+                    "to": [{"name": "Me", "address": "me@example.com"}],
+                    "cc": [{"name": "Renz, Jan", "address": "jan@x.de"}],
+                    "messageId": "<abc@example.com>", "raw": "the original body",
+                    "received": "2026-09-01T10:00:00+00:00", "isHtml": False}
+
+        class FakeSMTP:
+            def __init__(self, *a, **k):
+                pass
+
+            def ehlo(self):
+                pass
+
+            def starttls(self):
+                pass
+
+            def auth(self, *a, **k):
+                pass
+
+            def send_message(self, note):
+                sent["note"] = note
+
+            def quit(self):
+                pass
+
+        saved = (imapmail.message, imapmail.smtplib.SMTP, imapmail.connect)
+        imapmail.message = lambda *a, **k: original
+        imapmail.smtplib.SMTP = FakeSMTP
+        imapmail.connect = lambda *a, **k: (_ for _ in ()).throw(OSError("no imap"))
+        try:
+            imapmail.compose({"username": "me@example.com"}, "token", "1", mode,
+                             "FYI", to if to is not None else ["third@example.org"],
+                             False, None, "", None)
+        finally:
+            imapmail.message, imapmail.smtplib.SMTP, imapmail.connect = saved
+        return sent["note"]
+
+    def body_of(self, note):
+        return note.get_body(("plain",)).get_content()
+
+    def test_a_forward_is_not_threaded_into_the_conversation_it_came_from(self):
+        note = self.build()
+        self.assertIsNone(note["In-Reply-To"])
+        self.assertIsNone(note["References"])
+
+    def test_a_reply_still_is(self):
+        note = self.build(mode="reply", to=[])
+        self.assertEqual(note["In-Reply-To"], "<abc@example.com>")
+
+    def test_it_carries_the_originals_headers_because_nobody_has_seen_them(self):
+        body = self.body_of(self.build())
+        self.assertIn("---------- Forwarded message ----------", body)
+        self.assertIn("From: Her Name <her@example.com>", body)
+        self.assertIn("Subject: Rechnung", body)
+        self.assertIn("To: Me <me@example.com>", body)
+        self.assertIn('Cc: "Renz, Jan" <jan@x.de>', body)
+
+    def test_the_forwarded_body_is_passed_on_rather_than_quoted(self):
+        body = self.body_of(self.build())
+        self.assertIn("\nthe original body", body)
+        self.assertNotIn("> the original body", body)
+
+    def test_a_name_and_address_typed_into_To_survives_into_the_header(self):
+        note = self.build(to=['"Renz, Jan" <third@example.org>'])
+        self.assertEqual(note["To"], '"Renz, Jan" <third@example.org>')
+
+    def test_the_quote_line_is_a_date_a_person_can_read(self):
+        # It used to be "On 2026-09-01T10:00:00+00:00, Her Name wrote:".
+        body = self.body_of(self.build(mode="reply", to=[]))
+        self.assertNotIn("2026-09-01T10:00:00", body)
+        self.assertIn("Sep 2026", body)
+
+
 class Recipients(unittest.TestCase):
     def test_the_separators_people_type_all_work(self):
         good, bad = graph.recipient_list("a@b.com, c@d.org; e@f.net\ng@h.io")

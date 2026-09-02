@@ -377,6 +377,16 @@ on any message with markup in it. Answering the message is what a message that
 has just been read is for, so the three of them come first now and **Open** —
 which leaves for Outlook — went down with the rest.
 
+Addresses complete as you type, in both **To** and **Cc**: the suggestions
+come from mail that has already arrived and messages you have opened, so they
+are the people you actually correspond with, ranked so a name that *starts*
+with what you typed beats one that merely contains it. `↓`/`↑` move, `Tab` or
+`Enter` accepts, `Escape` closes the list (and a second `Escape` backs out of
+the message). Nothing is fetched to build it and nothing is written down —
+Graph's contacts endpoints need consent this plugin does not ask for, and an
+IMAP mailbox has none at all, so a book from either would have been empty on
+half the mailboxes here.
+
 **Write** in the window's top-right corner, or `c`, starts a message that
 answers nothing: **To**, **Cc**, a subject, and the reading column to write it
 in. It goes out from the mailbox you are reading, which the line above the box
@@ -769,6 +779,31 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.6.0 — 2026-09-02
+
+- **Forwarding did not work.** The field you type recipients into split on
+  whitespace as well as on commas, so `Jan Renz <jan@example.com>` — which is
+  what you get copying an address from anywhere at all — arrived as three
+  entries, two of them without an `@`, and the answer was *Not an email
+  address: Jan, Renz*. Every entry is now parsed the way a mail client parses
+  one: the name is kept and passed on, a comma inside a quoted name no longer
+  splits it in two, and Outlook's semicolons work alongside everybody else's
+  commas. What is genuinely unroutable is still refused, and named as you typed
+  it rather than as fragments.
+- **Recipients complete as you type**, in **To** and in **Cc**, from mail that
+  has already arrived and messages you have opened. `↓`/`↑` move, `Tab` or
+  `Enter` accepts, `Escape` closes the list. Nothing is fetched to build it and
+  nothing is written down.
+- **A forward is no longer a reply to the message it forwards.** It carried the
+  original's `In-Reply-To`, which filed it under that conversation in the
+  recipient's client as though they had been copied on it all along. It now
+  carries the original's headers instead — From, Date, Subject, To and Cc above
+  the forwarded body, the way a forward is meant to read — and the body is
+  passed on rather than marked up as a quotation.
+- **The quote line says a date rather than a timestamp.** A reply opened with
+  *On 2026-09-01T10:00:00+00:00, X wrote:*; it now says *On Tue, 01 Sep 2026 at
+  12:00*, in your own zone.
 
 ### 1.5.0 — 2026-09-02
 

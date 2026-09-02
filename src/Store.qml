@@ -246,6 +246,85 @@ Item {
     overrideOwner = pruned.owner
   }
 
+  // ---- who you write to ---------------------------------------------------
+  //
+  // An address book, built out of the mail already in hand rather than fetched
+  // from anywhere. Graph has /me/people and /me/contacts, and both need consent
+  // this plugin does not ask for; an IMAP mailbox has no contacts endpoint at
+  // all, so a book that came from either would be empty on the transport at
+  // least one mailbox here is read over. Harvesting what has already arrived
+  // costs no request and no scope, and gives the better answer anyway: the
+  // people actually corresponded with, rather than a directory of everyone.
+  //
+  // In the store because it is worth agreeing on - the window's reply box
+  // should know about the mail the bar fetched - and per shell rather than
+  // written down, so nothing about who is written to is persisted.
+  //
+  // {lowercased address: {address, name, count, at}}.
+  property var addressBook: ({})
+
+  // Every address ever seen would grow without bound over a shell's life, and
+  // nobody reads past six suggestions. Least recently seen goes first.
+  readonly property int addressCap: 400
+
+  function rememberAddresses(people) {
+    if (!people || people.length === 0) return
+    var next = {}
+    for (var existing in addressBook) next[existing] = addressBook[existing]
+    var added = false
+    for (var i = 0; i < people.length; i++) {
+      var person = people[i] || {}
+      var address = String(person.address || "").trim()
+      // At least one character before the @: a bare "@host" is not somebody to
+      // write to, and neither is a Message-ID that wandered in.
+      if (address.indexOf("@") < 1) continue
+      var key = address.toLowerCase()
+      var seen = next[key]
+      var name = String(person.name || "").trim()
+      next[key] = {
+        address: address,
+        // A later sighting fills in a name that was missing, and never replaces
+        // one already known: a header that carried only an address is not
+        // evidence that the name was wrong.
+        name: name !== "" ? name : (seen ? String(seen.name || "") : ""),
+        count: (seen ? Number(seen.count || 0) : 0) + 1,
+        at: Date.now()
+      }
+      added = true
+    }
+    if (!added) return
+    var keys = Object.keys(next)
+    if (keys.length > addressCap) {
+      keys.sort(function(a, b) { return Number(next[a].at || 0) - Number(next[b].at || 0) })
+      while (keys.length > addressCap) delete next[keys.shift()]
+    }
+    addressBook = next
+  }
+
+  // Everyone a fetched page of mail mentions. Only the sender: a row carries no
+  // recipients, which is why a message opened for reading contributes more.
+  function harvestFromMail(account) {
+    if (!account || !account.mail) return
+    var people = []
+    for (var i = 0; i < account.mail.length; i++) {
+      var row = account.mail[i] || {}
+      people.push({ address: row.fromAddress, name: row.from })
+    }
+    rememberAddresses(people)
+  }
+
+  // ...and everyone a message that was opened mentions, which is where the
+  // people you were written to *alongside* come from - the ones a reply-all
+  // would reach and a reply would not.
+  function harvestFromDetail(detail) {
+    if (!detail) return
+    var people = [{ address: detail.fromAddress, name: detail.from }]
+    var lists = [detail.to, detail.cc]
+    for (var l = 0; l < lists.length; l++)
+      for (var i = 0; i < (lists[l] || []).length; i++) people.push(lists[l][i])
+    rememberAddresses(people)
+  }
+
   // ---- message bodies -----------------------------------------------------
   //
   // Bodies are far too big to carry in the list fetch, so one is pulled when a
@@ -334,6 +413,7 @@ Item {
     bodyPending = next
     if (detail) {
       rememberBody(key, detail)
+      harvestFromDetail(detail)
       bodyReady(key, detail)
     } else {
       bodyFailed(key, String(message || "Could not open this message"))
@@ -432,6 +512,7 @@ Item {
     var accounts = parsed.accounts || []
     var account = accounts.length > 0 ? accounts[0] : null
     patchEntry(key, { loading: false, error: null, data: account })
+    harvestFromMail(account)
     announceNewMail(key, spec, account)
     if (spec) clearBusy(spec.alias)
     if (account) pruneOverrides(account)

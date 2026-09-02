@@ -22,6 +22,7 @@ themselves were unusable, so the widget always has something to render.
 
 import argparse
 import base64
+import email.utils
 import html
 import json
 import os
@@ -2752,24 +2753,76 @@ NEW_MODE = "new"
 COMPOSE_CHOICES = sorted(list(COMPOSE_MODES) + [NEW_MODE])
 
 
+def split_address_list(value):
+    """One typed To field, as the entries somebody meant.
+
+    Not `split` on a character class. Outlook separates recipients with
+    semicolons and everybody else with commas, so both have to work - but a
+    display name may contain either inside its quotes ("Renz, Jan"), and an
+    address in angle brackets may not be cut apart. So this scans, and only
+    breaks on a separator that is outside both.
+    """
+    parts, current, quoted, angled = [], [], False, False
+    for character in str(value or ""):
+        if character == '"' and not angled:
+            quoted = not quoted
+            current.append(character)
+        elif character == "<" and not quoted:
+            angled = True
+            current.append(character)
+        elif character == ">" and not quoted:
+            angled = False
+            current.append(character)
+        elif character in ",;\n" and not quoted and not angled:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(character)
+    parts.append("".join(current))
+    return [part.strip() for part in parts if part.strip()]
+
+
 def recipient_list(value):
     """Addresses typed into a To field, as Graph recipients.
 
-    Split on the separators people actually type - comma, semicolon, newline -
-    rather than insisting on one of them. Anything without an @ is refused
-    here: Graph would take it, fail to route it, and the reply would look sent.
+    A person's name comes with the address far more often than not - it is what
+    every mail client, every address book and every header hands you when you
+    copy a recipient. This used to split the whole field on whitespace as well
+    as on commas, so "Jan Renz <jan@example.com>" arrived as three entries, two
+    of which had no @ in them, and the answer was `bad_recipient: Not an email
+    address: Jan, Renz`. Forwarding to anybody whose address you had not typed
+    out by hand simply did not work.
+
+    So each entry is parsed as a mail client parses one, the display name is
+    kept, and anything without a routable address is refused - named as it was
+    typed, not as fragments. Graph would take an unroutable address, fail to
+    deliver it, and the message would look sent.
     """
-    parts = re.split(r"[,;\s]+", str(value or ""))
     addresses, bad = [], []
-    for part in parts:
-        part = part.strip().strip("<>")
-        if not part:
-            continue
-        if "@" not in part or part.startswith("@") or part.endswith("@"):
+    for part in split_address_list(value):
+        name, address = email.utils.parseaddr(part)
+        address = address.strip().strip("<>")
+        if "@" not in address or address.startswith("@") or address.endswith("@"):
             bad.append(part)
             continue
-        addresses.append({"emailAddress": {"address": part}})
+        person = {"address": address}
+        if name.strip():
+            person["name"] = name.strip()
+        addresses.append({"emailAddress": person})
     return addresses, bad
+
+
+def address_header(entry):
+    """One Graph recipient as a mail header writes it.
+
+    The IMAP path assembles its own headers, so it wants `Jan Renz
+    <jan@example.com>` rather than the address on its own - formataddr quotes a
+    name containing a comma, which is the case that would otherwise turn one
+    recipient into two.
+    """
+    person = entry.get("emailAddress") or {}
+    return email.utils.formataddr((str(person.get("name") or ""),
+                                   str(person.get("address") or "")))
 
 
 def new_message(subject, comment, recipients, copies, files):
@@ -2897,8 +2950,8 @@ def cmd_compose(args):
         fail(error.code, error.message)
 
     if transport_of(account) == TRANSPORT_IMAP:
-        addresses = [entry["emailAddress"]["address"] for entry in recipients]
-        copy_addresses = [entry["emailAddress"]["address"] for entry in copies]
+        addresses = [address_header(entry) for entry in recipients]
+        copy_addresses = [address_header(entry) for entry in copies]
         if not args.draft and not can_send(account):
             # Said before the request rather than after SMTP refuses the
             # sign-in, so the window can offer the draft instead.

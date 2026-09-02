@@ -101,6 +101,9 @@ What you wrote goes on **stdin** (`{"comment": …, "to": …, "cc": …, "subje
 …}`): anyone on this machine can read another process's command line for as
 long as it runs, and a subject line is as much the user's words as the body is.
 `--comment`, `--to`, `--cc` and `--subject` still work for running it by hand.
+A recipient may carry a name — `Jan Renz <jan@example.com>`, or `"Renz, Jan"
+<jan@example.com>` when the name itself holds a comma — and commas and
+semicolons both separate them.
 `--demo` on `compose` answers as if it had been sent and sends nothing.
 
 `--mode new` writes a message that answers nothing, and is the one mode that

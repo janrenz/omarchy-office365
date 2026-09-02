@@ -37,6 +37,11 @@ Column {
   // A subject line and a Cc field, which only a message with no original has
   // any use for.
   property bool needsSubject: false
+
+  // What the recipient fields complete from - see Store.qml. Empty is fine and
+  // is what a mailbox nothing has been fetched for yet has: the fields behave
+  // exactly as they did before there was a book.
+  property var addressBook: ({})
   property bool canSend: false
   property bool running: false
   property string error: ""
@@ -94,7 +99,7 @@ Column {
   // at the address, which is the field that would otherwise be filled last and
   // by mouse.
   function focusFirst() {
-    if (toField.visible) toField.forceActiveFocus()
+    if (toField.visible) toField.focusField()
     else body.forceActiveFocus()
   }
 
@@ -130,8 +135,9 @@ Column {
     else root.draftRequested()
   }
 
-  // Escape typed in the recipients field, which the body's own handler below
-  // never sees.
+  // The subject field has no handler of its own; the two address fields and the
+  // body do, and they call handleKey with what they did not use. Which is why
+  // this stays: without it Escape typed in the subject line does nothing.
   Keys.onPressed: function(event) { root.handleKey(event) }
 
   Text {
@@ -145,26 +151,37 @@ Column {
     font.bold: true
   }
 
-  TextField {
+  // The two address fields complete from the book - see RecipientField. They
+  // pass on the keys they have no use for, because Escape and Shift+Enter
+  // belong to this box and the window's key catcher has stood down.
+  RecipientField {
     id: toField
     width: parent.width
     visible: root.needsRecipient
-    placeholderText: "To — comma separated"
-    foreground: root.fg
+    placeholder: "To — comma separated"
+    book: root.addressBook
+    fg: root.fg
+    dim: root.dim
     accent: root.accent
-    onTextChanged: root.toEdited(text)
+    fontFamily: root.fontFamily
+    onEdited: function(value) { root.toEdited(value) }
+    onUnhandledKey: function(event) { root.handleKey(event) }
   }
 
   // Cc and the subject, in the order an envelope reads. Both only where there
   // is no original to have supplied them.
-  TextField {
+  RecipientField {
     id: ccField
     width: parent.width
     visible: root.needsSubject
-    placeholderText: "Cc — comma separated, or leave it empty"
-    foreground: root.fg
+    placeholder: "Cc — comma separated, or leave it empty"
+    book: root.addressBook
+    fg: root.fg
+    dim: root.dim
     accent: root.accent
-    onTextChanged: root.ccEdited(text)
+    fontFamily: root.fontFamily
+    onEdited: function(value) { root.ccEdited(value) }
+    onUnhandledKey: function(event) { root.handleKey(event) }
   }
 
   TextField {

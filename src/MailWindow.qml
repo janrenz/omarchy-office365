@@ -1482,6 +1482,7 @@ Item {
                   fromAddress: root.composeFrom
                   needsRecipient: mailView.composeNeedsRecipient
                   needsSubject: mailView.composingNew
+                  addressBook: mailView.addressBook
                   // A reply is a strip under the message it answers. A new
                   // message has the column to itself and no reason to be
                   // written through a slot.

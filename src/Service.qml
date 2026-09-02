@@ -762,6 +762,10 @@ Item {
   readonly property bool composingNew: composeMode === "new"
   readonly property bool composeNeedsRecipient: composeMode === "forward" || composingNew
 
+  // Who this host's reply boxes complete recipients from. The store's, because
+  // the book is harvested from every fetch any host made - see Store.qml.
+  readonly property var addressBook: hub ? hub.addressBook : ({})
+
   function canSend(alias) {
     var view = viewFor(String(alias || ""))
     return !!view && view.send === true

@@ -20,8 +20,9 @@ src/imapmail.py       IMAP/SMTP transport, for tenants that will not consent to
 src/ewscal.py         EWS calendar, for a mailbox read over IMAP — IMAP carries
                       no calendar, and Entra issues one token per resource.
 src/config.py         Shared config/paths for the three.
-src/Model.js          Pure JS: shaping, grouping, dates, link building. No Qt
-                      types, so `node dev/test-model.js` can run it.
+src/Model.js          Pure JS: shaping, grouping, dates, link building, and
+                      the recipient completion. No Qt types, so
+                      `node dev/test-model.js` can run it.
 src/Store.qml         *** The one service, per plugin, for the whole shell. ***
 src/Service.qml       One host's *view* of the store: filters, open folder,
                       message being read, a half-written reply.
@@ -198,6 +199,22 @@ keeps using the old client id or authority.
   draft-attach-send dance a reply needs. `--id` is therefore optional and
   guarded per mode instead. Over IMAP the difference is what is *left out*:
   nothing is fetched, nothing is quoted, and there is no `In-Reply-To`.
+- **Anything typed into a To field arrives with a name on it.** `recipient_list`
+  used to split the whole field on whitespace as well as on commas, so `Jan Renz
+  <jan@example.com>` became three entries and two of them had no `@` - and
+  forwarding to anybody whose address had not been typed out by hand answered
+  `bad_recipient: Not an email address: Jan, Renz`. Every entry is now parsed
+  the way a mail client parses one, and `split_address_list` scans rather than
+  splits, because a display name may hold a comma inside its quotes and an
+  angle-bracketed address may not be cut apart. `Model.lastAddressFragment`
+  keeps the same rule in QML, for the entry being completed. Three places, one
+  rule; change one and change all three.
+- **The address book is harvested, not fetched.** `Store.qml` builds it from
+  rows that have arrived and messages that have been opened. Graph's
+  `/me/people` and `/me/contacts` need consent this plugin does not ask for and
+  an IMAP mailbox has no contacts endpoint at all, so a book from either would
+  be empty on the transport the FWU mailbox uses. It lives for the shell's
+  lifetime and is never written down.
 - **`MailList.qml` is a `ListView` on purpose**, and the comment at the top says
   why a `Repeater` over a plain array was worse. The Slack and Teams plugins have
   not made that change yet; if you are porting UI between them, port this too.

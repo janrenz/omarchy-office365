@@ -812,5 +812,58 @@ group("a meeting - who is coming, and what they said", () => {
   check("nothing to place is nothing to say", Model.meetingWhen("", "", false, now), "")
 })
 
+group("recipient completion - the entry being typed, and what it matches", () => {
+  // A To field holds a list, and only the last entry is being completed.
+  check("nothing typed yet is nothing to complete",
+        Model.lastAddressFragment(""), { head: "", fragment: "" })
+  check("the whole field is the fragment while it is the only entry",
+        Model.lastAddressFragment("jan"), { head: "", fragment: "jan" })
+  check("only what follows the last separator is being typed",
+        Model.lastAddressFragment("a@b.com, jan"), { head: "a@b.com,", fragment: "jan" })
+  check("a semicolon separates too, because Outlook taught people it does",
+        Model.lastAddressFragment("a@b.com; jan"), { head: "a@b.com;", fragment: "jan" })
+
+  // The two that a plain split on commas gets wrong, and that would cut a
+  // finished recipient in half every time the next one was typed.
+  check("a comma inside a quoted name is not a separator",
+        Model.lastAddressFragment('"Renz, Jan" <j@x.de>, ma'),
+        { head: '"Renz, Jan" <j@x.de>,', fragment: "ma" })
+  check("a separator inside angle brackets is not one either",
+        Model.lastAddressFragment("<a,b@x.de>"), { head: "", fragment: "<a,b@x.de>" })
+
+  // What accepting a suggestion writes. graph.py parses this form apart again.
+  check("a name is kept, because that is what the field is read back for",
+        Model.formatRecipient({ name: "Jan Renz", address: "j@x.de" }), "Jan Renz <j@x.de>")
+  check("an address with no name stays an address",
+        Model.formatRecipient({ name: "", address: "j@x.de" }), "j@x.de")
+  check("a name that is also the address is not written twice",
+        Model.formatRecipient({ name: "j@x.de", address: "j@x.de" }), "j@x.de")
+  check("a name carrying a comma is quoted, or it would be two recipients",
+        Model.formatRecipient({ name: "Renz, Jan", address: "j@x.de" }), '"Renz, Jan" <j@x.de>')
+  check("nothing to format is nothing", Model.formatRecipient(null), "")
+
+  const book = {
+    "j@x.de": { address: "j@x.de", name: "Jan Renz", count: 5, at: 2 },
+    "marijana@y.de": { address: "marijana@y.de", name: "Marijana Kern", count: 40, at: 9 },
+    "k@z.de": { address: "k@z.de", name: "Klaus Renz", count: 1, at: 1 }
+  }
+  const addresses = (fragment, limit) =>
+    Model.matchAddresses(book, fragment, limit).map((entry) => entry.address)
+
+  check("an empty fragment matches nobody - a list of everyone is not a suggestion",
+        addresses(""), [])
+  // The ranking that matters: "jan" should offer Jan before Marijana, even
+  // though Marijana is written to eight times as often.
+  check("a name that starts with it beats a name that merely contains it",
+        addresses("jan"), ["j@x.de", "marijana@y.de"])
+  check("any word of a name counts, not just the first",
+        addresses("renz"), ["j@x.de", "k@z.de"])
+  check("the address matches as well as the name", addresses("marijana@"), ["marijana@y.de"])
+  check("case is not something anybody should have to get right",
+        addresses("REnZ"), ["j@x.de", "k@z.de"])
+  check("nobody reads past the limit", addresses("renz", 1), ["j@x.de"])
+  check("no match is an empty list, not everything", addresses("zzz"), [])
+})
+
 console.log(`\n${checks - failures}/${checks} passed`)
 process.exit(failures ? 1 : 0)

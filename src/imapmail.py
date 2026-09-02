@@ -1134,15 +1134,62 @@ def delete(account, token, message_id):
     return {"ok": True, "id": message_id, "deleted": True, "newId": result.get("newId", "")}
 
 
+def readable_date(value):
+    """A timestamp somebody can read, out of the ISO one a fetch returns.
+
+    The quote line said "On 2026-09-01T10:00:00+00:00, X wrote:" - a machine
+    timestamp in the one line of a reply the recipient actually reads. Falls
+    back to whatever it was given: a date that cannot be parsed is still better
+    printed than dropped.
+    """
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        # received_iso writes UTC; shown in the local zone, because the line is
+        # read by a person and not by a parser.
+        parsed = datetime.fromisoformat(text).astimezone()
+    except (TypeError, ValueError):
+        return text
+    return parsed.strftime("%a, %d %b %Y at %H:%M")
+
+
+def original_text(original):
+    """The original's body as text, whatever it arrived as."""
+    body = str(original.get("raw") or "")
+    return strip_markup(body) if original.get("isHtml") else body
+
+
 def quote_original(original):
-    """The original message, quoted the way mail clients quote."""
-    when = str(original.get("received") or "")
+    """The original message, quoted the way mail clients quote a reply."""
     who = original.get("from") or original.get("fromAddress") or "somebody"
-    lines = str(original.get("raw") or "")
-    if original.get("isHtml"):
-        lines = strip_markup(lines)
-    quoted_lines = "\n".join("> " + line for line in lines.splitlines())
-    return "On %s, %s wrote:\n%s" % (when, who, quoted_lines)
+    quoted_lines = "\n".join("> " + line for line in original_text(original).splitlines())
+    return "On %s, %s wrote:\n%s" % (readable_date(original.get("received")), who, quoted_lines)
+
+
+def forwarded_original(original):
+    """The original as a forwarded message: its headers, then its body.
+
+    A reply is quoted with "On <date>, X wrote:" because whoever gets it was
+    already in the conversation. A forward goes to somebody who has never seen
+    the message, so who it was from, who it was addressed to, when it arrived
+    and what it was called are part of what is being forwarded - and the body
+    is passed on as it was written rather than marked up as a quotation.
+    """
+    who = original.get("from") or ""
+    address = str(original.get("fromAddress") or "")
+    sender = email.utils.formataddr((str(who), address)) if address else str(who or "somebody")
+    lines = ["---------- Forwarded message ----------",
+             "From: %s" % sender,
+             "Date: %s" % readable_date(original.get("received")),
+             "Subject: %s" % str(original.get("subject") or "")]
+    for label, key in (("To", "to"), ("Cc", "cc")):
+        people = [email.utils.formataddr((str(person.get("name") or ""),
+                                          str(person.get("address") or "")))
+                  for person in (original.get(key) or []) if person.get("address")]
+        if people:
+            lines.append("%s: %s" % (label, ", ".join(people)))
+    return "\n".join(lines) + "\n\n" + original_text(original)
 
 
 def compose(account, token, message_id, mode, comment, to_addresses, draft, attachments=None,
@@ -1209,15 +1256,24 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
     note["Message-ID"] = email.utils.make_msgid(
         domain=(me.rpartition("@")[2] or str(account.get("smtp_host") or DEFAULT_SMTP_HOST)))
     # Threading, so the reply lands in the conversation rather than beside it.
-    # A new message starts a conversation instead of joining one, so it carries
-    # neither header - inventing a reference to nothing would have some clients
-    # file it under a thread that does not exist.
-    original_id = "" if new else str(original.get("messageId") or "").strip()
+    #
+    # Only a reply. A new message starts a conversation instead of joining one,
+    # and a forward is a different message about the same thing sent to somebody
+    # who was never in the conversation - threading it in filed the forward
+    # under the original in the recipient's client, as though they had been
+    # copied on it all along. Inventing a reference to nothing does the same to
+    # a new message.
+    original_id = "" if (new or mode == "forward") else str(original.get("messageId") or "").strip()
     if original_id:
         note["In-Reply-To"] = original_id
         note["References"] = original_id
-    note.set_content(str(comment or "") if new
-                     else "%s\n\n%s" % (str(comment or ""), quote_original(original)))
+    if new:
+        body_text = str(comment or "")
+    elif mode == "forward":
+        body_text = "%s\n\n%s" % (str(comment or ""), forwarded_original(original))
+    else:
+        body_text = "%s\n\n%s" % (str(comment or ""), quote_original(original))
+    note.set_content(body_text)
 
     # add_attachment turns this into multipart/mixed, which is why set_content
     # has to have run first. The type is guessed from the name and falls back to

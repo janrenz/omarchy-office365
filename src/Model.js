@@ -1529,3 +1529,93 @@ function cssColor(color) {
   if (/^#[0-9A-Fa-f]{8}$/.test(text)) return "#" + text.slice(3)
   return ""
 }
+
+// --------------------------------------------------------------------------
+// who you write to
+// --------------------------------------------------------------------------
+//
+// The address book is harvested from mail already in hand - see Store.qml's
+// rememberAddresses for why it is not a contacts API - and these three
+// functions are everything the recipient fields do with it. Pure, so
+// `node dev/test-model.js` covers the parts that are easy to get wrong: where
+// one entry in a typed list ends, and what counts as a match.
+
+// Where the entry being typed begins.
+//
+// A To field holds a list, and only the last entry is being typed. Splitting
+// on the last comma is not enough: a display name may carry one inside its
+// quotes ("Renz, Jan"), and an address in angle brackets may not be cut apart.
+// So this scans for the last separator that is outside both, and hands back
+// the part to keep and the part to complete.
+function lastAddressFragment(text) {
+  var value = String(text || "")
+  var quoted = false
+  var angled = false
+  var cut = -1
+  for (var i = 0; i < value.length; i++) {
+    var character = value.charAt(i)
+    if (character === '"' && !angled) quoted = !quoted
+    else if (character === "<" && !quoted) angled = true
+    else if (character === ">" && !quoted) angled = false
+    else if ((character === "," || character === ";") && !quoted && !angled) cut = i
+  }
+  return { head: value.slice(0, cut + 1), fragment: value.slice(cut + 1).trim() }
+}
+
+// One address book entry as a recipient field should hold it.
+//
+// The name is kept: it is what the person reading the field recognises, and
+// graph.py parses the `Name <address>` form back apart. Quoted when it carries
+// a comma or a quote of its own, which is the case that would otherwise turn
+// one recipient into two.
+function formatRecipient(entry) {
+  if (!entry) return ""
+  var address = String(entry.address || "").trim()
+  if (address === "") return ""
+  var name = String(entry.name || "").trim()
+  if (name === "" || name === address) return address
+  if (/[",;<>]/.test(name)) return '"' + name.replace(/["\\]/g, "") + '" <' + address + ">"
+  return name + " <" + address + ">"
+}
+
+// The book, narrowed to what somebody has typed so far.
+//
+// Ranked so the useful answer is the first one: an entry whose address or whose
+// name *starts* with the fragment beats one that merely contains it - typing
+// "jan" should offer jan@ before marijana@ - and among equals the one written
+// to most often, then most recently, comes first.
+function matchAddresses(book, fragment, limit) {
+  var needle = String(fragment || "").trim().toLowerCase()
+  if (needle === "") return []
+  var out = []
+  for (var key in book) {
+    var entry = book[key]
+    if (!entry) continue
+    var address = String(entry.address || "").toLowerCase()
+    var name = String(entry.name || "").toLowerCase()
+    var rank = -1
+    if (address.indexOf(needle) === 0 || startsAWord(name, needle)) rank = 0
+    else if (address.indexOf(needle) >= 0 || name.indexOf(needle) >= 0) rank = 1
+    if (rank < 0) continue
+    out.push({ address: String(entry.address || ""), name: String(entry.name || ""),
+               rank: rank, count: Number(entry.count || 0), at: Number(entry.at || 0) })
+  }
+  out.sort(function(a, b) {
+    if (a.rank !== b.rank) return a.rank - b.rank
+    if (a.count !== b.count) return b.count - a.count
+    if (a.at !== b.at) return b.at - a.at
+    return a.address < b.address ? -1 : (a.address > b.address ? 1 : 0)
+  })
+  var cap = Number(limit || 6)
+  return out.slice(0, cap)
+}
+
+// Whether any word of a name begins with this - so "renz" finds "Jan Renz"
+// rather than only names that start with it.
+function startsAWord(name, needle) {
+  if (name === "") return false
+  var words = name.split(/[\s.,'"<>()-]+/)
+  for (var i = 0; i < words.length; i++)
+    if (words[i] !== "" && words[i].indexOf(needle) === 0) return true
+  return false
+}
