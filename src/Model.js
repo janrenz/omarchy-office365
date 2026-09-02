@@ -1284,6 +1284,103 @@ function stackAllDay(bars) {
   return bars
 }
 
+// ---- one meeting -----------------------------------------------------------
+//
+// What the meeting pane shows about an invitation: when it is, who answered
+// what, and how to say either of those in one line. Here rather than in the
+// pane so that `node dev/test-model.js` can hold it to account.
+
+// The day and the hours, for a meeting being read rather than one drawn in a
+// grid. Spelt out - "Wed 3 Sep  14:00–14:30" - because a pane is where
+// somebody checks whether they can be somewhere, and "14:00" alone has caught
+// people out by a day.
+function meetingWhen(start, end, allDay, now) {
+  var from = parseDate(start)
+  if (!from) return ""
+  // Through dayLabel, so "Today" and "Tomorrow" read as themselves here the
+  // same way they do above the agenda's groups.
+  var day = dayLabel(from, now)
+  if (allDay === true) return day + "  ·  all day"
+  var to = parseDate(end)
+  return day + "  " + timeOfDay(from) + (to ? "–" + timeOfDay(to) : "")
+}
+
+// What a response means, in words. `mine` switches it to the first person,
+// since the same value describes both what somebody else said and what you
+// said - and "Accepted" reads oddly about yourself.
+function responseLabel(response, mine) {
+  var value = String(response || "none")
+  if (mine === true) {
+    if (value === "accepted") return "You are going"
+    if (value === "tentativelyAccepted") return "You answered maybe"
+    if (value === "declined") return "You declined"
+    if (value === "organizer") return ""
+    if (value === "notResponded") return "You have not answered"
+    return ""
+  }
+  if (value === "accepted") return "accepted"
+  if (value === "tentativelyAccepted") return "maybe"
+  if (value === "declined") return "declined"
+  if (value === "organizer") return "organiser"
+  return "no answer"
+}
+
+// A mark for a response, told apart by shape rather than by colour alone: a
+// list of names where the only difference is a hue is a list nobody can read
+// at a glance, and one of these people is going to be colour-blind.
+function responseGlyph(response) {
+  var value = String(response || "none")
+  if (value === "accepted") return "✓"
+  if (value === "tentativelyAccepted") return "?"
+  if (value === "declined") return "✕"
+  if (value === "organizer") return "★"
+  return "·"
+}
+
+function responseIsYes(response) {
+  return String(response || "") === "accepted"
+}
+
+// "4 of 7 going · 1 maybe · 1 declined". Counted rather than listed, because
+// the count is the answer to "is this happening" and the list below it is for
+// working out who to chase.
+function attendeeSummary(detail) {
+  var rows = attendeeRows(detail)
+  if (rows.length === 0) return ""
+  var going = 0, maybe = 0, no = 0, quiet = 0
+  for (var i = 0; i < rows.length; i++) {
+    var value = String(rows[i].response || "none")
+    if (value === "accepted" || value === "organizer") going += 1
+    else if (value === "tentativelyAccepted") maybe += 1
+    else if (value === "declined") no += 1
+    else quiet += 1
+  }
+  var parts = [going + " of " + rows.length + " going"]
+  if (maybe > 0) parts.push(maybe + " maybe")
+  if (no > 0) parts.push(no + " declined")
+  if (quiet > 0) parts.push(quiet + " not answered")
+  return parts.join("  ·  ")
+}
+
+// Everyone invited, required first, each carrying whether they were optional -
+// one list to draw, rather than two Repeaters and a heading between them.
+function attendeeRows(detail) {
+  var rows = []
+  var required = (detail && detail.required) || []
+  var optional = (detail && detail.optional) || []
+  for (var i = 0; i < required.length; i++) {
+    rows.push({ name: String(required[i].name || required[i].address || ""),
+                address: String(required[i].address || ""),
+                response: String(required[i].response || "none"), optional: false })
+  }
+  for (var o = 0; o < optional.length; o++) {
+    rows.push({ name: String(optional[o].name || optional[o].address || ""),
+                address: String(optional[o].address || ""),
+                response: String(optional[o].response || "none"), optional: true })
+  }
+  return rows
+}
+
 // Prefer a person's name, fall back to the address, then to something neutral.
 function senderName(mail) {
   var name = String((mail && mail.from) || "").trim()

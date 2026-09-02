@@ -1556,6 +1556,47 @@ def demo_message(alias, message_id):
     }
 
 
+def demo_event(event_id):
+    """One demo meeting, so the detail pane and the answer buttons can be
+    looked at and photographed without a calendar being involved."""
+    now = datetime.now().replace(second=0, microsecond=0)
+    start = (now + timedelta(hours=2)).replace(minute=0)
+    return {
+        "ok": True,
+        "id": event_id,
+        "uid": "demo-uid",
+        "subject": "Release 14.02 go / no-go",
+        "start": start.isoformat(),
+        "end": (start + timedelta(minutes=30)).isoformat(),
+        "isAllDay": False,
+        "location": "Teams",
+        "organizer": "Example organiser",
+        "organizerAddress": "organiser@example.com",
+        "body": "Fifteen minutes on whether staging is green, then the decision.\n\n"
+                "Agenda and the rollback plan are in the release notes.",
+        "truncated": False,
+        "bodyFormat": "linked",
+        "required": [
+            {"name": "You", "address": "you@example.com", "response": "notResponded"},
+            {"name": "Ada Lovelace", "address": "ada@example.com", "response": "accepted"},
+            {"name": "Grace Hopper", "address": "grace@example.com", "response": "tentativelyAccepted"},
+        ],
+        "optional": [
+            {"name": "Alan Turing", "address": "alan@example.com", "response": "declined"},
+        ],
+        "myResponse": "notResponded",
+        "isOrganizer": False,
+        "isMeeting": True,
+        "responseRequested": True,
+        "cancelled": False,
+        "free": False,
+        "series": False,
+        "webLink": "https://outlook.office.com/calendar/",
+        "joinUrl": "https://teams.microsoft.com/l/meetup-join/demo",
+        "onlineProvider": "teams",
+    }
+
+
 def cmd_palette(_args):
     """The active theme's named colours, so accounts can be tinted in hues that
     belong to whatever theme is running rather than hardcoded hex."""
@@ -2211,6 +2252,200 @@ def cmd_message(args):
     )
 
 
+# --------------------------------------------------------------------------
+# one meeting, and answering it
+#
+# The agenda carries what a grid needs: when, where, who called it. Who else
+# was invited, what each of them said, what the organiser wrote and what this
+# mailbox itself answered are a request of their own, made when somebody opens
+# one meeting - which is the only time any of it is worth fetching.
+#
+# Answering is the part that was missing entirely. An invitation could be seen
+# and joined and opened in Outlook, and the one thing anybody actually does
+# with one - say whether they are coming - meant leaving for Outlook. Both
+# transports can do it: Graph has a verb per answer, and Exchange has no verb
+# at all but will create and send the response item, which amounts to the same
+# thing on the organiser's tally.
+# --------------------------------------------------------------------------
+
+# What a meeting can be answered with, in Graph's spelling of the verb.
+EVENT_REPLIES = {
+    "accept": "accept",
+    "tentative": "tentativelyAccept",
+    "decline": "decline",
+}
+
+# A body that says it is text and is not. Exchange hands a meeting's body back
+# as markup whatever BodyType a GetItem asks for - `<br>` and `&#x27;` and a
+# stylesheet, straight into the pane - so the answer is checked rather than
+# believed. Only a handful of tags, deliberately: a body that really is text
+# and happens to contain a "<" must come through untouched.
+_MARKUP_HINT = re.compile(
+    r"(?is)<\s*(br|/?p|/?div|/?span|/?table|/?tr|/?td|/?ul|/?li|a\s|/a|html|body|meta|style)\b")
+
+
+def looks_like_markup(raw):
+    return bool(_MARKUP_HINT.search(str(raw or "")))
+
+
+def event_body(raw):
+    """(body, truncated, format) for a meeting's body, whatever it arrived as."""
+    text = str(raw or "")
+    if looks_like_markup(text) and imapmail is not None:
+        # The same conversion the IMAP mail path uses, addresses kept, so the
+        # join link in a meeting body survives as something clickable.
+        text = need_imap().strip_markup(text, keep_links=True)
+    return render_body(text, False, False)
+
+
+def event_people(values):
+    """[{name, address, response}] out of Graph's attendee list."""
+    people = []
+    for entry in values or []:
+        address = (entry or {}).get("emailAddress") or {}
+        name = str(address.get("name") or "").strip()
+        mail = str(address.get("address") or "").strip()
+        if not name and not mail:
+            continue
+        people.append({
+            "name": name or mail,
+            "address": mail,
+            "response": str(((entry or {}).get("status") or {}).get("response") or "none"),
+        })
+    return people
+
+
+def cmd_event(args):
+    """One meeting with everything the pane shows, including who is coming."""
+    if getattr(args, "demo", False):
+        out(demo_event(args.id))
+        return
+
+    account = read_json(state_path(args.account))
+    if not account:
+        fail("auth_required", "Not signed in")
+    timezone_name = local_timezone()
+
+    if transport_of(account) == TRANSPORT_IMAP:
+        if not calendar_ready(account):
+            fail("calendar_auth_required", "This mailbox has no calendar signed in")
+        try:
+            token, account = calendar_token(args.account, account)
+            detail = need_ews().details(token, args.id, timezone_name)
+        except need_ews().CalendarError as error:
+            fail(error.code, error.message)
+        detail["body"], detail["truncated"], detail["bodyFormat"] = event_body(
+            detail.get("body"))
+        out(dict(ok=True, **detail))
+        return
+
+    try:
+        token, account = access_token(args.account, account)
+    except AccountError as error:
+        fail(error.code, error.message)
+
+    status, payload = graph_get(
+        token,
+        "/me/events/" + urllib.parse.quote(args.id, safe=""),
+        {"$select": "id,iCalUId,subject,start,end,location,isAllDay,webLink,organizer,"
+                    "attendees,responseStatus,isOrganizer,isCancelled,showAs,body,"
+                    "responseRequested,type,isOnlineMeeting,onlineMeetingProvider,"
+                    "onlineMeeting,onlineMeetingUrl"},
+        {"Prefer": 'outlook.body-content-type="text", outlook.timezone="%s"' % timezone_name},
+    )
+    if status != 200:
+        fail("event_failed", graph_error(payload, "Could not open this meeting"))
+
+    organizer = ((payload.get("organizer") or {}).get("emailAddress") or {})
+    attendees = event_people(payload.get("attendees"))
+    body, truncated, body_format = event_body((payload.get("body") or {}).get("content"))
+    out({
+        "ok": True,
+        "id": payload.get("id", args.id),
+        "uid": (payload.get("iCalUId") or "").strip(),
+        "subject": (payload.get("subject") or "(no subject)").strip(),
+        "start": (payload.get("start") or {}).get("dateTime", ""),
+        "end": (payload.get("end") or {}).get("dateTime", ""),
+        "isAllDay": bool(payload.get("isAllDay")),
+        "location": ((payload.get("location") or {}).get("displayName") or "").strip(),
+        "organizer": str(organizer.get("name") or organizer.get("address") or ""),
+        "organizerAddress": str(organizer.get("address") or ""),
+        "body": body,
+        "truncated": truncated,
+        "bodyFormat": body_format,
+        # Split the way the invitation was written, because "optional" is a
+        # different question from "required" and the pane says which.
+        "required": [person for person, entry in zip(attendees, payload.get("attendees") or [])
+                     if str((entry or {}).get("type") or "required").lower() != "optional"],
+        "optional": [person for person, entry in zip(attendees, payload.get("attendees") or [])
+                     if str((entry or {}).get("type") or "").lower() == "optional"],
+        "myResponse": str((payload.get("responseStatus") or {}).get("response") or "none"),
+        "isOrganizer": bool(payload.get("isOrganizer")),
+        # A meeting has attendees; an appointment somebody put in their own
+        # calendar has none, and there is nobody to answer.
+        "isMeeting": bool(attendees),
+        "responseRequested": payload.get("responseRequested") is not False,
+        "cancelled": bool(payload.get("isCancelled")),
+        "free": payload.get("showAs") == "free",
+        "series": str(payload.get("type") or "") in ("seriesMaster", "occurrence", "exception"),
+        "webLink": payload.get("webLink", ""),
+        "joinUrl": join_url(payload),
+        "onlineProvider": online_provider(payload),
+    })
+
+
+def cmd_respond(args):
+    """Accept, tentatively accept or decline a meeting.
+
+    The answer is always sent. Accepting without telling the organiser is a
+    thing Outlook offers and this does not: on the organiser's side an answer
+    nobody was sent is indistinguishable from no answer, and a button here that
+    left them guessing would be the wrong kind of quiet.
+    """
+    reply = str(getattr(args, "reply", "") or "").lower()
+    if reply not in EVENT_REPLIES:
+        fail("bad_reply", "A meeting can be accepted, tentatively accepted or declined")
+
+    if getattr(args, "demo", False):
+        out({"ok": True, "id": args.id, "response": reply, "demo": True})
+        return
+
+    account = read_json(state_path(args.account))
+    if not account:
+        fail("auth_required", "Not signed in")
+    comment = str(getattr(args, "comment", "") or "").strip()
+
+    if transport_of(account) == TRANSPORT_IMAP:
+        if not calendar_ready(account):
+            fail("calendar_auth_required", "This mailbox has no calendar signed in")
+        try:
+            token, account = calendar_token(args.account, account)
+            answered = need_ews().respond(token, args.id, reply, comment)
+        except need_ews().CalendarError as error:
+            fail(error.code, error.message)
+        out({"ok": True, "id": args.id, "response": answered["response"]})
+        return
+
+    try:
+        token, account = access_token(args.account, account)
+    except AccountError as error:
+        fail(error.code, error.message)
+
+    status, payload = http(
+        GRAPH + "/me/events/%s/%s" % (urllib.parse.quote(args.id, safe=""),
+                                      EVENT_REPLIES[reply]),
+        method="POST",
+        json_body={"sendResponse": True, "comment": comment},
+        headers={"Authorization": "Bearer " + token},
+    )
+    # 202 Accepted is the documented answer, and 200 and 204 both turn up.
+    if status not in (200, 202, 204):
+        fail("respond_failed", graph_error(payload, "Could not answer this meeting"))
+    out({"ok": True, "id": args.id,
+         "response": {"accept": "accepted", "tentative": "tentativelyAccepted",
+                      "decline": "declined"}[reply]})
+
+
 def writable(alias):
     """(token, account) for a mailbox that may change mail, or a clear reason
     why not. The account comes back with it because which transport answers is
@@ -2791,6 +3026,19 @@ def main():
                               "servers, which tells them it was read. Pictures it carries "
                               "itself are shown either way.")
     message.set_defaults(func=cmd_message)
+
+    event = with_account("event", "one meeting, with who is coming and what they said")
+    event.add_argument("--id", required=True, help="event id from a fetch")
+    event.add_argument("--demo", action="store_true", help="synthetic meeting, matching --demo fetch")
+    event.set_defaults(func=cmd_event)
+
+    respond = with_account("respond", "answer a meeting: accept, tentative or decline")
+    respond.add_argument("--id", required=True, help="event id from a fetch")
+    respond.add_argument("--reply", required=True, choices=("accept", "tentative", "decline"))
+    respond.add_argument("--comment", default="",
+                         help="a line for the organiser, sent with the answer")
+    respond.add_argument("--demo", action="store_true", help="answer nothing, and say so")
+    respond.set_defaults(func=cmd_respond)
 
     mark = with_account("mark", "mark a message read or unread")
     mark.add_argument("--id", required=True)

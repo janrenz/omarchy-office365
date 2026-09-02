@@ -1562,6 +1562,100 @@ class HasHtml(unittest.TestCase):
         self.assertFalse(imapmail.has_html(message))
 
 
+class MeetingBody(unittest.TestCase):
+    """A meeting's body, whatever the transport claims it handed over."""
+
+    def test_exchange_markup_is_converted_even_though_it_says_text(self):
+        """A GetItem asking for BodyType Text still comes back with tags in it,
+        which is what put a stylesheet in the pane. What comes out is markup
+        again - the "linked" format - but markup this plugin wrote."""
+        body, _, body_format = graph.event_body(
+            '<div style="color:red">Hallo zusammen,</div><br>\n'
+            'der Link: <a href="https://example.com/j">Teilnehmen</a>')
+        self.assertEqual(body_format, "linked")
+        # Nothing of the sender's own markup survives as markup.
+        self.assertNotIn("style=", body)
+        self.assertNotIn("<div", body)
+        # The join link does survive, as an anchor written here.
+        self.assertIn('href="https://example.com/j"', body)
+        self.assertIn("Hallo zusammen", body)
+
+    def test_text_that_merely_contains_an_angle_bracket_is_left_alone(self):
+        body, _, _ = graph.event_body("if a < b then nothing happens")
+        self.assertIn("a &lt; b", body)
+
+    def test_an_empty_body_is_not_a_failure(self):
+        self.assertEqual(graph.event_body(None)[0], "")
+
+    def test_markup_is_recognised_by_a_tag_and_not_by_a_bracket(self):
+        self.assertTrue(graph.looks_like_markup("one<br>two"))
+        self.assertTrue(graph.looks_like_markup("<DIV>shouting</DIV>"))
+        self.assertFalse(graph.looks_like_markup("2 < 3 and 4 > 1"))
+        self.assertFalse(graph.looks_like_markup(""))
+
+
+class MeetingAnswers(unittest.TestCase):
+    """The three answers, and what each transport calls them."""
+
+    def test_only_the_three_are_accepted(self):
+        for reply in ("accept", "tentative", "decline"):
+            self.assertIn(reply, graph.EVENT_REPLIES)
+        self.assertNotIn("maybe", graph.EVENT_REPLIES)
+
+    def test_graph_verbs_are_the_ones_the_api_documents(self):
+        self.assertEqual(graph.EVENT_REPLIES["tentative"], "tentativelyAccept")
+
+    def test_ews_maps_its_own_words_onto_graph_s(self):
+        import ewscal
+        self.assertEqual(ewscal.RESPONSES["accept"], "accepted")
+        self.assertEqual(ewscal.RESPONSES["tentative"], "tentativelyAccepted")
+        self.assertEqual(ewscal.RESPONSES["noresponsereceived"], "notResponded")
+        # Not an answer at all: it is Exchange saying the meeting is yours.
+        self.assertEqual(ewscal.RESPONSES["organizer"], "organizer")
+
+    def test_ews_answers_by_creating_the_response_item(self):
+        """Exchange has no respond verb - the answer is an item, and sending it
+        is what puts it on the organiser's tally."""
+        import ewscal
+        self.assertEqual(ewscal.REPLY_ITEMS["accept"], "AcceptItem")
+        self.assertEqual(ewscal.REPLY_ITEMS["tentative"], "TentativelyAcceptItem")
+        self.assertEqual(ewscal.REPLY_ITEMS["decline"], "DeclineItem")
+
+    def test_a_reply_that_is_not_one_is_refused_before_anything_is_sent(self):
+        import ewscal
+
+        def explode(*a, **k):
+            raise AssertionError("reached the network")
+
+        original = ewscal._post
+        ewscal._post = explode
+        try:
+            with self.assertRaises(ewscal.CalendarError):
+                ewscal.respond("token", "id", "maybe")
+        finally:
+            ewscal._post = original
+
+
+class MeetingPeople(unittest.TestCase):
+    """Who was invited, and what they said, out of Graph's own shape."""
+
+    def test_a_name_and_a_response_come_through(self):
+        people = graph.event_people([
+            {"emailAddress": {"name": "Ada", "address": "ada@example.com"},
+             "status": {"response": "accepted"}},
+        ])
+        self.assertEqual(people, [{"name": "Ada", "address": "ada@example.com",
+                                   "response": "accepted"}])
+
+    def test_an_attendee_with_only_an_address_is_named_by_it(self):
+        people = graph.event_people([{"emailAddress": {"address": "x@example.com"}}])
+        self.assertEqual(people[0]["name"], "x@example.com")
+        self.assertEqual(people[0]["response"], "none")
+
+    def test_an_empty_entry_is_dropped_rather_than_drawn_as_a_blank_row(self):
+        self.assertEqual(graph.event_people([{}, None]), [])
+
+
 class CalendarWindow(unittest.TestCase):
     """The window is midnight to midnight, and on two days a year those are not
     24 hours apart. A fixed offset taken from today gets the far end wrong."""

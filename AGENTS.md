@@ -29,6 +29,9 @@ src/BarWidget.qml     The bar icon.
 src/Panel.qml         The bar dropdown: merged mail beside the merged agenda.
 src/MailWindow.qml    The window: folders, list, reading pane. ~1.2k lines.
 src/MailList.qml      A ListView, deliberately — read the comment at the top.
+src/MeetingPane.qml   One meeting: who is coming, what they said, and the
+                      Accept/Maybe/Decline that used to mean opening Outlook.
+                      Shown where the agenda is, in both the popup and window.
 src/AgendaList.qml    The day-grouped agenda. AgendaTimeline.qml is the grid.
 src/Notifier.qml      omarchy-notification-send, the prime-then-announce rule,
                       and the click that opens the message.

@@ -18,6 +18,10 @@ Column {
 
   signal openRequested(string url, string alias)
   signal joinRequested(string url, string alias)
+  // A row was clicked. It used to open Outlook, which is the one thing this
+  // panel exists to avoid: what a click wants is the meeting - who is coming
+  // and whether you are - and Outlook is still one button away inside it.
+  signal eventClicked(var event)
 
   spacing: Style.spacing.lg
 
@@ -171,7 +175,7 @@ Column {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onClicked: root.openRequested(eventRow.modelData.webLink, eventRow.modelData.aliases[0])
+            onClicked: root.eventClicked(eventRow.modelData)
           }
         }
       }

@@ -632,6 +632,10 @@ Item {
     // one rung at a time, rather than shutting the message outright.
     if (pane === "message") { pane = "mail"; return }
     if (mailView.previewMail !== null) { mailView.closePreview(); return }
+    // The meeting opened for its details, then the one merely picked in the
+    // grid. Back to the agenda before back out of the window.
+    if (mailView.meetingOpen) { mailView.closeMeeting(); return }
+    if (mailView.selectedEvent) { mailView.selectEvent(null); return }
     requestClose()
   }
 
@@ -1416,20 +1420,111 @@ Item {
               height: columns.height
               visible: !columns.folderPicking && (columns.showReader || columns.listGivesWay)
 
-              Text {
-                anchors.centerIn: parent
-                width: parent.width - Style.spacing.xxl
-                horizontalAlignment: Text.AlignHCenter
-                elide: Text.ElideRight
-                visible: columns.showReader && mailView.previewMail === null
-                text: {
-                  if (mailView.switchingFolder) return "Opening " + root.folderTitle + "…"
-                  return mailView.mail.length === 0 ? "Nothing in this folder" : "Select a message"
+              // Nothing open, so the column shows the calendar.
+              //
+              // It used to say "Select a message" at a column of empty space,
+              // which is a whole third of a window spent on an instruction.
+              // The bar's popup has had mail beside the agenda from the start
+              // and the window - the bigger surface, the one people leave open
+              // - had only the mail. So the agenda moves in here, and stands
+              // aside for a message or a meeting exactly as it does there.
+              Column {
+                anchors.fill: parent
+                spacing: Style.spacing.md
+                visible: mailView.previewMail === null && !mailView.meetingOpen
+
+                Text {
+                  width: parent.width
+                  visible: text !== ""
+                  text: {
+                    if (mailView.switchingFolder) return "Opening " + root.folderTitle + "…"
+                    return ""
+                  }
+                  textFormat: Text.PlainText
+                  color: Qt.darker(Color.foreground, 1.8)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
                 }
-                textFormat: Text.PlainText
-                color: Qt.darker(Color.foreground, 1.8)
-                font.family: Style.font.family
-                font.pixelSize: Style.font.body
+
+                ScrollView {
+                  id: agendaScroll
+                  width: parent.width
+                  height: parent.height - y
+                  clip: true
+
+                  // The drawn grid where the setting asks for it and the column
+                  // is wide enough to draw one - a three-day grid in 200 pixels
+                  // is not a grid. Otherwise the day-grouped list, which reads
+                  // perfectly well in a column.
+                  readonly property bool grid: mailView.agendaView === "timeline"
+                                               && columns.readerWidth >= Style.space(520)
+
+                  AgendaTimeline {
+                    width: agendaScroll.width
+                    visible: agendaScroll.grid
+                    grid: mailView.timeline
+                    showAccount: mailView.combined
+                    selectedEvent: mailView.selectedEvent
+                    availableHeight: agendaScroll.height
+                    fg: Color.foreground
+                    accent: Color.accent
+                    fontFamily: Style.font.family
+                    onEventClicked: function(event) { mailView.selectEvent(event) }
+                    onDetailsRequested: function(event) { mailView.showMeeting(event) }
+                    onExpandRequested: mailView.expandWindow()
+                    onOpenRequested: function(url, alias) { mailView.openUrl(url, alias) }
+                    onJoinRequested: function(url, alias) { mailView.openUrl(url, alias) }
+                  }
+
+                  AgendaList {
+                    width: agendaScroll.width
+                    visible: !agendaScroll.grid
+                    agenda: mailView.agenda
+                    showAccount: mailView.combined
+                    fg: Color.foreground
+                    accent: Color.accent
+                    fontFamily: Style.font.family
+                    onOpenRequested: function(url, alias) { mailView.openUrl(url, alias) }
+                    onJoinRequested: function(url, alias) { mailView.openUrl(url, alias) }
+                    onEventClicked: function(event) { mailView.showMeeting(event) }
+                  }
+                }
+              }
+
+              // The meeting being read, in the same column, for the same
+              // reason the reading pane is here: it is the thing being looked
+              // at, and answering an invitation is not a popup's job.
+              ScrollView {
+                anchors.fill: parent
+                clip: true
+                visible: mailView.meetingOpen
+
+                MeetingPane {
+                  width: columns.readerWidth
+                  event: mailView.openMeeting
+                  detail: mailView.meetingDetail
+                  loading: mailView.meetingLoading
+                  error: mailView.meetingError
+                  answering: mailView.answeringMeeting
+                  answerError: mailView.meetingAnswerError
+                  // A window is taller than a dropdown, so the invitation gets
+                  // to use that height.
+                  maxBodyHeight: Math.max(Style.space(220), columns.height - Style.space(320))
+                  fg: Color.foreground
+                  accent: Color.accent
+                  fontFamily: Style.font.family
+                  onCloseRequested: mailView.closeMeeting()
+                  onOpenRequested: function(url) {
+                    mailView.openUrl(url, mailView.meetingAlias(mailView.openMeeting))
+                  }
+                  onJoinRequested: function(url) {
+                    mailView.openUrl(url, mailView.meetingAlias(mailView.openMeeting))
+                  }
+                  onLinkActivated: function(url) {
+                    mailView.openUrl(url, mailView.meetingAlias(mailView.openMeeting))
+                  }
+                  onAnswerRequested: function(reply) { mailView.answerMeeting(reply, "") }
+                }
               }
 
               Column {

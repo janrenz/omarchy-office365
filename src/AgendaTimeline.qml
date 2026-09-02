@@ -23,6 +23,8 @@ Item {
   property string fontFamily: Style.font.family
 
   signal eventClicked(var event)
+  // Passed straight up from the strip below the grid.
+  signal detailsRequested(var event)
   signal openRequested(string url, string alias)
   signal joinRequested(string url, string alias)
   signal expandRequested()
@@ -398,6 +400,7 @@ Item {
     onOpenRequested: function(url, alias) { root.openRequested(url, alias) }
     onJoinRequested: function(url, alias) { root.joinRequested(url, alias) }
     onCloseRequested: root.eventClicked(null)
+    onDetailsRequested: function(event) { root.detailsRequested(event) }
   }
 
   Text {

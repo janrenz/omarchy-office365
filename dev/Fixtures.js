@@ -119,3 +119,45 @@ function brokenViews() {
       mail: [], unreadCount: 0, events: [], warnings: [], config: {} }
   ])
 }
+
+
+// One meeting as `graph.py event` answers it, so the meeting pane - who is
+// coming, what they said, and the buttons that answer it - can be drawn and
+// photographed without a calendar being signed in.
+function meetingDetail(response) {
+  return {
+    ok: true,
+    id: "fixture-meeting",
+    subject: "Release 14.02 go / no-go",
+    start: at(0, 14, 0),
+    end: at(0, 14, 30),
+    isAllDay: false,
+    location: "Microsoft Teams",
+    organizer: "Ana Beltrán",
+    organizerAddress: "ana@example.com",
+    body: "Fifteen minutes on whether staging is green, then the decision.<br>\n<br>\n"
+          + "The rollback plan is in the release notes.",
+    truncated: false,
+    bodyFormat: "linked",
+    required: [
+      { name: "You", address: "you@example.com", response: response || "notResponded" },
+      { name: "Ana Beltrán", address: "ana@example.com", response: "organizer" },
+      { name: "Tomás Lindqvist", address: "tomas@example.com", response: "accepted" },
+      { name: "Priya Raman", address: "priya@example.com", response: "tentativelyAccepted" },
+      { name: "Mikael Sørensen", address: "mikael@example.com", response: "notResponded" }
+    ],
+    optional: [
+      { name: "Yuki Tanaka", address: "yuki@example.com", response: "declined" }
+    ],
+    myResponse: response || "notResponded",
+    isOrganizer: false,
+    isMeeting: true,
+    responseRequested: true,
+    cancelled: false,
+    free: false,
+    series: false,
+    webLink: "https://outlook.office.com/calendar/",
+    joinUrl: "https://teams.microsoft.com/l/meetup-join/fixture",
+    onlineProvider: "teams"
+  }
+}

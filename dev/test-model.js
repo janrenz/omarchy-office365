@@ -753,5 +753,64 @@ group("withLinkColor - links in the theme's colour", () => {
   check("a short form is passed through", Model.cssColor("#abc"), "#abc")
 })
 
+group("a meeting - who is coming, and what they said", () => {
+  const detail = {
+    required: [
+      { name: "You", response: "notResponded" },
+      { name: "Ana", response: "organizer" },
+      { name: "Tomás", response: "accepted" },
+      { name: "Priya", response: "tentativelyAccepted" }
+    ],
+    optional: [{ name: "Yuki", response: "declined" }]
+  }
+
+  // The count is the answer to "is this happening at all", which is why it is
+  // above the list rather than left to be worked out from it.
+  check("the counts read as a sentence",
+        Model.attendeeSummary(detail),
+        "2 of 5 going  ·  1 maybe  ·  1 declined  ·  1 not answered")
+
+  check("an appointment nobody was invited to has nothing to summarise",
+        Model.attendeeSummary({ required: [], optional: [] }), "")
+
+  check("and neither does a missing meeting", Model.attendeeSummary(null), "")
+
+  // One list to draw, required first, each row knowing which it was.
+  const rows = Model.attendeeRows(detail)
+  check("required come before optional", rows.length, 5)
+  check("and the optional ones say so", rows[4].optional, true)
+  check("required ones do not", rows[0].optional, false)
+
+  // Told apart by shape, not by hue alone: one of these people is going to be
+  // colour-blind, and a list of names in two greens is no list at all.
+  check("accepted is a tick", Model.responseGlyph("accepted"), "✓")
+  check("maybe is a question", Model.responseGlyph("tentativelyAccepted"), "?")
+  check("declined is a cross", Model.responseGlyph("declined"), "✕")
+  check("the organiser is starred", Model.responseGlyph("organizer"), "★")
+  check("no answer is a dot", Model.responseGlyph("nonsense"), "·")
+
+  // The same value describes what somebody else said and what you said, and
+  // "Accepted" reads oddly about yourself.
+  check("your own answer is in the first person",
+        Model.responseLabel("accepted", true), "You are going")
+  check("not answering is worth saying out loud",
+        Model.responseLabel("notResponded", true), "You have not answered")
+  check("your own meeting has no answer to give",
+        Model.responseLabel("organizer", true), "")
+  check("somebody else's answer is a word",
+        Model.responseLabel("tentativelyAccepted", false), "maybe")
+
+  // A pane is where somebody checks whether they can be somewhere, and an
+  // hour on its own has caught people out by a day.
+  const now = new Date(2026, 8, 2, 9, 0, 0)
+  check("today says today",
+        Model.meetingWhen("2026-09-02T14:00:00", "2026-09-02T14:30:00", false, now),
+        "Today  14:00–14:30")
+  check("an all-day meeting says so instead of showing midnight",
+        Model.meetingWhen("2026-09-02T00:00:00", "2026-09-03T00:00:00", true, now),
+        "Today  ·  all day")
+  check("nothing to place is nothing to say", Model.meetingWhen("", "", false, now), "")
+})
+
 console.log(`\n${checks - failures}/${checks} passed`)
 process.exit(failures ? 1 : 0)

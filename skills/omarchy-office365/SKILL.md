@@ -32,6 +32,7 @@ settings, e.g. `FWU`. `python3 $HELPER list` names the ones that are set up.
     python3 $HELPER message --account FWU --id 'AAMkAD…' --body html
     python3 $HELPER fetch   --account FWU --mails 15 --days 7
     python3 $HELPER folders --account FWU
+    python3 $HELPER event   --account FWU --id 'AAMkAD…'
 
 `message` is the one being read: sender, recipients, date, and the body already
 flattened to text where the message has a plain-text part, and left as the
@@ -42,6 +43,22 @@ ALIAS=ID` reads a folder other than the inbox; `folders` names them.
 
 A very long body is truncated by the *window*, not by the helper, so the helper
 is where to go for the whole of a long message.
+
+`event` is one meeting out of `fetch`'s event list, with what the agenda has no
+room for: the invitation's own text, who was invited as required and who as
+optional, what each of them answered, and what this mailbox itself answered
+(`myResponse`, and `isOrganizer` when the meeting is its own).
+
+## Answering a meeting
+
+    python3 $HELPER respond --account FWU --id 'AAMkAD…' --reply accept
+    python3 $HELPER respond --account FWU --id 'AAMkAD…' --reply tentative
+    python3 $HELPER respond --account FWU --id 'AAMkAD…' --reply decline --comment "clash"
+
+This one **sends** — the organiser is told, which is the point of answering.
+Declining also takes the meeting out of the calendar. So confirm with the user
+before running it, the way you would before sending a reply: nothing else in
+this helper's reading half changes anything.
 
 ## Handing a draft reply back to the window
 

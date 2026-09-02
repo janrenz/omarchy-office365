@@ -61,6 +61,9 @@ Panel {
                                     && !showColumns && awaitingFirstData
   readonly property int columnGap: Style.spacing.xxl
   readonly property bool previewing: !!service && service.previewMail !== null
+  // A meeting opened for its details wants the same column a message does, so
+  // the agenda stands aside for either of them.
+  readonly property bool meeting: !!service && service.meetingOpen
 
   // ---- how wide the popup wants to be ----
   //
@@ -69,7 +72,8 @@ Panel {
   // grows around the grid, so mail and calendar are always both there - a week
   // that hid the mail to fit would give that up exactly when there is most to
   // keep track of.
-  readonly property bool timelineView: !!service && service.agendaView === "timeline" && !previewing
+  readonly property bool timelineView: !!service && service.agendaView === "timeline"
+                                      && !previewing && !meeting
   readonly property real mailColumnWidth: Style.space(340)
   readonly property real agendaColumnWidth: {
     if (!timelineView) return Style.space(340)
@@ -250,10 +254,12 @@ Panel {
         // Capital F, the same as in the window, and clear of the f above.
         else if (text === "F") root.flagAtCursor()
       }
-      // Escape backs out one layer at a time: the meeting you picked, then the
-      // message you opened, then the panel.
+      // Escape backs out one layer at a time: the meeting you opened, then the
+      // one you merely picked in the grid, then the message you opened, then
+      // the panel.
       onCloseRequested: {
-        if (root.service && root.service.selectedEvent) root.service.selectEvent(null)
+        if (root.meeting) root.service.closeMeeting()
+        else if (root.service && root.service.selectedEvent) root.service.selectEvent(null)
         else if (root.previewing) root.service.closePreview()
         else root.close()
       }
@@ -728,6 +734,7 @@ Panel {
             accent: root.accent
             fontFamily: root.fontFamily
             onEventClicked: function(event) { if (root.service) root.service.selectEvent(event) }
+            onDetailsRequested: function(event) { if (root.service) root.service.showMeeting(event) }
             onExpandRequested: if (root.service) root.service.expandWindow()
             onOpenRequested: function(url, alias) { root.openItem(url, alias) }
             onJoinRequested: function(url, alias) { root.openItem(url, alias) }
@@ -735,7 +742,7 @@ Panel {
 
           AgendaList {
             width: columns.agendaWidth
-            visible: !root.previewing && !root.timelineView
+            visible: !root.previewing && !root.meeting && !root.timelineView
             agenda: root.service ? root.service.agenda : ({ groups: [], hidden: 0 })
             showAccount: root.combined && (!root.service || root.service.filterAlias === "")
             fg: root.fg
@@ -744,6 +751,41 @@ Panel {
             fontFamily: root.fontFamily
             onOpenRequested: function(url, alias) { root.openItem(url, alias) }
             onJoinRequested: function(url, alias) { root.openItem(url, alias) }
+            onEventClicked: function(event) { if (root.service) root.service.showMeeting(event) }
+          }
+
+          // The meeting being read, where the agenda was. Same place as the
+          // reading pane and for the same reason: it is the thing being looked
+          // at, and a popup over a popup is no place to answer an invitation.
+          MeetingPane {
+            width: columns.agendaWidth
+            visible: root.meeting
+            event: root.service ? root.service.openMeeting : null
+            detail: root.service ? root.service.meetingDetail : null
+            loading: !!root.service && root.service.meetingLoading
+            error: root.service ? root.service.meetingError : ""
+            answering: !!root.service && root.service.answeringMeeting
+            answerError: root.service ? root.service.meetingAnswerError : ""
+            fg: root.fg
+            dim: root.dim
+            accent: root.accent
+            fontFamily: root.fontFamily
+            onCloseRequested: if (root.service) root.service.closeMeeting()
+            onOpenRequested: function(url) {
+              if (root.service)
+                root.openItem(url, root.service.meetingAlias(root.service.openMeeting))
+            }
+            onJoinRequested: function(url) {
+              if (root.service)
+                root.openItem(url, root.service.meetingAlias(root.service.openMeeting))
+            }
+            onLinkActivated: function(url) {
+              if (root.service)
+                root.service.openUrl(url, root.service.meetingAlias(root.service.openMeeting))
+            }
+            onAnswerRequested: function(reply) {
+              if (root.service) root.service.answerMeeting(reply, "")
+            }
           }
 
           MailPreview {

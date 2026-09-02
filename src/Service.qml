@@ -388,6 +388,8 @@ Item {
       closePreview()
       return
     }
+    // One pane, one thing in it - see showMeeting.
+    closeMeeting()
     previewMail = mail
     holdOnly(mail.id)
     previewDetail = null
@@ -999,6 +1001,103 @@ Item {
   function expandWindow() {
     expandedStart = timeline.fits.startMinutes
     expandedEnd = timeline.fits.endMinutes
+  }
+
+  // ---- one meeting, opened ------------------------------------------------
+  //
+  // The agenda says when and where. Who else is coming, what they answered,
+  // what the organiser wrote - and the one thing there was no way to do here
+  // at all, saying whether you are coming - are this.
+
+  property var openMeeting: null
+  property var meetingDetail: null
+  property bool meetingLoading: false
+  property string meetingError: ""
+  // Which meeting this host is waiting for, so an answer to somebody else's
+  // request, or to one this host has moved on from, is ignored.
+  property string meetingKey: ""
+
+  readonly property bool meetingOpen: openMeeting !== null
+
+  function showMeeting(event) {
+    if (!event || !event.id) return
+    // Opening the meeting already open closes it, the way the reading pane and
+    // the filter pills toggle.
+    if (openMeeting && String(openMeeting.id) === String(event.id)) {
+      closeMeeting()
+      return
+    }
+    // One pane, one thing in it: a message being read and a meeting being
+    // answered want the same column.
+    closePreview()
+    openMeeting = event
+    selectedEvent = event
+    meetingDetail = null
+    meetingError = ""
+    if (!hub) {
+      meetingLoading = false
+      meetingError = "Nothing to read this meeting with yet"
+      return
+    }
+    meetingLoading = true
+    meetingKey = hub.requestMeeting(String(event.aliases && event.aliases.length
+                                           ? event.aliases[0] : event.alias || ""),
+                                    String(event.id), demo)
+  }
+
+  function closeMeeting() {
+    openMeeting = null
+    meetingDetail = null
+    meetingError = ""
+    meetingLoading = false
+    meetingKey = ""
+  }
+
+  readonly property bool answeringMeeting: hub ? hub.answering : false
+  readonly property string meetingAnswerError: hub ? hub.answerError : ""
+
+  // Accept, tentatively accept or decline what is open. The organiser is
+  // always told: an answer nobody was sent looks exactly like no answer from
+  // where they are sitting.
+  function answerMeeting(reply, comment) {
+    if (!openMeeting || !hub) return
+    hub.answerMeeting(meetingAlias(openMeeting), String(openMeeting.id),
+                      String(reply), String(comment || ""), demo)
+  }
+
+  // Which mailbox a meeting belongs to. A merged agenda carries `aliases`,
+  // since one meeting can arrive from two mailboxes at once; answering is
+  // done from the first of them, which is the one whose invitation it is.
+  function meetingAlias(event) {
+    if (!event) return ""
+    if (event.aliases && event.aliases.length > 0) return String(event.aliases[0])
+    return String(event.alias || "")
+  }
+
+  Connections {
+    target: root.hub
+
+    function onMeetingReady(id, detail) {
+      if (id !== root.meetingKey) return
+      root.meetingLoading = false
+      root.meetingDetail = detail
+      root.meetingError = ""
+    }
+
+    function onMeetingFailed(id, message) {
+      if (id !== root.meetingKey) return
+      root.meetingLoading = false
+      root.meetingError = message
+    }
+
+    function onMeetingAnswered(id, response) {
+      if (id !== root.meetingKey || !root.openMeeting) return
+      // Straight back for the meeting as it now stands: the answer changed
+      // what the pane is mostly about, and the cached copy said the old one.
+      root.meetingLoading = true
+      root.meetingKey = root.hub.requestMeeting(root.meetingAlias(root.openMeeting),
+                                                String(root.openMeeting.id), root.demo)
+    }
   }
 
   readonly property int unreadCount: {

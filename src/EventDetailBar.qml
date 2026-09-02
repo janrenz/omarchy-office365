@@ -21,6 +21,9 @@ Item {
   signal openRequested(string url, string alias)
   signal joinRequested(string url, string alias)
   signal closeRequested()
+  // Everything this strip has no room for: who else is coming, what they
+  // answered, what the organiser wrote, and the answer itself.
+  signal detailsRequested(var event)
 
   readonly property string joinUrl: event && event.joinUrl ? String(event.joinUrl) : ""
 
@@ -94,7 +97,7 @@ Item {
     // so it leads and takes the accent.
     Button {
       id: joinButton
-      anchors.right: openButton.left
+      anchors.right: detailsButton.left
       anchors.rightMargin: Style.spacing.sm
       anchors.verticalCenter: parent.verticalCenter
       visible: root.joinUrl !== ""
@@ -106,6 +109,24 @@ Item {
       fontFamily: root.fontFamily
       fontSize: Style.font.caption
       onClicked: root.joinRequested(root.joinUrl, String(root.event.aliases[0] || ""))
+    }
+
+    // What the strip cannot say. A grid row has space for a time and a name,
+    // and none at all for the question anybody actually has about an
+    // invitation - so this is where that gets answered.
+    Button {
+      id: detailsButton
+      anchors.right: openButton.left
+      anchors.rightMargin: Style.spacing.sm
+      anchors.verticalCenter: parent.verticalCenter
+      visible: !!root.event
+      text: "Details"
+      tooltipText: "Who is coming, and answer it"
+      bordered: true
+      foreground: root.fg
+      fontFamily: root.fontFamily
+      fontSize: Style.font.caption
+      onClicked: root.detailsRequested(root.event)
     }
 
     Button {

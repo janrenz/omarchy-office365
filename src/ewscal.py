@@ -278,6 +278,199 @@ def events(token, days, timezone_name, from_now=False):
     return collected, truncated
 
 
+# --------------------------------------------------------------------------
+# one meeting, and answering it
+#
+# A CalendarView carries what a grid needs and nothing else. Who else was
+# invited, what they said, what the organiser wrote and what you yourself
+# answered are another request, made when somebody asks for one meeting -
+# which is the only time any of it is worth fetching.
+# --------------------------------------------------------------------------
+
+DETAIL_FIELDS = (
+    "item:Subject",
+    "item:Body",
+    "calendar:Start",
+    "calendar:End",
+    "calendar:IsAllDayEvent",
+    "calendar:Location",
+    "calendar:Organizer",
+    "calendar:RequiredAttendees",
+    "calendar:OptionalAttendees",
+    "calendar:MyResponseType",
+    "calendar:IsMeeting",
+    "calendar:IsResponseRequested",
+    "calendar:LegacyFreeBusyStatus",
+    "calendar:IsCancelled",
+    "calendar:AppointmentState",
+    "calendar:UID",
+)
+
+# What EWS calls a response, in the words the rest of the plugin uses. EWS
+# says "Accept" where Graph says "accepted", and one of its values is not a
+# response at all: "Organizer" is how it tells you the meeting is yours.
+RESPONSES = {
+    "accept": "accepted",
+    "tentative": "tentativelyAccepted",
+    "decline": "declined",
+    "noresponsereceived": "notResponded",
+    "organizer": "organizer",
+    "unknown": "none",
+}
+
+# The reply, as the element that carries it. Exchange has no "respond" verb:
+# answering a meeting means creating the response item and sending it, which
+# is also what puts it on the organiser's tally.
+REPLY_ITEMS = {
+    "accept": "AcceptItem",
+    "tentative": "TentativelyAcceptItem",
+    "decline": "DeclineItem",
+}
+
+
+def _bare_envelope(body):
+    """An envelope for a request that names its own fields.
+
+    `_envelope` substitutes the CalendarView field list into its body, which
+    means a body containing a literal `%` - or one that wants a different set
+    of fields - cannot go through it.
+    """
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<s:Envelope xmlns:s="%s" xmlns:t="%s" xmlns:m="%s">'
+        '<s:Header><t:RequestServerVersion Version="%s"/></s:Header>'
+        "<s:Body>%s</s:Body>"
+        "</s:Envelope>"
+    ) % (SOAP_NS, TYPE_NS, MSG_NS, REQUEST_VERSION, body)
+
+
+def _response_message(body, name):
+    """One response message out of a SOAP body, or a CalendarError saying why
+    there is none. Every EWS call answers in this shape."""
+    try:
+        root = ElementTree.fromstring(body)
+    except ElementTree.ParseError:
+        raise CalendarError("calendar_failed", "The calendar answered with something unreadable")
+    message = root.find(".//m:%s" % name, NS)
+    if message is None:
+        raise CalendarError("calendar_failed", _fault_text(body) or "The calendar did not answer")
+    if (message.get("ResponseClass") or "") == "Error":
+        raise CalendarError(
+            "calendar_failed",
+            _text_of(message, "m:MessageText") or "The calendar refused that",
+        )
+    return message
+
+
+def _attendees(item, path):
+    """[{name, address, response}] for one of the two attendee lists."""
+    found = []
+    for attendee in item.findall("%s/t:Attendee" % path, NS):
+        name = _text_of(attendee, "t:Mailbox/t:Name")
+        address = _text_of(attendee, "t:Mailbox/t:EmailAddress")
+        if not name and not address:
+            continue
+        response = _text_of(attendee, "t:ResponseType").lower()
+        found.append({
+            "name": name or address,
+            "address": address,
+            "response": RESPONSES.get(response, "none"),
+        })
+    return found
+
+
+def details(token, item_id, timezone_name):
+    """One meeting, in the shape graph.py's own `event` command answers with."""
+    zone = _zone(timezone_name)
+    fields = "".join('<t:FieldURI FieldURI="%s"/>' % name for name in DETAIL_FIELDS)
+    body = _post(token, _bare_envelope(
+        "<m:GetItem>"
+        "<m:ItemShape>"
+        "<t:BaseShape>IdOnly</t:BaseShape>"
+        "<t:BodyType>Text</t:BodyType>"
+        "<t:AdditionalProperties>" + fields + "</t:AdditionalProperties>"
+        "</m:ItemShape>"
+        "<m:ItemIds>"
+        '<t:ItemId Id="' + _escape(item_id) + '"/>'
+        "</m:ItemIds>"
+        "</m:GetItem>"
+    ))
+    message = _response_message(body, "GetItemResponseMessage")
+    item = message.find(".//t:CalendarItem", NS)
+    if item is None:
+        raise CalendarError("calendar_failed", "That meeting is no longer in the calendar")
+
+    start_stamp = _utc_stamp(_text_of(item, "t:Start"))
+    end_stamp = _utc_stamp(_text_of(item, "t:End"))
+    mine = _text_of(item, "t:MyResponseType").lower()
+    organizer_name = _text_of(item, "t:Organizer/t:Mailbox/t:Name")
+    identifier = item.find("t:ItemId", NS)
+    return {
+        "id": (identifier.get("Id") if identifier is not None else "") or item_id,
+        "changeKey": (identifier.get("ChangeKey") if identifier is not None else "") or "",
+        "uid": _text_of(item, "t:UID"),
+        "subject": _text_of(item, "t:Subject") or "(no subject)",
+        "start": _local_iso(start_stamp, zone) if start_stamp else "",
+        "end": _local_iso(end_stamp or start_stamp, zone) if start_stamp else "",
+        "isAllDay": _text_of(item, "t:IsAllDayEvent").lower() == "true",
+        "location": _text_of(item, "t:Location"),
+        "organizer": organizer_name,
+        "organizerAddress": _text_of(item, "t:Organizer/t:Mailbox/t:EmailAddress"),
+        "body": _text_of(item, "t:Body"),
+        "required": _attendees(item, "t:RequiredAttendees"),
+        "optional": _attendees(item, "t:OptionalAttendees"),
+        # "Organizer" is EWS saying the meeting is yours, which is why this is
+        # read for both questions rather than guessed from the organiser's
+        # name - two people can share a display name, and a mailbox does not
+        # always know its own.
+        "myResponse": RESPONSES.get(mine, "none"),
+        "isOrganizer": mine == "organizer",
+        "isMeeting": _text_of(item, "t:IsMeeting").lower() == "true",
+        "responseRequested": _text_of(item, "t:IsResponseRequested").lower() != "false",
+        "cancelled": _is_cancelled(item),
+        "free": _text_of(item, "t:LegacyFreeBusyStatus").lower() == "free",
+        # Both of these are Graph's, and EWS never sees either. The pane hides
+        # what it has no address for, the same way it does on the agenda.
+        "webLink": "",
+        "joinUrl": "",
+        "onlineProvider": "",
+    }
+
+
+def respond(token, item_id, reply, comment=""):
+    """Answer a meeting request: accept, tentative or decline.
+
+    The response is created and sent in one call - "SendAndSaveCopy" - because
+    an answer nobody was told about is not an answer. Exchange updates the
+    calendar item itself as a consequence of sending it, so there is nothing
+    else to write.
+    """
+    element = REPLY_ITEMS.get(str(reply or "").lower())
+    if not element:
+        raise CalendarError("bad_reply", "That is not an answer a meeting takes")
+
+    # The change key with it where we have one: it is what tells Exchange the
+    # answer is to the meeting as it stands rather than to a version that has
+    # since been rescheduled.
+    current = details(token, item_id, "UTC")
+    change_key = str(current.get("changeKey") or "")
+    reference = '<t:ReferenceItemId Id="%s"%s/>' % (
+        _escape(item_id),
+        ' ChangeKey="%s"' % _escape(change_key) if change_key else "",
+    )
+    note = ('<t:Body BodyType="Text">%s</t:Body>' % _escape(comment)) if comment else ""
+
+    body = _post(token, _bare_envelope(
+        '<m:CreateItem MessageDisposition="SendAndSaveCopy">'
+        "<m:Items>"
+        "<t:" + element + ">" + note + reference + "</t:" + element + ">"
+        "</m:Items>"
+        "</m:CreateItem>"
+    ))
+    _response_message(body, "CreateItemResponseMessage")
+    return {"response": RESPONSES[str(reply).lower()]}
+
+
 def capabilities():
     """What a mailbox gains once its calendar is signed in. Focused/Other and
     OWA deep links stay absent: both are Graph's, not the mailbox's."""

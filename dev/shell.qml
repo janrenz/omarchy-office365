@@ -33,6 +33,9 @@ ShellRoot {
     // "timeline" or "settings" - the settings form is worth looking at here
     // too, since reaching it in the real panel means clicking a gear.
     property string page: "timeline"
+    // What the meeting fixture says this mailbox answered. Driven by the
+    // pane's own button here, so a shot of it before and after is one call.
+    property string myResponse: "notResponded"
 
     // Enough of a Service for the settings form to render against. Saving
     // prints rather than writing, so the harness can never touch shell.json.
@@ -159,6 +162,12 @@ ShellRoot {
       function hours(from: string, to: string): void {
         window.startMinutes = Model.minutesFromClock(from, 7 * 60)
         window.endMinutes = Model.minutesFromClock(to, 22 * 60)
+      }
+
+      // The answer the meeting fixture carries, so a script can photograph
+      // the pane before and after answering it.
+      function answered(response: string): void {
+        window.myResponse = response
       }
 
       function select(subject: string): void {
@@ -294,6 +303,27 @@ ShellRoot {
           views: Fixtures.brokenViews()
           warnings: Model.collectWarnings(Fixtures.brokenViews())
           errorMessage: "The helper could not be run"
+        }
+
+        // The meeting pane, against a fixture: an invitation with a mix of
+        // answers on it, which is the case the counts and the glyphs are for
+        // and the one a real calendar never has to hand on demand.
+        MeetingPane {
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: parent.top
+          anchors.margins: Style.spacing.md
+          visible: window.page === "meeting"
+          event: null
+          detail: Fixtures.meetingDetail(window.myResponse)
+          onAnswerRequested: function(reply) {
+            console.log("answer", reply)
+            window.myResponse = reply === "accept" ? "accepted"
+                              : reply === "tentative" ? "tentativelyAccepted" : "declined"
+          }
+          onOpenRequested: function(url) { console.log("open", url) }
+          onJoinRequested: function(url) { console.log("join", url) }
+          onCloseRequested: window.page = "timeline"
         }
 
         AgendaTimeline {

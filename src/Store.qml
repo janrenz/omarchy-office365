@@ -639,6 +639,148 @@ Item {
                      !spec || spec.notify !== true || spec.demo === true)
   }
 
+  // ---- one meeting, and answering it --------------------------------------
+  //
+  // The agenda carries what a grid draws. Who else was invited, what they
+  // said, and what the organiser wrote are one request more, made when
+  // somebody opens a meeting - and kept, so closing a meeting and opening it
+  // again costs nothing.
+
+  property var meetings: ({})
+  property var meetingOrder: []
+  readonly property int meetingCap: 20
+
+  signal meetingReady(string id, var detail)
+  signal meetingFailed(string id, string message)
+  // The answer went through. Hosts refresh on this rather than on the button
+  // press: what the calendar now says is what the next fetch brings back.
+  signal meetingAnswered(string id, string response)
+
+  function rememberMeeting(id, detail) {
+    var next = {}
+    for (var k in meetings) next[k] = meetings[k]
+    next[id] = detail
+    var order = meetingOrder.slice()
+    var at = order.indexOf(id)
+    if (at >= 0) order.splice(at, 1)
+    order.push(id)
+    while (order.length > meetingCap) delete next[order.shift()]
+    meetings = next
+    meetingOrder = order
+  }
+
+  function forgetMeeting(id) {
+    var next = {}
+    for (var k in meetings) if (k !== String(id)) next[k] = meetings[k]
+    meetings = next
+    meetingOrder = meetingOrder.filter(function(k) { return k !== String(id) })
+  }
+
+  property var meetingQueue: []
+  property var meetingPending: ({})
+
+  function requestMeeting(alias, id, demo) {
+    var key = String(id)
+    if (!key) return ""
+    var cached = meetings[key]
+    if (cached) {
+      // Asynchronous even when it is already here, so a caller that sets its
+      // loading flag after this returns is not left with it stuck on.
+      Qt.callLater(function() { root.meetingReady(key, cached) })
+      return key
+    }
+    if (meetingPending[key] === true) return key
+    var pending = {}
+    for (var k in meetingPending) pending[k] = meetingPending[k]
+    pending[key] = true
+    meetingPending = pending
+    var queued = meetingQueue.slice()
+    queued.push({ id: key, alias: String(alias), demo: demo === true })
+    meetingQueue = queued
+    pumpMeetings()
+    return key
+  }
+
+  function pumpMeetings() {
+    if (meetingProc.running || meetingQueue.length === 0 || pluginDir === "") return
+    var next = meetingQueue[0]
+    var command = ["python3", helper(), "event", "--account", next.alias, "--id", next.id]
+    if (next.demo) command.push("--demo")
+    meetingProc.command = command
+    meetingProc.running = true
+  }
+
+  Process {
+    id: meetingProc
+    running: false
+    stdout: StdioCollector { id: meetingOut; waitForEnd: true }
+    stderr: StdioCollector { id: meetingErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var job = root.meetingQueue.length > 0 ? root.meetingQueue[0] : null
+      root.meetingQueue = root.meetingQueue.slice(1)
+      if (job) {
+        var pending = {}
+        for (var k in root.meetingPending) if (k !== job.id) pending[k] = root.meetingPending[k]
+        root.meetingPending = pending
+        var parsed = Model.parseJson(meetingOut.text, null)
+        if (exitCode !== 0 || !parsed || parsed.ok === false) {
+          root.meetingFailed(job.id, parsed && parsed.error
+            ? String(parsed.error.message)
+            : Model.oneLine(meetingErr.text || "Could not open this meeting", 160))
+        } else {
+          root.rememberMeeting(job.id, parsed)
+          root.meetingReady(job.id, parsed)
+        }
+      }
+      root.pumpMeetings()
+    }
+  }
+
+  property string answerError: ""
+  readonly property bool answering: answerProc.running
+
+  // Accept, tentatively accept or decline. One at a time: there is one meeting
+  // open at a time to answer, and a second press while the first is in flight
+  // is a double click rather than a second answer.
+  function answerMeeting(alias, id, reply, comment, demo) {
+    if (!id || answerProc.running || pluginDir === "") return
+    answerError = ""
+    answerProc.meeting = String(id)
+    answerProc.mailbox = String(alias)
+    var command = ["python3", helper(), "respond", "--account", String(alias),
+                   "--id", String(id), "--reply", String(reply)]
+    if (String(comment || "") !== "") command = command.concat(["--comment", String(comment)])
+    if (demo === true) command.push("--demo")
+    answerProc.command = command
+    answerProc.running = true
+  }
+
+  Process {
+    id: answerProc
+    running: false
+    property string meeting: ""
+    property string mailbox: ""
+    stdout: StdioCollector { id: answerOut; waitForEnd: true }
+    stderr: StdioCollector { id: answerErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var parsed = Model.parseJson(answerOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        root.answerError = parsed && parsed.error
+          ? String(parsed.error.message)
+          : Model.oneLine(answerErr.text || "Could not answer this meeting", 160)
+        return
+      }
+      root.answerError = ""
+      // What was cached says the old answer, and the answer is the one thing
+      // the pane is about to redraw.
+      root.forgetMeeting(answerProc.meeting)
+      root.meetingAnswered(answerProc.meeting, String(parsed.response || ""))
+      // The calendar itself has changed - a declined meeting leaves it - so
+      // the agenda is worth asking about again.
+      root.refresh([answerProc.mailbox])
+    }
+  }
+
   // ---- marking, deleting and moving ---------------------------------------
 
   property string actionError: ""

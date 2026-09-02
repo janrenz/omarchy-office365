@@ -266,7 +266,12 @@ what the list shows - so turning it on does not thin the list out.
 
 ## The agenda
 
-The right-hand column is a day-grouped list by default, and can be a drawn
+It is in both surfaces: the bar's popup has had mail beside the agenda from the
+start, and the window now has it too - in the reading pane's column, where it
+stands until a message or a meeting is opened. That column used to say "Select
+a message" at a third of a window's worth of empty space.
+
+The agenda column is a day-grouped list by default, and can be a drawn
 time grid instead - hours down the side, days across, meetings at the size and
 position their times give them. Switch with **Show as** on the settings form's
 Calendar page, or `"agendaView": "timeline"`. The grid is the one at the top of
@@ -291,6 +296,41 @@ above the grid, spanning the days they cover.
 Clicking a meeting selects it and describes it in the bar underneath rather
 than opening it straight away, since a grid is too dense to be sure of a click.
 Escape clears the selection.
+
+## Opening a meeting, and answering it
+
+**Details** on the strip under the grid - or a click on a row in the list -
+opens the meeting where the agenda was, the same place a message opens. That is
+where the questions an agenda cannot answer get answered:
+
+- **When, where, and who called it**, with the organiser's address.
+- **What you answered**, said in a line rather than left to be inferred: *You
+  are going*, *You answered maybe*, *You declined*, *You have not answered*.
+- **Who else is coming.** A count first - `4 of 7 going · 1 maybe · 1
+  declined` - because that is the answer to "is this happening", and then the
+  names, each with a mark for what they said. Optional attendees say so.
+  Marks are shapes, not only colours: `✓` going, `?` maybe, `✕` declined, `★`
+  the organiser.
+- **What the organiser wrote**, converted to text with its links kept - so the
+  join link in an invitation is clickable even where the meeting has no
+  **Join** button of its own.
+
+And then the thing that used to mean leaving for Outlook: **Accept**, **Maybe**
+and **Decline**. The answer is sent to the organiser - always, because an
+answer nobody was told about is indistinguishable from no answer from where
+they are sitting, so "accept without sending a response" is deliberately not
+offered here. Whichever answer you have already given is left off the bar
+rather than drawn as a button that does nothing, and the calendar is re-read
+afterwards, since declining a meeting takes it out of your calendar.
+
+The buttons appear only where there is something to answer: a meeting somebody
+else called, that has not been cancelled, and that you are not the organiser
+of. An appointment you put in your own calendar has nobody to answer.
+
+Both transports can do this. On a Graph mailbox it is that API's own verb per
+answer; on a mailbox read over IMAP it goes through EWS, which has no such verb
+and instead has the response created and sent as an item - which amounts to the
+same thing on the organiser's tally.
 
 ## Teams meetings
 
@@ -695,6 +735,39 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.4.0 — 2026-09-02
+
+- **A meeting can be answered here.** The agenda could show an invitation and
+  join it, and the one thing anybody actually does with one - say whether they
+  are coming - meant leaving for Outlook. **Details** under the grid, or a
+  click on a row in the list, now opens the meeting where a message opens, with
+  **Accept**, **Maybe** and **Decline** on it. Both transports: Graph has a
+  verb per answer, and a mailbox read over IMAP goes through EWS, which has no
+  verb and instead has the response created and sent as an item.
+- **And it says what an agenda cannot.** Who else was invited and what each of
+  them said, counted first (`4 of 7 going · 1 maybe · 1 declined`) and then
+  listed with a mark per person - shapes rather than hues, since a list of
+  names told apart by colour alone is no list at all. Plus the organiser's
+  address, what you yourself answered, and the invitation's own text with its
+  links kept, so the join link inside one is clickable even where the meeting
+  carries no **Join** button.
+- **Clicking a meeting in the list no longer opens Outlook.** It opens the
+  meeting here. Outlook is still one button away inside it, which is the right
+  way round: leaving the app should be a thing you ask for.
+- **The window has the calendar now, not just the bar's popup.** The reading
+  pane's column stood empty with "Select a message" written across it until a
+  message was opened - a third of the window spent on an instruction, while
+  the smaller surface had the agenda all along. The agenda lives there now and
+  stands aside for a message or a meeting, the way it does in the popup. The
+  drawn grid appears where the setting asks for it and the column is wide
+  enough to draw one; below that it is the day-grouped list, because a
+  three-day grid in two hundred pixels is not a grid.
+- Under it, `graph.py` grew `event --id` and `respond --id --reply
+  accept|tentative|decline`. A meeting's body arrives from Exchange as markup
+  however plainly a `GetItem` asks for text, so it is checked rather than
+  believed and converted the way an HTML mail is - which is what kept a
+  stylesheet out of the pane.
 
 ### 1.3.0 — 2026-09-02
 
