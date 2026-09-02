@@ -735,6 +735,23 @@ def inline_images(message):
     return found
 
 
+def has_html(message):
+    """Whether the message carries a text/html part at all.
+
+    The reading pane offers "Show formatting" from this rather than from a
+    guess. On a message that was only ever plain text there is nothing to
+    show, and an offer that changes nothing when it is taken is worse than no
+    offer at all.
+    """
+    for part in message.walk():
+        if str(part.get_content_type() or "").lower() != "text/html":
+            continue
+        if part.get_content_disposition() == "attachment":
+            continue
+        return True
+    return False
+
+
 def body_of(message, want_html):
     """(text, is_html) for the part worth showing, or ("", False).
 
@@ -996,6 +1013,10 @@ def message(account, token, message_id, want_html):
             ),
             "raw": raw,
             "isHtml": is_html,
+            # Whether markup exists, as opposed to whether it is what came
+            # back above: `body_of` prefers plain text, so a message with both
+            # parts answers is_html False and hasHtml True.
+            "hasHtml": has_html(parsed),
             "inlineImages": inline_images(parsed),
         }
     finally:

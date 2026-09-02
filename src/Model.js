@@ -1292,6 +1292,30 @@ function senderName(mail) {
   return address || "Unknown sender"
 }
 
+// The senders whose mail opens formatted, out of the one string that setting
+// is kept as. A list, not a boolean per sender, because it has to survive in
+// shell.json - which the shell's own settings panel renders from a schema
+// that knows strings, numbers and booleans.
+//
+// Lowercased and de-duplicated here rather than at every comparison: an
+// address is matched, not displayed, and Outlook is happy to send the same
+// sender as Firstname.Lastname@ one day and firstname.lastname@ the next.
+function addressList(value) {
+  var out = []
+  var parts = String(value || "").split(",")
+  for (var i = 0; i < parts.length; i++) {
+    var address = parts[i].trim().toLowerCase()
+    if (address !== "" && out.indexOf(address) < 0) out.push(address)
+  }
+  return out
+}
+
+// The same list back as the string the setting holds. Empty means the key is
+// removed and the default takes over again - see config.py.
+function addressListText(list) {
+  return (list || []).join(", ")
+}
+
 function oneLine(text, maxLength) {
   var value = String(text || "").replace(/\s+/g, " ").trim()
   var cap = maxLength || 120

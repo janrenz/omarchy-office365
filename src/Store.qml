@@ -261,13 +261,16 @@ Item {
   // Images are part of the key, not a flag beside it: a body fetched without
   // them and the same body with them are two different documents, and caching
   // them under one name is how pressing the button would appear to do nothing.
-  function bodyKey(id, wantHtml, withImages) {
-    return String(id) + (wantHtml === true ? "|html" : "|text")
+  // `mode` is graph.py's --body: "auto", "html" or "text". Part of the key
+  // because the same message read three ways is three different bodies, and
+  // switching between them must not hand back the one that was cached first.
+  function bodyKey(id, mode, withImages) {
+    return String(id) + "|" + String(mode || "auto")
            + (withImages === true ? "|img" : "")
   }
 
-  function cachedBody(id, wantHtml, withImages) {
-    return bodies[bodyKey(id, wantHtml, withImages)] || null
+  function cachedBody(id, mode, withImages) {
+    return bodies[bodyKey(id, mode, withImages)] || null
   }
 
   function rememberBody(key, detail) {
@@ -288,8 +291,8 @@ Item {
   property var bodyPending: ({})
   property var bodyQueue: []
 
-  function requestBody(alias, id, wantHtml, demo, withImages) {
-    var key = bodyKey(id, wantHtml, withImages)
+  function requestBody(alias, id, mode, demo, withImages) {
+    var key = bodyKey(id, mode, withImages)
     var cached = bodies[key]
     if (cached) {
       // Still asynchronous, so a caller that sets its loading flag after this
@@ -303,7 +306,8 @@ Item {
     next[key] = true
     bodyPending = next
     var queued = bodyQueue.slice()
-    queued.push({ key: key, alias: String(alias), id: String(id), html: wantHtml === true,
+    queued.push({ key: key, alias: String(alias), id: String(id),
+                  body: String(mode || "auto"),
                   demo: demo === true, images: withImages === true })
     bodyQueue = queued
     pumpBodies()
@@ -317,7 +321,7 @@ Item {
     // Demo mode has to reach the reading pane too, or opening a synthetic row
     // asks Graph about an id it has never seen.
     if (next.demo) command.push("--demo")
-    if (next.html) command.push("--html")
+    command.push("--body", next.body)
     // Only ever set by the reader pressing the button on this one message.
     if (next.images) command.push("--load-images")
     messageProc.command = command

@@ -29,12 +29,14 @@ settings, e.g. `FWU`. `python3 $HELPER list` names the ones that are set up.
 ## Reading
 
     python3 $HELPER message --account FWU --id 'AAMkAD…'
-    python3 $HELPER message --account FWU --id 'AAMkAD…' --html
+    python3 $HELPER message --account FWU --id 'AAMkAD…' --body html
     python3 $HELPER fetch   --account FWU --mails 15 --days 7
     python3 $HELPER folders --account FWU
 
 `message` is the one being read: sender, recipients, date, and the body already
-flattened to text (`--html` keeps the markup, which is rarely what you want).
+flattened to text where the message has a plain-text part, and left as the
+sender's markup where it has none. `--body html` keeps the markup either way
+and `--body text` flattens it either way; text is rarely not what you want.
 `fetch` is the list — recent mail plus calendar events, and `--folder
 ALIAS=ID` reads a folder other than the inbox; `folders` names them.
 

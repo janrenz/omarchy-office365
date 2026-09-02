@@ -61,9 +61,11 @@ avoidable sign-in. Do not add a poll outside the store.
    600, and reach the helpers on **stdin** — never in argv (anyone on the machine
    can read another process's command line) and never in `shell.json`
    (world-readable).
-2. **The window never fetches anything remote.** With `htmlBody` on, images and
-   anything else remote are stripped *before* rendering, so nothing in a message
-   can phone home or report a read receipt.
+2. **The window never fetches anything remote.** Wherever a message's own
+   markup is rendered - the reader pressed **Show formatting**, the sender has
+   a standing rule, `htmlBody` is on, or the message carried no plain-text part
+   at all - images and anything else remote are stripped *before* rendering, so
+   nothing in a message can phone home or report a read receipt.
 3. **A message never chooses its own markup** beyond what the sanitiser allows.
    Links are `http`, `https`, `mailto` only, checked in Python, again in
    `Model.js` where the anchor is written, and once more in `openUrl` before the

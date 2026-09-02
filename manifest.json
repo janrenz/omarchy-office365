@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "caseonline.omarchy.office365",
   "name": "Office 365 Mail & Calendar",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "author": "Kees Schollaart",
   "license": "MIT",
   "description": "Unread Outlook mail and your agenda in the Omarchy bar. One widget can carry several mailboxes, or add one per mailbox. Needs python3 (standard library only) and talks to Microsoft Graph, nothing else.",
@@ -138,9 +138,16 @@
       {
         "key": "htmlBody",
         "type": "boolean",
-        "label": "Keep the message's own formatting",
-        "description": "Render headings, lists, tables, links and pictures instead of flattening to text. A picture the message carries itself is shown; one held on the sender's servers is left out and counted, because fetching it would tell them the message was opened. The reading pane offers to load those per message.",
+        "label": "Always keep the message's own formatting",
+        "description": "Off, every message opens as text and the reading pane offers a button to show its formatting - for that one message, or for everything from that sender. On, every message is formatted without being asked. Either way a message with no plain-text version of its own is shown formatted, because flattening one produces a page of run-together link labels. A picture the message carries itself is shown; one held on the sender's servers is left out and counted, because fetching it would tell them the message was opened. The reading pane offers to load those per message.",
         "defaultValue": false
+      },
+      {
+        "key": "htmlSenders",
+        "type": "string",
+        "label": "Senders whose mail always opens formatted",
+        "description": "Written by the reading pane's \"Always from this sender\" button, and cleared by its \"Stop for this sender\". Editable here too: addresses separated by commas. Ignored while the setting above is on, since that already formats everything.",
+        "defaultValue": ""
       },
       {
         "key": "previewLine",

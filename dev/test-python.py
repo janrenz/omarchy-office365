@@ -1491,6 +1491,77 @@ class ImagesAndTheRestOfTheSanitiser(unittest.TestCase):
         self.assertNotIn("<img", graph.sanitize_html('<img src="https://tracker/x.gif">'))
 
 
+class BodyMode(unittest.TestCase):
+    """Which body a message is built as, and who decided."""
+
+    def mode(self, body="", html=False):
+        import argparse
+        return graph.body_mode(argparse.Namespace(body=body, html=html))
+
+    def test_nothing_asked_for_is_auto(self):
+        self.assertEqual(self.mode(), "auto")
+
+    def test_the_older_html_flag_still_means_html(self):
+        """The skill file and anything an agent wrote against it pass --html."""
+        self.assertEqual(self.mode(html=True), "html")
+
+    def test_an_explicit_mode_wins_over_the_older_flag(self):
+        self.assertEqual(self.mode(body="text", html=True), "text")
+
+    def test_a_mode_that_is_not_one_falls_back_rather_than_raising(self):
+        self.assertEqual(self.mode(body="fancy"), "auto")
+
+    def test_auto_renders_markup_only_where_there_was_no_text_part(self):
+        """render_body is handed the decision, not the request - which is how
+        an HTML-only message reaches the pane formatted with nobody asking."""
+        markup = "<p>Hello</p>"
+        self.assertEqual(graph.render_body(markup, True, True)[2], "html")
+        self.assertEqual(graph.render_body(markup, True, False)[2], "linked")
+
+
+class HasHtml(unittest.TestCase):
+    """Whether the reading pane has any formatting to offer."""
+
+    def build(self, plain=None, markup=None):
+        import email.message
+        message = email.message.EmailMessage()
+        if plain is not None and markup is not None:
+            message.set_content(plain)
+            message.add_alternative(markup, subtype="html")
+        elif markup is not None:
+            message.set_content(markup, subtype="html")
+        else:
+            message.set_content(plain or "")
+        return message
+
+    def test_a_plain_message_offers_nothing(self):
+        import imapmail
+        self.assertFalse(imapmail.has_html(self.build(plain="Just words")))
+
+    def test_both_parts_means_there_is_something_to_show(self):
+        """body_of prefers the plain part, so this is exactly the case the
+        button exists for: text on screen, markup available behind it."""
+        import imapmail
+        message = self.build(plain="Just words", markup="<p>Just words</p>")
+        self.assertFalse(imapmail.body_of(message, False)[1])
+        self.assertTrue(imapmail.has_html(message))
+
+    def test_an_html_only_message_says_so_both_ways(self):
+        import imapmail
+        message = self.build(markup="<p>Only markup</p>")
+        self.assertTrue(imapmail.body_of(message, False)[1])
+        self.assertTrue(imapmail.has_html(message))
+
+    def test_an_attached_page_is_not_the_message_s_own_formatting(self):
+        """A .html file on a plain-text message would otherwise light the
+        button up on a body that has nothing else to show."""
+        import imapmail
+        message = self.build(plain="See attached")
+        message.add_attachment(b"<p>report</p>", maintype="text", subtype="html",
+                               filename="report.html")
+        self.assertFalse(imapmail.has_html(message))
+
+
 class CalendarWindow(unittest.TestCase):
     """The window is midnight to midnight, and on two days a year those are not
     24 hours apart. A fixed offset taken from today gets the far end wrong."""

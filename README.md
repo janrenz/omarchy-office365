@@ -344,9 +344,45 @@ one, and only for a message that needs it. If the attaching fails, the draft is
 left in Drafts with whatever did attach, and the error says so - it is somewhere
 you can finish it, which "could not send" would not have told you.
 
+### Formatting, and the button that turns it on
+
+Every message opens as text. Not because markup is dangerous here - everything
+that could fetch or run is stripped before the pane ever sees it - but because
+a reading pane is for reading, and most mail is words wrapped in somebody
+else's layout. So the pane shows the words, and offers the layout:
+
+- **Show formatting** renders this one message as its sender wrote it -
+  headings, lists, tables, and the pictures it carries with it. **Plain text**
+  is the way back. Neither is remembered; the next message opens as text again.
+- **Always from this sender** remembers it for that address, so their mail
+  opens formatted from then on. **Stop for this sender** forgets it again. The
+  list lives in the widget's settings as `htmlSenders`, so it survives a
+  restart and can be read or emptied there.
+- **Always keep the message's own formatting** in the settings is the old
+  behaviour, for anyone who wants every message formatted and no buttons.
+
+There is one message the pane does not ask about: **one that carries no
+plain-text version at all**. Half of what arrives from a marketing system is
+markup and nothing else, and flattening that gives a page of run-together link
+labels rather than a letter. So it is shown as it was written, with a line
+under it saying why. Nothing is fetched from the sender to do it - the same
+sanitiser runs, and remote pictures are still blocked and counted.
+
+Formatting and pictures are separate decisions on purpose. Showing a message's
+layout costs nobody anything; fetching the pictures it points at on the
+sender's servers tells them you opened it, and that stays behind its own
+button - see [Sign-in and your data](#sign-in-and-your-data).
+
+Over IMAP the pane knows exactly what a message carries, because it reads the
+MIME parts itself. Over Graph it does not: Graph keeps one body per message and
+converts on request, so "was there a plain-text part" is a question it cannot
+be asked. On that transport the button is therefore always offered, and a
+message with no formatting simply shows the same words again.
+
 ### Links
 
-Graph hands a message over as plain text unless `htmlBody` is on, and its
+Graph hands a message over as plain text unless the formatting is asked for,
+and its
 HTML-to-text conversion leaves every link in a form nothing can use: the words
 buried behind two hundred characters of Defender safelink, or run straight into
 the text in front of them. So the links go back in as links, built here out of
@@ -659,6 +695,31 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.3.0 — 2026-09-02
+
+- **Formatting is a button now, not a setting you leave on.** A message's own
+  markup used to be all-or-nothing: **Keep the message's own formatting** on
+  and every message arrived as its sender laid it out, off and none of them
+  did. Neither is what reading mail is actually like. So every message now
+  opens as text, and the reading pane offers **Show formatting** for that one
+  message and **Always from this sender** for everything from that address -
+  with **Plain text** and **Stop for this sender** as the way back out of
+  each. The old setting is still there, relabelled **Always keep the message's
+  own formatting**, and turning it on hides the buttons the way it always
+  behaved. The sender list is kept in the widget's settings as `htmlSenders`,
+  so it survives a restart and can be emptied from the settings panel.
+- **A message with no plain-text version is shown as it was written.** This is
+  the case that made the old setting feel wrong. A newsletter that is markup
+  and nothing else was being flattened into a page of run-together link labels
+  - technically the message, unreadable in practice - and the only fix was to
+  turn formatting on for everything. Now that message renders as itself, with
+  a line under it saying it had no text version and that nothing was fetched
+  from the sender. Over IMAP that is a fact read off the MIME parts; over
+  Graph it cannot be known, because Graph keeps one body and converts on
+  request, so the button is offered on every message there instead.
+- Under it, `graph.py message` takes `--body auto|html|text` in place of a bare
+  `--html`, which still works and still means `--body html`.
 
 ### 1.2.0 — 2026-09-01
 

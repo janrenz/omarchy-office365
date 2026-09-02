@@ -1491,6 +1491,15 @@ Item {
                     if (mailView.previewMail) mailView.startLogin(mailView.previewMail.alias, true)
                   }
                   onLoadImagesRequested: mailView.loadPreviewImages()
+                  htmlAlways: mailView.htmlAlways
+                  senderHtml: mailView.senderAllowsHtml(mailView.previewMail)
+                  htmlShown: mailView.previewIsHtml
+                  htmlAvailable: mailView.previewHasHtml
+                  htmlAuto: mailView.previewHtmlAuto
+                  onShowHtmlRequested: mailView.showPreviewHtml()
+                  onShowTextRequested: mailView.showPreviewText()
+                  onAllowHtmlSenderRequested: mailView.allowHtmlFromSender()
+                  onStopHtmlSenderRequested: mailView.stopHtmlFromSender()
                 }
               }
 

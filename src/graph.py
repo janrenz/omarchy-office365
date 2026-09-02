@@ -1549,6 +1549,10 @@ def demo_message(alias, message_id):
         + "reaches this pane.\n\n"
         + "Thanks,\n" + who,
         "truncated": False,
+        # No bodyFormat: the pane falls back to plain text, which is what this
+        # body is. Naming a format here would render it as markup instead.
+        "hasHtml": False,
+        "htmlAuto": False,
     }
 
 
@@ -2034,19 +2038,48 @@ def recipients(values):
     return people
 
 
-def render_body(raw, served_html, want_html, policy=None):
+def render_body(raw, served_html, show_html, policy=None):
     """(body, truncated, format) for a pane, from whichever transport read it.
+
+    `show_html` is the decision already made - see `body_mode` - not what the
+    reader asked for, so an HTML-only message reaches here as show_html even
+    though nobody pressed anything.
 
     Capped before anything is built from it, not after: cutting finished markup
     at a fixed length lands in the middle of a tag sooner or later.
     """
-    if want_html and served_html:
+    if show_html and served_html:
         return sanitized(raw, policy, HTML_BODY_CAP) + ("html",)
     tidied = tidy_body(raw)
     # Links go back in as links. The result is markup, but markup this file
     # wrote out of escaped text rather than anything a sender sent, which is
     # why it needs none of sanitize_html's work.
     return linkify(tidied[:TEXT_BODY_CAP]), len(tidied) > TEXT_BODY_CAP, "linked"
+
+
+BODY_MODES = ("auto", "html", "text")
+
+
+def body_mode(args):
+    """Which body to build: "auto", "html" or "text".
+
+    The pane opens every message in "auto" and offers the reader a button,
+    because a message's own markup is the sender's layout and most of the time
+    the words are what was wanted. "html" is that button pressed - for this one
+    message, or for everything from this sender, which is the pane's business
+    rather than this file's. "text" is the way back from it.
+
+    "auto" is not "text": where a message carries no plain-text part at all
+    there is nothing to choose between, and flattening the markup produces a
+    pane of run-together link labels. So auto shows an HTML-only message as
+    what it is. Nothing is loosened by that - the sanitiser strips everything
+    remote either way, so the message still cannot phone home.
+    """
+    mode = str(getattr(args, "body", "") or "").lower()
+    if mode in BODY_MODES:
+        return mode
+    # --html predates the three-way choice and still means the same thing.
+    return "html" if getattr(args, "html", False) else "auto"
 
 
 def cmd_message(args):
@@ -2070,7 +2103,8 @@ def cmd_message(args):
         fail(error.code, error.message)
 
     timezone_name = local_timezone()
-    want_html = bool(getattr(args, "html", False))
+    mode = body_mode(args)
+    want_html = mode == "html"
     # Remote images are a per-message decision the reader makes, not a setting:
     # the pane counts what it left out and offers to go and get them.
     load_images = bool(getattr(args, "load_images", False))
@@ -2078,12 +2112,17 @@ def cmd_message(args):
     if transport_of(account) == TRANSPORT_IMAP:
         message = imap_run(need_imap().message, account, token, args.id, want_html)
         raw, served_html = message["raw"], message["isHtml"]
+        # `body_of` prefers the plain part and only answers with markup when
+        # that part is missing or empty - so markup arriving where plain text
+        # was asked for *is* the "no text variant" case, and auto shows it.
+        auto_html = served_html and mode == "auto"
+        show_html = want_html or auto_html
         # Graph converts HTML to text for us when the Prefer header asks for
         # it; IMAP hands over the source and leaves the conversion here. Left
         # undone, tidy_body escapes the markup into the pane and the reader
         # gets <head> and a stylesheet where the message should be - and the
         # body cap is spent long before the text starts.
-        if served_html and not want_html:
+        if served_html and not show_html:
             # With the addresses kept, in the `[label]<url>` shape Graph's own
             # conversion produces - `linkify` below turns them back into links.
             # Dropped, a sign-in mail arrives as the word "Sign in" with
@@ -2091,8 +2130,8 @@ def cmd_message(args):
             # somewhere else, which is the thing this pane exists to avoid.
             raw = need_imap().strip_markup(raw, keep_links=True)
             served_html = False
-        policy = ImagePolicy(message.get("inlineImages"), load_images) if want_html else None
-        body, truncated, body_format = render_body(raw, served_html, want_html, policy)
+        policy = ImagePolicy(message.get("inlineImages"), load_images) if show_html else None
+        body, truncated, body_format = render_body(raw, served_html, show_html, policy)
         out(dict(ok=True, id=message["id"], subject=message["subject"], **{
             "from": message["from"],
             "fromAddress": message["fromAddress"],
@@ -2104,6 +2143,11 @@ def cmd_message(args):
             "body": body,
             "truncated": truncated,
             "bodyFormat": body_format,
+            # Whether there is markup to offer at all, and whether it is being
+            # shown without anyone having asked. The pane draws its button from
+            # the first and its note from the second.
+            "hasHtml": bool(message.get("hasHtml")) or served_html,
+            "htmlAuto": auto_html and body_format == "html",
             "images": policy.shown if policy else 0,
             "blockedImages": policy.blocked if policy else 0,
         }))
@@ -2153,6 +2197,16 @@ def cmd_message(args):
             # this rather than from the setting, so a plain-text message in an
             # HTML-enabled widget still renders as what it is.
             "bodyFormat": body_format,
+            # Graph keeps one body per message and converts on request, so
+            # "was there a plain-text part" is a question it cannot be asked:
+            # a message it flattened for us and one that was only ever text
+            # both come back as text. The offer is therefore made whenever the
+            # markup was not asked for, and taking it up on a message that has
+            # none simply shows the same words again. Which is also why auto
+            # never picks markup on this transport - the IMAP path above knows
+            # what Graph will not say.
+            "hasHtml": served_html if want_html else True,
+            "htmlAuto": False,
         }
     )
 
@@ -2723,8 +2777,15 @@ def main():
     message = with_account("message", "fetch one message with its body")
     message.add_argument("--id", required=True, help="message id from a fetch")
     message.add_argument("--demo", action="store_true", help="synthetic body, matching --demo fetch")
+    # Empty rather than "auto" by default, so that a caller passing only the
+    # older --html is not overruled by a default it never set.
+    message.add_argument("--body", choices=BODY_MODES, default="",
+                         help="auto (the default) reads the plain-text part where there is one "
+                              "and the message's own markup where there is not; html keeps the "
+                              "markup either way; text flattens it either way. Everything "
+                              "remote is stripped out of markup before it is handed over.")
     message.add_argument("--html", action="store_true",
-                         help="keep the message's own formatting, with everything remote stripped out")
+                         help="the same as --body html, kept for callers written before --body")
     message.add_argument("--load-images", action="store_true",
                          help="also fetch the images this message points at on the sender's "
                               "servers, which tells them it was read. Pictures it carries "

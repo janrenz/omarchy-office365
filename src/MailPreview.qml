@@ -45,6 +45,12 @@ Column {
   // Go and get the pictures this message points at elsewhere. Only raised by
   // the button below, and only for the message being read.
   signal loadImagesRequested()
+  // The reader's decision about this message's own markup. The first two are
+  // for this message alone; the last two write a rule about its sender.
+  signal showHtmlRequested()
+  signal showTextRequested()
+  signal allowHtmlSenderRequested()
+  signal stopHtmlSenderRequested()
   // Answering a message. Offered only where there is somewhere to type: the
   // window sets canCompose, the bar dropdown leaves it off, since a popup that
   // closes the moment you click away is no place to write a reply.
@@ -62,6 +68,23 @@ Column {
   // have been fetched, which is what takes the button away again.
   readonly property int blockedImages: detail && detail.blockedImages
                                        ? Number(detail.blockedImages) : 0
+
+  // ---- the message's own markup, which is off until it is asked for -------
+  //
+  // Set by the host from the service. `htmlAlways` is the widget setting that
+  // takes the decision away entirely, `senderHtml` says this sender already
+  // has a standing rule, and the other three describe what is on screen now.
+  property bool htmlAlways: false
+  property bool senderHtml: false
+  property bool htmlShown: false
+  property bool htmlAvailable: false
+  // Markup that nobody asked for, shown because the message carried no
+  // plain-text part. Worth saying out loud: it is the one case where the pane
+  // renders a sender's layout without being told to.
+  property bool htmlAuto: false
+  // Only where the reader still has a decision to make. With the setting on,
+  // every message is already formatted and there is nothing to offer.
+  readonly property bool htmlOffered: !htmlAlways && !!detail
 
   function people(list) {
     var names = []
@@ -281,6 +304,18 @@ Column {
   Text {
     textFormat: Text.PlainText
     width: parent.width
+    visible: root.htmlAuto && !root.htmlAlways && !root.senderHtml
+    text: "Shown as the sender wrote it - this message carried no plain-text version. "
+          + "Nothing was fetched from them."
+    wrapMode: Text.WordWrap
+    color: root.dim
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
+  Text {
+    textFormat: Text.PlainText
+    width: parent.width
     visible: !!root.detail && root.detail.truncated === true
     text: "Message continues - open it to read the rest."
     color: root.dim
@@ -317,6 +352,39 @@ Column {
 
     actions: [
       { text: "Open", trigger: function() { root.openRequested() } },
+
+      // Reading a message as its sender laid it out is a choice made per
+      // message, not a mode the pane is left in - so this is a button here
+      // rather than a switch in the settings. Nothing remote is fetched
+      // either way; the pictures below are the separate, louder decision.
+      { text: "Show formatting",
+        tooltip: "Headings, lists, tables and the pictures the message carries "
+                 + "itself. Nothing is fetched from the sender.",
+        visible: root.htmlOffered && !root.htmlShown && root.htmlAvailable,
+        enabled: !root.loading,
+        trigger: function() { root.showHtmlRequested() } },
+
+      { text: "Plain text", muted: true,
+        tooltip: "Back to the words, with the links kept",
+        visible: root.htmlOffered && root.htmlShown && !root.senderHtml,
+        enabled: !root.loading,
+        trigger: function() { root.showTextRequested() } },
+
+      // The standing version of the same decision. Kept separate from the
+      // one-off above because "this once" and "from now on" are not the same
+      // answer, and a reader should not have to give the stronger one to see
+      // what a message looks like.
+      { text: "Always from this sender",
+        tooltip: "Remember it, so mail from this address opens formatted",
+        visible: root.htmlOffered && !root.senderHtml && root.htmlAvailable,
+        enabled: !root.loading,
+        trigger: function() { root.allowHtmlSenderRequested() } },
+
+      { text: "Stop for this sender", muted: true,
+        tooltip: "Forget the rule, and read this one as text again",
+        visible: root.htmlOffered && root.senderHtml,
+        enabled: !root.loading,
+        trigger: function() { root.stopHtmlSenderRequested() } },
 
       // Only where there is something to load, and gone again once it is
       // loaded. Says how many, because "load 14 images" and "load 1 image"

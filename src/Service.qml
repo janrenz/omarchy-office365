@@ -154,10 +154,25 @@ Item {
   // see the README's "Your coding agent" section.
   readonly property bool agentHandover: setting("agentHandover", true) !== false
   readonly property bool previewLine: setting("previewLine", true) !== false
-  // Keep the message's own formatting - headings, lists, tables, links -
-  // instead of Graph's flattening to text. Everything that would fetch or run
-  // is stripped in graph.py before the markup gets anywhere near the pane.
-  readonly property bool htmlBody: setting("htmlBody", false) === true
+  // Keep every message's own formatting - headings, lists, tables, links -
+  // without being asked. Off, and meant to stay off: a reading pane is for
+  // reading, and a sender's layout is mostly the sender's business. What is
+  // left instead is a button on the message, and a way to say "always from
+  // this one". Everything that would fetch or run is stripped in graph.py
+  // before any markup gets near the pane, on all three paths.
+  readonly property bool htmlAlways: setting("htmlBody", false) === true
+  // The senders whose mail opens formatted, as the reading pane's "Always
+  // from this sender" button leaves them. A widget setting rather than
+  // something under ~/.local/state: it is a preference, it belongs beside the
+  // rest of them, and it is then editable and clearable from the shell's
+  // settings panel like anything else.
+  readonly property var htmlSenders: Model.addressList(setting("htmlSenders", ""))
+
+  function senderAllowsHtml(mail) {
+    if (!mail) return false
+    var address = String(mail.fromAddress || "").trim().toLowerCase()
+    return address !== "" && htmlSenders.indexOf(address) >= 0
+  }
   // Whether the panel opens already narrowed to Outlook's Focused mail.
   readonly property bool focusedByDefault: setting("focusedByDefault", false) === true
   // The same for the unread filter, for a widget you keep as an inbox rather
@@ -340,6 +355,30 @@ Item {
   // Whether the pictures on the sender's servers were asked for, for the one
   // message being read. Reset by every other way into the pane.
   property bool previewImages: false
+  // The reader's choice about markup for this one message: "" until they make
+  // one, then "html" or "text". Overrides both the setting and the sender
+  // list, in either direction, and is forgotten with the message.
+  property string previewHtmlChoice: ""
+
+  // What to ask graph.py for. "auto" is the ordinary case: the plain-text
+  // part where the message has one, its own markup where it has none, since
+  // flattening a message that was only ever markup produces a pane of
+  // run-together link labels rather than a letter.
+  function bodyModeFor(mail) {
+    if (previewHtmlChoice === "html" || previewHtmlChoice === "text") return previewHtmlChoice
+    return (htmlAlways || senderAllowsHtml(mail)) ? "html" : "auto"
+  }
+
+  // Whether the body on screen is the message's own markup, as opposed to
+  // markup this plugin built out of its plain text.
+  readonly property bool previewIsHtml: !!previewDetail
+                                        && String(previewDetail.bodyFormat || "") === "html"
+  // Whether there is any markup to offer. Absent from an older answer, and on
+  // the Graph path a "probably" rather than a fact - see cmd_message.
+  readonly property bool previewHasHtml: !!previewDetail && previewDetail.hasHtml !== false
+  // Whether the markup on screen was chosen for the reader because the message
+  // carried no plain-text part at all.
+  readonly property bool previewHtmlAuto: !!previewDetail && previewDetail.htmlAuto === true
 
   function showPreview(mail) {
     if (!mail || !mail.id) return
@@ -359,8 +398,72 @@ Item {
       return
     }
     previewImages = false
+    previewHtmlChoice = ""
     previewLoading = true
-    previewKey = hub.requestBody(mail.alias, mail.id, htmlBody, demo, false)
+    previewKey = hub.requestBody(mail.alias, mail.id, bodyModeFor(mail), demo, false)
+  }
+
+  // Re-read the message being read, in whatever way the reader has just asked
+  // for. The store keys its cache by mode, so going back to one already seen
+  // costs nothing and the pane does not blink.
+  function refetchPreview() {
+    if (!previewMail || !hub) return
+    previewLoading = true
+    previewError = ""
+    previewKey = hub.requestBody(previewMail.alias, previewMail.id,
+                                 bodyModeFor(previewMail), demo, previewImages)
+  }
+
+  // Show this message as its sender wrote it, or go back to the words. For
+  // this message only: the choice dies with it, which is what makes it a
+  // button rather than a setting.
+  function showPreviewHtml() {
+    if (!previewMail) return
+    previewHtmlChoice = "html"
+    refetchPreview()
+  }
+
+  function showPreviewText() {
+    if (!previewMail) return
+    previewHtmlChoice = "text"
+    // Remote pictures were a decision about a message that is no longer on
+    // screen in the form they were fetched for, and there is nowhere to put
+    // them in a plain-text body anyway.
+    previewImages = false
+    refetchPreview()
+  }
+
+  // The same, remembered for everyone at this address. Written into
+  // shell.json, so it outlives the shell - and the pane switches at once
+  // rather than waiting for the save to come back round, since a button that
+  // does nothing for a second reads as a button that did not work.
+  function allowHtmlFromSender() {
+    if (!previewMail) return
+    var address = String(previewMail.fromAddress || "").trim().toLowerCase()
+    if (address === "") return
+    var next = htmlSenders.slice()
+    if (next.indexOf(address) < 0) next.push(address)
+    saveSettings({ htmlSenders: Model.addressListText(next) })
+    previewHtmlChoice = "html"
+    refetchPreview()
+  }
+
+  function stopHtmlFromSender() {
+    if (!previewMail) return
+    var address = String(previewMail.fromAddress || "").trim().toLowerCase()
+    var next = []
+    for (var i = 0; i < htmlSenders.length; i++)
+      if (htmlSenders[i] !== address) next.push(htmlSenders[i])
+    // An empty string removes the key, which is how config.py spells "back to
+    // the default" - see its module docstring.
+    saveSettings({ htmlSenders: Model.addressListText(next) })
+    // "text" rather than "no choice": the save is another process and the new
+    // settings reach this object well after it returns, so leaving the choice
+    // empty would re-read the sender list that still has this address in it
+    // and put the message straight back the way it was.
+    previewHtmlChoice = "text"
+    previewImages = false
+    refetchPreview()
   }
 
   // Go back for the pictures this message points at on somebody else's server.
@@ -373,11 +476,13 @@ Item {
     previewImages = true
     previewLoading = true
     previewError = ""
-    previewKey = hub.requestBody(previewMail.alias, previewMail.id, htmlBody, demo, true)
+    previewKey = hub.requestBody(previewMail.alias, previewMail.id,
+                                 bodyModeFor(previewMail), demo, true)
   }
 
   function closePreview() {
     previewImages = false
+    previewHtmlChoice = ""
     holdOnly("")
     previewMail = null
     previewDetail = null

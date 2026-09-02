@@ -786,6 +786,15 @@ Panel {
                 root.service.startLogin(String(root.service.previewMail.alias), true)
             }
             onLoadImagesRequested: if (root.service) root.service.loadPreviewImages()
+            htmlAlways: !!root.service && root.service.htmlAlways
+            senderHtml: !!root.service && root.service.senderAllowsHtml(root.service.previewMail)
+            htmlShown: !!root.service && root.service.previewIsHtml
+            htmlAvailable: !!root.service && root.service.previewHasHtml
+            htmlAuto: !!root.service && root.service.previewHtmlAuto
+            onShowHtmlRequested: if (root.service) root.service.showPreviewHtml()
+            onShowTextRequested: if (root.service) root.service.showPreviewText()
+            onAllowHtmlSenderRequested: if (root.service) root.service.allowHtmlFromSender()
+            onStopHtmlSenderRequested: if (root.service) root.service.stopHtmlFromSender()
           }
         }
 
