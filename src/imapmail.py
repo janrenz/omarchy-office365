@@ -78,6 +78,13 @@ FOLDER_MAX_DEPTH = 3
 # after this many and the rest list without them.
 FOLDER_COUNT_CAP = 60
 
+# A search opens every folder it looks in - one SELECT and one SEARCH each -
+# so "everywhere" is a walk and the walk has to stop somewhere. A mailbox with
+# two hundred folders would spend a minute answering one query; these two are
+# where it gives up and says so instead.
+SEARCH_FOLDER_CAP = 25
+SEARCH_CAP = 50
+
 # Headers worth having for a list row. Content-Type and
 # Content-Transfer-Encoding are not for display: they are what makes the
 # separately fetched body text parseable as MIME (see preview_text).
@@ -238,9 +245,15 @@ def parse_id(message_id):
 # --------------------------------------------------------------------------
 
 
-def _sasl_xoauth2(username, token):
+def _sasl_xoauth2(username, token, binary=True):
     """SASL XOAUTH2, as imaplib and smtplib both want it: a callable that is
-    handed the server's challenge and answers with the bytes to base64.
+    handed the server's challenge and answers with what to base64.
+
+    The two libraries disagree on the type. imaplib base64s what it is handed
+    and so needs bytes; smtplib calls .encode("ascii") on it and so needs str,
+    and handing it bytes fails the send with an AttributeError rather than
+    anything the caller can report. Same credentials either way - `binary`
+    picks the type the caller's library asks for.
 
     A failed exchange comes back as a challenge carrying a JSON error blob and
     the protocol expects an empty line before the NO, so the credentials are
@@ -248,12 +261,14 @@ def _sasl_xoauth2(username, token):
     them would leave the connection waiting on a continuation that never ends.
     """
     state = {"offered": False}
+    nothing = b"" if binary else ""
 
     def authobject(_challenge=None):
         if state["offered"]:
-            return b""
+            return nothing
         state["offered"] = True
-        return ("user=%s\x01auth=Bearer %s\x01\x01" % (username, token)).encode()
+        credentials = "user=%s\x01auth=Bearer %s\x01\x01" % (username, token)
+        return credentials.encode() if binary else credentials
 
     return authobject
 
@@ -1156,6 +1171,120 @@ def snapshot(account, token, top, folder_id="", want_folders=True):
         close(client)
 
 
+def _search_string(value):
+    """A search term as an IMAP quoted string.
+
+    Not `quoted`: that one is for mailbox names and puts them through modified
+    UTF-7, which is a folder-name encoding and would turn a search for an
+    umlaut into a search for the literal "&APY-".
+    """
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def search_uids(client, query):
+    """UIDs in the selected folder matching `query`, oldest first.
+
+    TEXT is the only key, and deliberately so: it reads headers and body
+    together, which is the nearest thing IMAP has to what Graph's $search
+    looks at, and matching on SUBJECT and FROM alone would answer a different
+    question on each transport for the same typing.
+
+    ASCII words are ANDed - three TEXT keys side by side is IMAP's "all of
+    these". A query that is not ASCII cannot be: the term has to travel as a
+    literal for the server to read it as UTF-8, and imaplib carries exactly
+    one literal per command. So a query with an umlaut in it is one phrase,
+    which is the honest limit rather than a search that quietly drops the word
+    it could not send.
+    """
+    terms = [word for word in str(query).split() if word]
+    if not terms:
+        return []
+    ascii_only = all(word.isascii() for word in terms)
+    if ascii_only:
+        criteria = []
+        for word in terms:
+            criteria.extend(["TEXT", _search_string(word)])
+        typ, data = client.uid("SEARCH", *criteria)
+    else:
+        client.literal = " ".join(terms).encode("utf-8")
+        typ, data = client.uid("SEARCH", "CHARSET", "UTF-8", "TEXT")
+    if typ != "OK":
+        raise TransportError("search_failed", "Could not search: " + _text(data))
+    return _text(data).split()
+
+
+def search(account, token, query, folder_id="", scope="all", top=SEARCH_CAP):
+    """Messages matching `query`, in one folder or across the mailbox.
+
+    IMAP has no search across folders. SEARCH answers about the folder that is
+    selected, so everywhere means opening them one after another - and that
+    cost cannot be hidden, only bounded: the inbox is searched first, the rest
+    follow in the order the tree lists them, and the walk stops at
+    SEARCH_FOLDER_CAP with `complete` false rather than working through a
+    mailbox that has two hundred.
+
+    Rows come back in the same shape a fetch's do, with `folderId` on each -
+    a result list mixes folders, and a hit in Sent Items that looks exactly
+    like one in the inbox is a hit nobody can place.
+    """
+    query = str(query or "").strip()
+    if not query:
+        return {"rows": [], "complete": True, "warnings": []}
+
+    client = None
+    warnings = []
+    rows = []
+    complete = True
+    try:
+        client = connect(account, token)
+        # Without counts: a search is already a round trip per folder, and the
+        # unread numbers on a tree nobody is looking at are not worth doubling
+        # that. The tree is only being read here to know what to open.
+        folders, listed = folder_rows(client, want_counts=False)
+        if not listed:
+            complete = False
+
+        if str(scope) == "folder":
+            wanted = [folder_to_open(client, account, folders, folder_id, warnings)]
+        else:
+            selectable = [row["id"] for row in folders]
+            inbox = next((row["id"] for row in folders if row["isInbox"]), "INBOX")
+            wanted = [inbox] + [name for name in selectable if name != inbox]
+            if len(wanted) > SEARCH_FOLDER_CAP:
+                wanted = wanted[:SEARCH_FOLDER_CAP]
+                complete = False
+
+        for mailbox in wanted:
+            try:
+                exists, validity = select(client, mailbox, readonly=True)
+                if exists <= 0:
+                    continue
+                uids = search_uids(client, query)
+                if not uids:
+                    continue
+                if len(uids) > top:
+                    uids = uids[-top:]
+                    complete = False
+                for row in read_rows(client, mailbox, validity, ",".join(uids), by_uid=True):
+                    row["folderId"] = mailbox
+                    rows.append(row)
+            except (TransportError, imaplib.IMAP4.error) as error:
+                # One folder that will not open or will not search is not worth
+                # failing the whole search over - the hits in the others are
+                # still the answer somebody was after.
+                warnings.append({"scope": "search",
+                                 "message": "Could not search %s: %s" % (mailbox, _text(error))})
+                complete = False
+
+        rows.sort(key=lambda row: row["received"], reverse=True)
+        if len(rows) > top:
+            rows = rows[:top]
+            complete = False
+        return {"rows": rows, "complete": complete, "warnings": warnings}
+    finally:
+        close(client)
+
+
 def fetch_parsed(account, token, message_id, cap=MAX_MESSAGE_BYTES):
     """(parsed message, FETCH prefix, whether the cap cut it off), in one trip.
 
@@ -1562,7 +1691,8 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
             server.ehlo()
             server.starttls()
             server.ehlo()
-            server.auth("XOAUTH2", _sasl_xoauth2(me, token), initial_response_ok=True)
+            server.auth("XOAUTH2", _sasl_xoauth2(me, token, binary=False),
+                        initial_response_ok=True)
             server.send_message(note)
         finally:
             try:

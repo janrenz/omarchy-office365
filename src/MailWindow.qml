@@ -270,6 +270,12 @@ Item {
 
   readonly property string folderTitle: {
     if (!mailView.configured) return "Office 365"
+    // A list of hits is not a folder, and naming one over it is the same
+    // mistake as naming one mailbox over three - see below. The query is what
+    // this list is, so the query is what it is called.
+    if (mailView.searchShowing)
+      return "“" + mailView.searchedQuery + "”"
+       + (mailView.searchScope === "folder" ? " in " + mailView.folderNameFor(activeAlias) : "")
     // Every mailbox on the same folder is the merged view, and naming one
     // mailbox's address there was the whole reason a window showing three
     // inboxes at once read as though it were showing one. It is also the state
@@ -478,6 +484,33 @@ Item {
     flick.contentY = toBottom === true ? Math.max(0, flick.contentHeight - flick.height) : 0
   }
 
+  // Keep the cursored row on screen.
+  //
+  // Both lists draw themselves at their full height inside a scroller, so
+  // walking a cursor down one of them scrolled nothing: past the fold the keys
+  // moved a cursor nobody could see, and no key brought it back. One mailbox's
+  // folder tree mostly fits the sidebar, which is why this stayed hidden until
+  // a second mailbox doubled the tree and put half of it out of reach.
+  //
+  // The smallest move that puts the row inside the viewport, rather than
+  // centring it: a cursor stepping down a list should scroll a row at a time,
+  // the way it does in every other list anyone has used.
+  function revealRow(view, row) {
+    var flick = view ? view.contentItem : null
+    if (!flick || !row) return
+    var top = row.mapToItem(flick.contentItem, 0, 0).y
+    var margin = Style.spacing.sm
+    var limit = Math.max(0, flick.contentHeight - flick.height)
+    if (top - margin < flick.contentY)
+      flick.contentY = Math.max(0, Math.min(limit, top - margin))
+    else if (top + row.height + margin > flick.contentY + flick.height)
+      flick.contentY = Math.max(0, Math.min(limit, top + row.height + margin - flick.height))
+    // A row this near the top takes the top outright. What sits above the
+    // first folder is its mailbox's header, and scrolling that away to gain
+    // twenty pixels answers "which mailbox is this" with nothing.
+    if (flick.contentY < row.height) flick.contentY = 0
+  }
+
   // A tiling layout hands this window whatever width is left, and below a
   // point there is no room for a sidebar beside the mail. The folder tree is
   // not gone then - it takes the window until a folder is picked, opened by
@@ -517,16 +550,34 @@ Item {
     if (!columns.showSidebar) folderDrawer = true
     if (folderPane.cursorIndex < 0)
       folderPane.cursorIndex = Math.max(0, folderPane.selectedPickable)
+    // The selected folder can be well down the tree - the second mailbox's
+    // Archive - so the tree opens with it on screen rather than leaving it to
+    // be found. After the layout, because a drawer that has just been asked
+    // for has not been given its height yet.
+    Qt.callLater(function() { root.revealRow(root.scrollTarget(), root.folderPane.cursorRow()) })
   }
 
   function moveCursor(step) {
     if (folderAction === "move") {
-      if (folderOverlay.item && folderOverlay.item.tree) folderOverlay.item.tree.moveCursor(step)
+      if (folderOverlay.item && folderOverlay.item.tree) {
+        folderOverlay.item.tree.moveCursor(step)
+        revealRow(folderOverlay.item.scroller, folderOverlay.item.tree.cursorRow())
+      }
       return
     }
     if (folderActing) return
-    if (moving) { if (movePicker.item) movePicker.item.tree.moveCursor(step); return }
-    if (pane === "folders") { folderPane.moveCursor(step); return }
+    if (moving) {
+      if (movePicker.item) {
+        movePicker.item.tree.moveCursor(step)
+        revealRow(movePicker.item.scroller, movePicker.item.tree.cursorRow())
+      }
+      return
+    }
+    if (pane === "folders") {
+      folderPane.moveCursor(step)
+      revealRow(scrollTarget(), folderPane.cursorRow())
+      return
+    }
     // The agenda has no cursor to walk - an event is not a row - so down and
     // up scroll it, the way they do in a message.
     if (pane === "agenda") { scrollBy(agendaScroll, step * lineStep); return }
@@ -539,6 +590,10 @@ Item {
     if (count === 0) { mailCursor = -1; return }
     mailCursor = mailCursor < 0 ? (step > 0 ? 0 : count - 1)
                                 : Math.max(0, Math.min(count - 1, mailCursor + step))
+    // After the cursor has moved, so the row asked for is the new one. The
+    // list's own rows carry the cursor by id, and that binding is read here
+    // rather than counted again - see MailList.cursorRow.
+    revealRow(listScroll, mailList.cursorRow())
   }
 
   function activateCursor() {
@@ -727,6 +782,11 @@ Item {
     // Innermost first. A half-written reply is the last thing that should go
     // when someone reaches for Escape.
     if (mailView.composing) { mailView.cancelCompose(); return }
+    // The search field and the results together, because they are one thing:
+    // Escape out of a search is being done with the search, and leaving the
+    // hits behind with no field to change them is a list nobody can get out
+    // of except by clicking a folder.
+    if (mailView.searchOpen) { mailView.closeSearch(); focusPane("mail"); return }
     // A tree that was asked for is the layer Escape takes back first, whether
     // it ended up over the list or beside it.
     if (folderDrawer) { folderDrawer = false; pane = "mail"; return }
@@ -748,6 +808,19 @@ Item {
     if (mailView.meetingOpen) { mailView.closeMeeting(); return }
     if (mailView.selectedEvent) { mailView.selectEvent(null); return }
     requestClose()
+  }
+
+  // Whether what is being typed is going into the search field. The key
+  // catcher reads it: every letter belongs to the field while it has the
+  // cursor, and to the list the moment it does not.
+  readonly property bool searchTyping: searchBar.typing
+
+  // / from anywhere in the window. Opening it and putting the cursor in it are
+  // one act - a field that appears and has to be clicked is a field that made
+  // somebody reach for the mouse to do the one thing keyboards are for.
+  function startSearch() {
+    mailView.openSearch()
+    searchBar.takeFocus()
   }
 
   function pickFolder(alias, folderId) {
@@ -1078,7 +1151,10 @@ Item {
         // other two folder prompts have no field to type into and keep the
         // catcher armed, so j/k still walk the destinations and Escape still
         // backs out through dismiss().
-        blocked: mailView.composing || root.folderNaming
+        // ...and while the search field has the cursor, for the same reason:
+        // j, k, h and l are how the cursor moves, and a field that cannot be
+        // typed into is not a field.
+        blocked: mailView.composing || root.folderNaming || root.searchTyping
         onMoveRequested: function(dx, dy) {
           if (dy !== 0) { root.moveCursor(dy); return }
           // Nothing to step between: the picker is the whole window.
@@ -1142,6 +1218,10 @@ Item {
           else if (text === "C") root.toggleAgenda()
           // Capital, because f is already the Focused filter.
           else if (text === "F") root.flagAtCursor()
+          // The key every list in every terminal searches with, and the one
+          // reason a plain letter would not do: / is not a letter, so it can
+          // never be the first character of something somebody meant to type.
+          else if (text === "/") root.startSearch()
           else if (text === "?") root.showHelp = !root.showHelp
           else if (text === "g") root.scrollToEnd(view, false)
           else if (text === "G") root.scrollToEnd(view, true)
@@ -1359,6 +1439,22 @@ Item {
                 onClicked: mailView.focusedOnly = !mailView.focusedOnly
               }
 
+              // A glyph, like the two above it and for the same reason: this
+              // is the row that collapses the header when it outgrows the
+              // width beside the title, and one more word is what would do it.
+              FilterPill {
+                icon: "\u{F0349}"   // nf-md-magnify
+                label: "Search"      // the name of a pill that shows a glyph
+                selected: mailView.searchOpen
+                fg: Color.foreground
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: {
+                  if (mailView.searchOpen) { mailView.closeSearch(); root.focusPane("mail") }
+                  else root.startSearch()
+                }
+              }
+
               FilterPill {
                 icon: "\u{F0450}"   // nf-md-refresh
                 label: "Refresh"     // still what the tooltip-less pill is named
@@ -1372,6 +1468,42 @@ Item {
           }
 
           PanelSeparator { width: parent.width }
+
+          // ---- searching ----
+          //
+          // Below the separator rather than in the header: the header is one
+          // row wide and collapses when its pills outgrow it (see the Item
+          // above), and a text field is the widest control there is.
+          //
+          // Always built and hidden rather than made on demand, because the
+          // window has to be able to hand it the keyboard focus the instant /
+          // is pressed, and because what is typed into it survives the row
+          // being closed and reopened only if the row is the same row.
+          SearchBar {
+            id: searchBar
+            width: parent.width
+            visible: mailView.configured && mailView.searchOpen && root.settingsError === ""
+            query: mailView.searchQuery
+            running: mailView.searchRunning
+            showing: mailView.searchShowing
+            answered: mailView.searchedQuery
+            complete: mailView.searchComplete
+            error: mailView.searchError
+            matched: mailView.searchMatched
+            total: mailView.searchTotal
+            scope: mailView.searchScope
+            folderName: mailView.folderNameFor(root.activeAlias)
+            fg: Color.foreground
+            accent: Color.accent
+            fontFamily: Style.font.family
+            onEdited: function(text) { mailView.searchQuery = text }
+            onSubmitted: mailView.runSearch()
+            onScopeToggled: mailView.searchScope = mailView.searchScope === "folder" ? "all" : "folder"
+            onDismissed: {
+              mailView.closeSearch()
+              root.focusPane("mail")
+            }
+          }
 
           // ---- a reason there is nothing to show ----
           Text {
@@ -1583,6 +1715,7 @@ Item {
               clip: true
 
               MailList {
+                id: mailList
                 width: columns.listWidth
                 mails: mailView.mail
                 threads: mailView.threads
@@ -1791,6 +1924,7 @@ Item {
                   error: mailView.meetingError
                   answering: mailView.answeringMeeting
                   answerError: mailView.meetingAnswerError
+                  canAnswer: mailView.canAnswerOpenMeeting
                   // A window is taller than a dropdown, so the invitation gets
                   // to use that height.
                   maxBodyHeight: Math.max(Style.space(220), columns.height - Style.space(320))

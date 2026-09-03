@@ -46,6 +46,7 @@ Column {
     ["u", "Show only unread mail", "Doing"],
     ["f", "Show only Focused mail", "Doing"],
     ["t", "Group the list by conversation", "Doing"],
+    ["/", "Search — typing narrows this list, Enter asks the mailbox", "Doing"],
     ["r", "Refresh", "Doing"],
     ["?", "This list", "Doing"],
 

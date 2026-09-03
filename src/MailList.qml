@@ -82,6 +82,10 @@ Column {
       received: "",
       preview: "",
       shortLabel: "",
+      // Where this was found. Empty on everything a fetch produced - those all
+      // came from the folder the header already names - and set only on a
+      // search's hits, which is the one list that mixes folders.
+      folder: "",
       railColor: "",
       important: false,
       hasAttachments: false,
@@ -106,6 +110,7 @@ Column {
     entry.received = String(mail.received || "")
     entry.preview = String(mail.preview || "")
     entry.shortLabel = String(mail.short || "")
+    entry.folder = String(mail.folder || "")
     entry.railColor = String(mail.color)
     entry.important = mail.important === true
     entry.hasAttachments = mail.hasAttachments === true
@@ -217,6 +222,18 @@ Column {
   onCursorIdChanged: sync()
   Component.onCompleted: sync()
 
+  // The row the cursor is on, for a caller that has to scroll it into view.
+  // The delegate's own answer rather than a second copy of the rule: a
+  // threaded list draws summary rows the message list knows nothing about, so
+  // counting them again out here is a way for the two to disagree.
+  function cursorRow() {
+    for (var i = 0; i < list.count; i++) {
+      var row = list.itemAtIndex(i)
+      if (row && row.cursored) return row
+    }
+    return null
+  }
+
   ListModel { id: rows }
 
   Text {
@@ -272,6 +289,7 @@ Column {
       required property string received
       required property string preview
       required property string shortLabel
+      required property string folder
       required property string railColor
       required property bool important
       required property bool hasAttachments
@@ -394,7 +412,13 @@ Column {
             id: meta
             anchors.right: parent.right
             anchors.baseline: senderText.baseline
-            text: (root.showAccount ? row.shortLabel + "  " : "") + Model.relativeTime(row.received)
+            // The folder leads, where there is one: a hit in Sent Items that
+            // looks exactly like one in the inbox is a hit nobody can place.
+            // Capped, because a folder is named by whoever made it and the
+            // timestamp beside it is the part that must not be pushed off.
+            text: (row.folder !== "" ? Model.oneLine(row.folder, 18) + "  " : "")
+                  + (root.showAccount ? row.shortLabel + "  " : "")
+                  + Model.relativeTime(row.received)
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

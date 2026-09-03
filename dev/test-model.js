@@ -1093,5 +1093,94 @@ group("a file size a person can read", () => {
   check("or for one that is not a number", Model.fileSize("what"), "")
 })
 
+// ------------------------------------------------------------------ searching
+//
+// Two searches behind one field. These are the near one - the rows already in
+// hand, narrowed as somebody types - and the shape the far one's answer comes
+// back in, which is the same shape, which is the point.
+group("searching what is already here", () => {
+  const hit = (id, from, subject, preview, extra) => Object.assign({
+    id, from, fromAddress: from.toLowerCase().replace(/ /g, ".") + "@example.com",
+    subject, preview, received: "2026-08-20T09:00:00Z", read: false, flagged: false,
+    important: false, hasAttachments: false, focused: true
+  }, extra || {})
+
+  const tree = [
+    { id: "F-INBOX", name: "Inbox", isInbox: true },
+    { id: "F-SENT", name: "Sent Items" }
+  ]
+  const mailbox = (mail) => [{
+    alias: "work", short: "W", color: "#7aa2f7", write: true, folders: tree, mail
+  }]
+
+  const rows = [
+    hit("a", "Buchhaltung", "Rechnung 2026-0418", "Zahlbar innerhalb von 30 Tagen"),
+    hit("b", "Priya Raman", "Re: sprint 24 scope", "Happy to drop the export work"),
+    hit("c", "Accounts", "Invoice INV-2026-0418", "Attached for the July retainer")
+  ]
+
+  check("the words, lowercased and without the gaps",
+        Model.searchTerms("  Rechnung   2026 "), ["rechnung", "2026"])
+  check("nothing typed is no terms at all", Model.searchTerms("   "), [])
+
+  // All of the words rather than any: narrowing is what more typing is for.
+  check("every word has to be somewhere in the row",
+        Model.matchesQuery(rows[0], ["rechnung", "2026"]), true)
+  check("one word that is not there is enough to drop it",
+        Model.matchesQuery(rows[0], ["rechnung", "sprint"]), false)
+  // Four fields, because those are the four a row shows.
+  check("the sender counts", Model.matchesQuery(rows[1], ["priya"]), true)
+  check("so does the address behind it", Model.matchesQuery(rows[1], ["priya.raman@"]), true)
+  check("and the preview, which is all of the body a row has",
+        Model.matchesQuery(rows[2], ["retainer"]), true)
+  // Anywhere, not at a word boundary: half a subject is how people remember mail.
+  check("a fragment inside a word matches", Model.matchesQuery(rows[2], ["0418"]), true)
+  check("no terms match everything", Model.matchesQuery(rows[1], []), true)
+
+  const merged = Model.mergeMailAll(mailbox(rows), false, {}, false)
+  check("the query narrows the list", Model.filterMail(merged, "rechnung").map(r => r.id), ["a"])
+  check("two words narrow it further",
+        Model.filterMail(merged, "invoice retainer").map(r => r.id), ["c"])
+  check("an empty query narrows nothing",
+        Model.filterMail(merged, "  ").map(r => r.id), ["a", "b", "c"])
+
+  // The same exception the cap and the unread filter make: a message cannot be
+  // taken out from under the pane that is showing it.
+  check("the message being read survives a query it does not match",
+        Model.filterMail(merged, "rechnung", { pinned: { id: "b" } }).map(r => r.id).sort(),
+        ["a", "b"])
+
+  // ---- and the answer the helper sends back ----
+  const results = { work: { rows: [
+    Object.assign(hit("z", "Dana Okafor", "Contract renewal", "Ready to sign"),
+                  { folderId: "F-SENT" })
+  ], complete: true } }
+  const swapped = Model.searchViews(mailbox(rows), results)
+
+  check("the hits stand in for the folder's rows",
+        swapped[0].mail.map(r => r.id), ["z"])
+  check("and everything else about the mailbox is still true of it",
+        [swapped[0].alias, swapped[0].short, swapped[0].write, swapped[0].folders.length],
+        ["work", "W", true, 2])
+  // Whatever the fetch was doing, these rows are an answer, not a stand-in.
+  check("a stand-in answer is not what this is", swapped[0].stale, false)
+  check("a mailbox that answered nothing shows nothing",
+        Model.searchViews(mailbox(rows), {})[0].mail, [])
+
+  const found = Model.mergeMailAll(swapped, false, {}, false)
+  check("a hit names the folder it was found in", found[0].folder, "Sent Items")
+  check("and carries the id it was named by", found[0].folderId, "F-SENT")
+  check("a fetched row names none, because the header already does",
+        [merged[0].folder, merged[0].folderId], ["", ""])
+  // The whole point of putting the hits through mergeMailAll: everything the
+  // fetched rows get, the hits get.
+  check("the overlay applies to a hit like any other row",
+        Model.mergeMailAll(swapped, false, { deleted: { z: true } }, false).length, 0)
+  check("so does the unread filter",
+        Model.mergeMailAll(swapped, true, {}, false).map(r => r.id), ["z"])
+  check("and the colour and initials the list draws it with",
+        [found[0].short, found[0].alias], ["W", "work"])
+})
+
 console.log(`\n${checks - failures}/${checks} passed`)
 process.exit(failures ? 1 : 0)

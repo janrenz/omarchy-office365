@@ -126,6 +126,10 @@ function accountViews(configs, snapshot, palette, fallback, busyMap, loading) {
       // sending is a grant of its own, so a mailbox can be able to write a
       // draft and not able to send it.
       send: !!data && data.send === true,
+      // ...and separately again, to answer a meeting. Accepting and declining
+      // are writes to the event, so a mailbox can be able to delete mail and
+      // still not able to answer an invitation.
+      respond: !!data && data.respond === true,
       // The one part of a stand-in answer that must not be shown: these rows
       // are the folder that was open before the click, and drawing them under
       // the new folder's name says "this is what is in Archive" about the
@@ -619,6 +623,14 @@ function mergeMailAll(views, unreadOnly, state, focusedOnly) {
 
   for (var v = 0; v < (views || []).length; v++) {
     var view = views[v]
+    // A search's rows come from wherever they were found, so each names its
+    // folder; a fetch's all came from the one folder that was asked for and
+    // name none, because the header above the list already says which. The
+    // tree the mailbox sent is the only place the name lives, and looking one
+    // up per row would walk it per row.
+    var folderNames = {}
+    for (var f = 0; f < (view.folders || []).length; f++)
+      folderNames[String(view.folders[f].id)] = String(view.folders[f].name || "")
     for (var m = 0; m < view.mail.length; m++) {
       var mail = view.mail[m]
       var id = String(mail.id)
@@ -657,7 +669,12 @@ function mergeMailAll(views, unreadOnly, state, focusedOnly) {
         // them and must still merge.
         thread: String(mail.thread || ""),
         messageId: String(mail.messageId || ""),
-        references: mail.references || []
+        references: mail.references || [],
+        // Where this was found, for a list that is showing several folders at
+        // once. Empty on a fetched row, which is what the list reads to decide
+        // whether there is a folder worth naming on it.
+        folderId: String(mail.folderId || ""),
+        folder: mail.folderId ? (folderNames[String(mail.folderId)] || "") : ""
       })
     }
   }
@@ -698,6 +715,91 @@ function capMail(merged, limit, state) {
   }
   return capped
 }
+
+// ---- searching ------------------------------------------------------------
+//
+// Two things are called searching here and they answer different questions.
+// These three are the near one: the rows already on screen, narrowed as the
+// query is typed, with no request and no wait. The far one is the helper's
+// `search` command, which asks the mailbox itself and comes back with mail
+// that was never fetched - and its answer arrives as rows in the same shape,
+// so everything below and after it is shared.
+//
+// The near one has to be the near one. A field that does nothing until the
+// server answers reads as broken for the second it takes, and most of what
+// anybody looks for in a mail window is three rows further down the list they
+// are already looking at.
+
+// The words to match, lowercased once rather than per row: this runs on every
+// keystroke, over every row in the list.
+function searchTerms(query) {
+  var words = String(query || "").toLowerCase().split(/\s+/)
+  var terms = []
+  for (var i = 0; i < words.length; i++) if (words[i] !== "") terms.push(words[i])
+  return terms
+}
+
+
+// All of the words, anywhere in the four things a row shows. All rather than
+// any, because narrowing is what more typing is for; anywhere rather than at a
+// word boundary, because half a subject line and half an address is how people
+// remember mail. The preview is in it deliberately: it is the only part of the
+// body the row has, and leaving it out would make the near search answer a
+// visibly smaller question than the far one.
+function matchesQuery(row, terms) {
+  if (!terms || terms.length === 0) return true
+  var haystack = (String(row.from || "") + " " + String(row.fromAddress || "") + " "
+                  + String(row.subject || "") + " " + String(row.preview || "")).toLowerCase()
+  for (var i = 0; i < terms.length; i++) if (haystack.indexOf(terms[i]) < 0) return false
+  return true
+}
+
+
+// The rows that match, plus the one being read whether it matches or not.
+//
+// The pinned row is the same exception the cap and the unread filter make for
+// it: a message cannot be taken out from under the pane showing it. Typing one
+// more letter into the field would otherwise close what somebody had just
+// opened out of the results.
+function filterMail(rows, query, state) {
+  var terms = searchTerms(query)
+  if (terms.length === 0) return rows || []
+  var pinned = state && state.pinned
+  var pinnedId = pinned ? String(pinned.id) : ""
+  var kept = []
+  for (var i = 0; i < (rows || []).length; i++) {
+    var row = rows[i]
+    if (matchesQuery(row, terms) || (pinnedId !== "" && String(row.id) === pinnedId)) kept.push(row)
+  }
+  return kept
+}
+
+
+// The mailboxes as they are, showing what the search found instead of what the
+// fetch did.
+//
+// A copy per mailbox rather than a shape of its own, so the whole list
+// pipeline - the read and deleted overlay, the unread and Focused filters, the
+// threading, the cap, the colour and the initials beside each row - is the one
+// that already exists. Everything a view carries but the mail is still true of
+// it during a search: it is the same mailbox, with the same folders and the
+// same permissions, and a hit in it opens and deletes like any other row.
+function searchViews(views, results) {
+  var shown = []
+  for (var v = 0; v < (views || []).length; v++) {
+    var view = views[v]
+    var found = (results || {})[view.alias]
+    var copy = {}
+    for (var key in view) copy[key] = view[key]
+    copy.mail = (found && found.rows) || []
+    // Whatever the fetch was doing, these rows are the answer to the query and
+    // not a stand-in for a folder still loading.
+    copy.stale = false
+    shown.push(copy)
+  }
+  return shown
+}
+
 
 // Conversations, built from the rows that are already in the list.
 //

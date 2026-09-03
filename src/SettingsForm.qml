@@ -180,6 +180,20 @@ Item {
     return !!service && service.canWrite(String(alias || "").trim())
   }
 
+  function canRespond(alias) {
+    return !!service && service.canRespond(String(alias || "").trim())
+  }
+
+  // A Graph mailbox that may change mail but was signed in before the calendar
+  // write scope was asked for. It is not read-only and the row above would
+  // call it settled, so it gets the button back with its own reason. Excluded
+  // over IMAP, where the calendar is a second sign-in with a row of its own.
+  function needsCalendarGrant(entry) {
+    var alias = String((entry && entry.account) || "").trim()
+    return String((entry && entry.transport) || "") !== "imap"
+           && isSignedIn(alias) && canWrite(alias) && !canRespond(alias)
+  }
+
   function isSignedIn(alias) {
     var view = viewFor(alias)
     return !!view && (view.ok || view.busy)
@@ -1204,9 +1218,11 @@ Item {
               anchors.right: writeButton.left
               anchors.rightMargin: Style.spacing.sm
               anchors.verticalCenter: parent.verticalCenter
-              text: root.canWrite(page.modelData.account)
-                    ? "Can mark and delete mail"
-                    : "Read-only access"
+              text: !root.canWrite(page.modelData.account)
+                    ? "Read-only access"
+                    : root.needsCalendarGrant(page.modelData)
+                      ? "Can mark and delete mail, but not answer meetings"
+                      : "Can mark and delete mail"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1218,8 +1234,12 @@ Item {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               visible: !root.canWrite(page.modelData.account)
-              text: "Allow changes…"
-              tooltipText: "Signs in again, asking for permission to change mail"
+                       || root.needsCalendarGrant(page.modelData)
+              text: root.canWrite(page.modelData.account) ? "Update permissions…"
+                                                          : "Allow changes…"
+              tooltipText: root.canWrite(page.modelData.account)
+                           ? "Signs in again, asking for permission to answer meetings"
+                           : "Signs in again, asking for permission to change mail"
               bordered: true
               foreground: root.dim
               fontFamily: root.fontFamily

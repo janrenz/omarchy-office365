@@ -54,6 +54,12 @@ Column {
                                      && detail.isOrganizer !== true
                                      && detail.cancelled !== true
 
+  // Whether the mailbox this meeting came from may answer at all. The host
+  // sets it; answering is a grant of its own, and a mailbox that never asked
+  // for it gets the reason below instead of three buttons that would fail.
+  property bool canAnswer: true
+  readonly property bool answerBlocked: answerable && !canAnswer
+
   spacing: Style.spacing.md
 
   // ---- subject + close ----
@@ -301,6 +307,21 @@ Column {
     font.pixelSize: Style.font.caption
   }
 
+  // Why the answer is missing. Without this the buttons are simply absent,
+  // which reads as "this meeting cannot be answered" rather than "this
+  // mailbox cannot".
+  Text {
+    textFormat: Text.PlainText
+    width: parent.width
+    visible: root.answerBlocked
+    text: "This mailbox was signed in without permission to answer meetings. "
+          + "Allow changes for it in settings to sign in again."
+    wrapMode: Text.WordWrap
+    color: root.dim
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+  }
+
   // Everything on offer, measured against the width - the same bar the reading
   // pane uses, so a narrow popup puts what will not fit one press away instead
   // of off the edge.
@@ -323,19 +344,19 @@ Column {
       // organiser nothing they have not been told.
       { text: "Accept",
         tooltip: "Tell the organiser you are coming",
-        visible: root.answerable && root.myResponse !== "accepted",
+        visible: root.answerable && root.canAnswer && root.myResponse !== "accepted",
         enabled: !root.answering,
         trigger: function() { root.answerRequested("accept") } },
 
       { text: "Maybe",
         tooltip: "Answer tentatively - it goes in the calendar either way",
-        visible: root.answerable && root.myResponse !== "tentativelyAccepted",
+        visible: root.answerable && root.canAnswer && root.myResponse !== "tentativelyAccepted",
         enabled: !root.answering,
         trigger: function() { root.answerRequested("tentative") } },
 
       { text: "Decline",
         tooltip: "Tell the organiser you are not coming. It leaves your calendar.",
-        visible: root.answerable && root.myResponse !== "declined",
+        visible: root.answerable && root.canAnswer && root.myResponse !== "declined",
         enabled: !root.answering, danger: true,
         trigger: function() { root.answerRequested("decline") } },
 

@@ -108,7 +108,13 @@ SCOPES_READ = "openid profile offline_access User.Read Mail.Read Calendars.Read"
 # grant. A mailbox signed in before Mail.Send was asked for keeps working -
 # every draft path below needs only ReadWrite - and says so rather than failing
 # at the moment someone presses Send.
-SCOPES_WRITE = "openid profile offline_access User.Read Mail.ReadWrite Mail.Send Calendars.Read"
+# Calendars.ReadWrite is what answering a meeting takes: Graph's accept,
+# tentativelyAccept and decline are writes to the event, and Calendars.Read
+# gets ErrorAccessDenied from them. Reading the calendar never needed more, so
+# a mailbox signed in before this keeps working and only the answer buttons
+# come back 403 until it signs in again.
+SCOPES_WRITE = ("openid profile offline_access User.Read "
+                "Mail.ReadWrite Mail.Send Calendars.ReadWrite")
 
 
 def scopes_for(write, transport=""):
@@ -168,6 +174,12 @@ MAIL_CAP = 100
 # nobody is looking at. Nothing is lost inside the page itself - the unread
 # among the newest hundred arrive with the newest hundred.
 MAIL_FILTER_CAP = 25
+
+# How much of a search answer is worth carrying. A search is a way to find one
+# message, not a second inbox - nobody reads down the fiftieth hit - and the
+# whole result set travels as JSON through the shell and lives in the store
+# until the next query replaces it.
+SEARCH_CAP = 50
 GRAPH = "https://graph.microsoft.com/v1.0"
 USER_AGENT = "omarchy-office365-plugin/1.0"
 
@@ -461,6 +473,22 @@ def can_send(account):
         # IMAP and withhold SMTP, which leaves reading and the draft folder.
         return "smtp.send" in granted
     return "mail.send" in granted
+
+
+def can_respond(account):
+    """Whether this mailbox may answer a meeting.
+
+    Accepting, answering tentatively and declining are writes to the event, so
+    Calendars.Read is not enough - Graph returns ErrorAccessDenied. Unknown has
+    to mean no here for the same reason it does for Send: the answer buttons
+    are better absent than 403.
+
+    The EWS path has no such split. Its one scope is the whole mailbox, so a
+    calendar signed in at all is a calendar that can be answered from.
+    """
+    if transport_of(account) == TRANSPORT_IMAP:
+        return calendar_ready(account)
+    return "calendars.readwrite" in str((account or {}).get("scopes", "")).lower()
 
 
 def token_claims(value):
@@ -1091,6 +1119,7 @@ def imap_fetch_account(alias, account, token, args, timezone_name):
         "displayName": account.get("displayName", ""),
         "write": bool(account.get("write")),
         "send": can_send(account),
+        "respond": can_respond(account),
         "transport": TRANSPORT_IMAP,
         "capabilities": capabilities,
         "mail": data["mail"],
@@ -1121,6 +1150,7 @@ def fetch_account(alias, args, timezone_name):
         "displayName": account.get("displayName", ""),
         "write": bool(account.get("write")),
         "send": can_send(account),
+        "respond": can_respond(account),
         "transport": "",
         "capabilities": GRAPH_CAPABILITIES,
         "mail": [],
@@ -1351,6 +1381,176 @@ def cmd_fetch(args):
     out(snapshot)
 
 
+SEARCH_SELECT = ("id,subject,from,receivedDateTime,bodyPreview,webLink,importance,"
+                 "hasAttachments,isRead,flag,inferenceClassification,conversationId,"
+                 "parentFolderId")
+
+
+def search_row(message):
+    """A hit, in the shape a fetched row has, plus where it was found.
+
+    A result list mixes folders by definition, so the folder rides along - the
+    id only, because the name of a folder is already in the tree the window
+    drew and resolving it here would cost a walk of the whole mailbox per
+    search.
+    """
+    row = message_row(message)
+    row["folderId"] = message.get("parentFolderId", "") or ""
+    return row
+
+
+def graph_search(token, query, top, timezone_name, folder_id=""):
+    """Messages matching `query`, newest first, and anything worth saying about how.
+
+    $search is Exchange's own index: it reads subject, body, sender and
+    recipients, and takes `from:` and `subject:` prefixes, which is why the
+    query travels verbatim rather than being taken apart here. What it will
+    not do is sort - $orderby with $search is a 400 - so the answer comes back
+    by relevance and is put in date order here, which is the order a mail list
+    is read in.
+
+    A tenant with search turned off, or a mailbox Exchange will not index,
+    answers 400 or 501. Subject-only $filter=contains is a poorer search than
+    that, not a worse one than none: it finds the message somebody half
+    remembers the subject of, and the warning says that is all it looked at.
+    """
+    prefer = {"Prefer": 'outlook.timezone="%s"' % timezone_name}
+    path = messages_path(folder_id) if folder_id else "/me/messages"
+    base = {"$top": str(top), "$select": SEARCH_SELECT}
+
+    # Double quotes delimit the KQL string, so a query carrying one of its own
+    # would end it early and leave the rest as syntax. Dropped rather than
+    # escaped: KQL has no escape for it inside a quoted phrase.
+    phrase = str(query).replace('"', " ").strip()
+    if not phrase:
+        return [], [], ""
+
+    status, payload = graph_get(token, path, dict(base, **{"$search": '"%s"' % phrase}), prefer)
+    if status == 200:
+        rows = [search_row(item) for item in payload.get("value", [])]
+        rows.sort(key=lambda row: row["received"], reverse=True)
+        return rows, [], ""
+
+    if status in (401, 403, 0) or status >= 500:
+        return [], [], graph_error(payload, "Could not search this mailbox")
+
+    # An apostrophe ends an OData string literal; doubling it is how OData
+    # spells one inside.
+    literal = phrase.replace("'", "''")
+    attempts = [
+        dict(base, **{"$filter": "contains(subject,'%s')" % literal,
+                      "$orderby": "receivedDateTime desc"}),
+        dict(base, **{"$filter": "contains(subject,'%s')" % literal}),
+    ]
+    for params in attempts:
+        status, payload = graph_get(token, path, params, prefer)
+        if status != 200:
+            continue
+        rows = [search_row(item) for item in payload.get("value", [])]
+        rows.sort(key=lambda row: row["received"], reverse=True)
+        return rows, [{"scope": "search",
+                       "message": "This mailbox will not search bodies - subjects only"}], ""
+    return [], [], graph_error(payload, "Could not search this mailbox")
+
+
+def search_account(alias, args, timezone_name):
+    """One mailbox's hits. Raises AccountError on failure, like fetch_account."""
+    account = read_json(state_path(alias))
+    if not account:
+        raise AccountError("auth_required", "Not signed in")
+
+    token, account = access_token(alias, account)
+    # A folder-scoped search asks about the folder that mailbox is showing,
+    # which is per mailbox for the same reason a fetch's is: a folder id names
+    # a folder in one mailbox only.
+    wanted = folder_choices(getattr(args, "folder", [])).get(alias, "") if args.scope == "folder" else ""
+    top = max(1, min(getattr(args, "limit", SEARCH_CAP), SEARCH_CAP))
+
+    if transport_of(account) == TRANSPORT_IMAP:
+        try:
+            found = need_imap().search(account, token, args.query, wanted, args.scope, top)
+        except need_imap().TransportError as error:
+            raise AccountError(error.code, error.message)
+        return {"ok": True, "alias": alias, "rows": found["rows"],
+                "complete": found["complete"], "warnings": found["warnings"]}
+
+    rows, warnings, error = graph_search(token, args.query, top, timezone_name, wanted)
+    if error:
+        raise AccountError("search_failed", error)
+    return {"ok": True, "alias": alias, "rows": rows,
+            # Graph says nothing about what it left out, so a full page is
+            # taken as a page with more behind it. Better an honest "there may
+            # be more" than a claim this end cannot make.
+            "complete": len(rows) < top, "warnings": warnings}
+
+
+def cmd_search(args):
+    """Find mail across the mailboxes a widget holds.
+
+    The same shape as `fetch`: one process for every mailbox, each answering
+    for itself, so one mailbox that will not search does not empty the others.
+    """
+    aliases = args.account or []
+    # What is being looked for goes over stdin when the window asks for that,
+    # for the reason a reply's text does - see read_stdin_json. A query is as
+    # much somebody's business as the message they are looking for. --query
+    # stays for running this by hand.
+    if getattr(args, "stdin", False):
+        args.query = str(read_stdin_json().get("query", "") or "")
+    if not str(args.query or "").strip():
+        fail("no_query", "Nothing to search for")
+
+    timezone_name = local_timezone()
+    answer = {"ok": True, "query": args.query, "scope": args.scope, "accounts": []}
+
+    if args.demo:
+        answer["accounts"] = [demo_search(alias, args) for alias in (aliases or ["demo"])]
+        out(answer)
+        return
+
+    def collect(alias):
+        try:
+            return search_account(alias, args, timezone_name)
+        except AccountError as error:
+            return {"ok": False, "alias": alias, "rows": [], "complete": True,
+                    "error": {"code": error.code, "message": error.message}}
+
+    if len(aliases) > 1:
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(aliases))) as pool:
+            answer["accounts"] = list(pool.map(collect, aliases))
+    else:
+        answer["accounts"] = [collect(alias) for alias in aliases]
+
+    out(answer)
+
+
+def demo_search(alias, args):
+    """The synthetic mailbox, searched, so the field works without a sign-in.
+
+    Matched the way the window matches while you are still typing - all of the
+    words, anywhere in the sender, subject or preview - so the demo behaves
+    like the thing it stands in for.
+    """
+    if alias == "broken":
+        return {"ok": False, "alias": alias, "rows": [], "complete": True,
+                "error": {"code": "auth_required", "message": "Not signed in"}}
+
+    # One of each letter rather than a hundred slots: the fixtures cycle, and a
+    # search that answers with the same invoice ten times is a demo of nothing.
+    letters = DEMO_MAIL.get(alias, DEMO_FALLBACK_MAIL)
+    account = demo_account(alias, 0, argparse.Namespace(mails=len(letters), folder=[]))
+    words = [word.lower() for word in str(args.query or "").split() if word]
+    rows = []
+    for row in account["mail"]:
+        haystack = " ".join([row["from"], row["fromAddress"], row["subject"], row["preview"]]).lower()
+        if all(word in haystack for word in words):
+            rows.append(dict(row, folderId=account["folders"][0]["id"]))
+    return {"ok": True, "alias": alias, "rows": rows[:SEARCH_CAP], "complete": True, "warnings": []}
+
+
+
 # Synthetic mailboxes, so the layout can be built and shown without anyone
 # signing in — and so the screenshots in the README are not somebody's inbox.
 # Everything here is invented: no real names, addresses, companies or subjects.
@@ -1546,6 +1746,7 @@ def demo_account(alias, index, args):
         "displayName": alias.capitalize(),
         "write": False,
         "send": False,
+        "respond": True,
         "mail": mail,
         "unreadCount": unread,
         "unreadKnown": True,
@@ -2482,6 +2683,15 @@ def cmd_respond(args):
         out({"ok": True, "id": args.id, "response": answered["response"]})
         return
 
+    # Said here rather than left to Graph: a mailbox signed in before the
+    # calendar write scope was asked for comes back "ErrorAccessDenied", which
+    # reads like the meeting is somebody else's rather than like a sign-in that
+    # needs redoing.
+    if not can_respond(account):
+        fail("respond_permission",
+             "This mailbox was signed in without permission to answer meetings - "
+             "sign it in again from settings")
+
     try:
         token, account = access_token(args.account, account)
     except AccountError as error:
@@ -3360,6 +3570,29 @@ def main():
         help="start the calendar window at the current time instead of midnight",
     )
     fetch.set_defaults(func=cmd_fetch)
+
+    search = sub.add_parser("search", help="find mail in one or more mailboxes")
+    search.add_argument("--account", action="append", required=True, help="account alias; repeat for more")
+    search.add_argument("--query", default="",
+                        help="what to look for. Graph reads subject, body, sender and "
+                             "recipients, and takes from: and subject: prefixes; IMAP matches "
+                             "all of the words anywhere in the message.")
+    search.add_argument("--stdin", action="store_true",
+                        help='read {"query"} from stdin, keeping what is being looked for '
+                             'out of argv')
+    search.add_argument("--scope", choices=["all", "folder"], default="all",
+                        help="all searches the whole mailbox, folder only the one it is showing")
+    search.add_argument("--limit", type=int, default=SEARCH_CAP,
+                        help="hits per mailbox, up to %d" % SEARCH_CAP)
+    search.add_argument("--demo", action="store_true", help="search the synthetic mailbox")
+    search.add_argument(
+        "--folder",
+        action="append",
+        default=[],
+        metavar="ALIAS=ID",
+        help="the folder --scope folder means, in this mailbox; repeat per mailbox.",
+    )
+    search.set_defaults(func=cmd_search)
 
     message = with_account("message", "fetch one message with its body")
     message.add_argument("--id", required=True, help="message id from a fetch")

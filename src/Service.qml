@@ -829,6 +829,14 @@ Item {
     return !!view && view.send === true
   }
 
+  // Whether this mailbox may answer a meeting. Separate from canWrite: the
+  // calendar write scope is its own grant, and a mailbox signed in before it
+  // was asked for can delete mail and not accept an invitation.
+  function canRespond(alias) {
+    var view = viewFor(String(alias || ""))
+    return !!view && view.respond === true
+  }
+
   // Files to attach, as paths. Per host rather than in the store: two windows
   // writing two replies are writing two different messages, and the store's
   // job is what they must agree on.
@@ -1202,6 +1210,12 @@ Item {
     pickedAlias = key
     if (folderIdFor(key) === id) return
 
+    // Picking a folder is asking to see that folder, and results standing over
+    // it would answer a question that has been left behind. The field goes
+    // with them: a query still sitting in it would narrow the folder just
+    // opened, which looks like the folder being half empty.
+    closeSearch()
+
     var next = {}
     for (var k in selectedFolders) next[k] = selectedFolders[k]
     if (id === "inbox") delete next[key]
@@ -1221,11 +1235,162 @@ Item {
     awaitingFolderFor = key
   }
 
+  // ---- searching --------------------------------------------------------
+  //
+  // Two searches behind one field, and which one is answering is the thing to
+  // keep straight.
+  //
+  // Typing narrows the rows that are already here. That costs nothing and is
+  // instant, and it is the whole answer surprisingly often - the message being
+  // looked for is usually a few rows below the fold of a list already on
+  // screen. What it cannot do is reach mail that was never fetched: the window
+  // holds a page of twenty and stops at a hundred, and everything older than
+  // that is on the server.
+  //
+  // So Enter asks the mailbox. `searchedQuery` is the query the rows in hand
+  // answer, and while it is set the list is showing hits rather than a folder:
+  // Model.searchViews puts them through the same pipeline the fetched rows go
+  // through, so the overlay, the filters, the threading and the cap all still
+  // apply and a hit deletes and opens like any other row. Typing on after that
+  // narrows the results the same way it narrowed the folder, and Enter again
+  // asks with the longer query.
+  //
+  // Here rather than in the store because it is one host's question. The bar
+  // dropdown has no field and no room for one, and two windows searching for
+  // different things would have nothing to agree about.
+  property bool searchOpen: false
+  property string searchQuery: ""
+  // "all" is the whole mailbox, "folder" the one it is showing. All by
+  // default: somebody who knew which folder it was in would have gone there.
+  property string searchScope: "all"
+  // The query the results in hand are the answer to. Empty means the list is
+  // showing a folder, whatever is in the field.
+  property string searchedQuery: ""
+  // {alias: {rows, complete, error}} - one entry per mailbox asked.
+  property var searchResults: ({})
+  property bool searchRunning: false
+  property string searchError: ""
+  // Whether every hit came back, or the caps cut the answer short.
+  property bool searchComplete: true
+
+  readonly property bool searchShowing: searchedQuery !== ""
+
+  function openSearch() {
+    searchOpen = true
+  }
+
+  function closeSearch() {
+    searchOpen = false
+    searchQuery = ""
+    forgetSearch()
+  }
+
+  // An empty field is not a search. Backspacing the query away is how somebody
+  // undoes one, and leaving the hits standing under a field with nothing in it
+  // is a list that answers a question no longer on screen - with no way back
+  // to the folder except closing the row.
+  onSearchQueryChanged: if (String(searchQuery).trim() === "" && searchShowing) forgetSearch()
+
+  function forgetSearch() {
+    searchedQuery = ""
+    searchResults = ({})
+    searchError = ""
+    searchComplete = true
+  }
+
+  // Ask the mailboxes themselves. One process for all of them, the way a fetch
+  // is: the helper answers per mailbox, so one that will not search does not
+  // empty the others.
+  function runSearch() {
+    var query = String(searchQuery).trim()
+    if (query === "" || pluginDir === "") return
+    // A second Enter while the first is still out is somebody waiting, not a
+    // second question. The field says "searching…" until it lands.
+    if (searchRunning) return
+
+    var aliases = []
+    for (var i = 0; i < mailViews.length; i++) aliases.push(String(mailViews[i].alias))
+    if (aliases.length === 0) return
+
+    var command = ["python3", helper(), "search", "--scope", searchScope, "--stdin"]
+    for (var a = 0; a < aliases.length; a++) command = command.concat(["--account", aliases[a]])
+    // Per mailbox, because a folder id names a folder in one mailbox only -
+    // the same reason a fetch's --folder is repeated.
+    if (searchScope === "folder")
+      for (var f = 0; f < aliases.length; f++)
+        command = command.concat(["--folder", aliases[f] + "=" + folderIdFor(aliases[f])])
+    if (demo) command.push("--demo")
+
+    searchRunning = true
+    searchError = ""
+    searchProc.command = command
+    searchProc.running = true
+  }
+
+  Process {
+    id: searchProc
+    running: false
+    stdinEnabled: true
+    // What somebody is looking for is as much their business as the message
+    // they are looking for, and anyone on this machine can read another
+    // process's command line - see graph.py's read_stdin_json.
+    onStarted: searchProc.write(JSON.stringify({ query: String(root.searchQuery).trim() }) + "\n")
+    stdout: StdioCollector { id: searchOut; waitForEnd: true }
+    stderr: StdioCollector { id: searchErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.searchRunning = false
+      var parsed = Model.parseJson(searchOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        root.searchError = parsed && parsed.error
+          ? String(parsed.error.message)
+          : Model.oneLine(searchErr.text || "Could not search", 160)
+        return
+      }
+      var results = {}
+      var complete = true
+      var failed = []
+      var accounts = parsed.accounts || []
+      for (var i = 0; i < accounts.length; i++) {
+        var account = accounts[i]
+        results[String(account.alias)] = {
+          rows: account.rows || [],
+          complete: account.complete !== false
+        }
+        if (account.complete === false) complete = false
+        // A mailbox that could not be searched is named rather than passed
+        // over: an empty result list is otherwise indistinguishable from a
+        // mailbox that never answered.
+        if (account.ok === false)
+          failed.push(String(account.alias) + ": "
+                      + String((account.error && account.error.message) || "could not be searched"))
+      }
+      root.searchResults = results
+      root.searchComplete = complete
+      root.searchError = failed.join(" · ")
+      // Last, so everything the list reads is in place before it is told to
+      // show hits instead of a folder.
+      root.searchedQuery = String(parsed.query || "")
+    }
+  }
+
+  // Everything on offer before the query narrows it: the search's rows when one
+  // has answered, and the folder's when none has. Its own property so that the
+  // field can say "12 of 84" without merging the list a second time to find
+  // out what 84 was.
+  readonly property var mailUnfiltered: Model.mergeMailAll(
+    searchShowing ? Model.searchViews(mailViews, searchResults) : mailViews,
+    unreadOnly, listState, focusedOnly)
+
+  // What the query left, and what there was - so "nothing here" and "nothing
+  // anywhere" can be told apart without pressing Enter to find out.
+  readonly property int searchMatched: mailAll.length
+  readonly property int searchTotal: mailUnfiltered.length
+
   // Everything that was fetched and passes the filters, before the cap. The
   // flat list takes the newest `mails` of these; the threaded one groups all
   // of them and takes the newest `mails` conversations, which is why the cap
   // cannot be applied before the grouping.
-  readonly property var mailAll: Model.mergeMailAll(mailViews, unreadOnly, listState, focusedOnly)
+  readonly property var mailAll: Model.filterMail(mailUnfiltered, searchQuery, listState)
 
   // Empty unless the list is threaded, so nothing is grouped for a host that
   // will not draw it - the bar dropdown has no room to expand a conversation.
@@ -1324,6 +1489,11 @@ Item {
     meetingLoading = false
     meetingKey = ""
   }
+
+  // Whether the meeting on screen can be answered from here at all - the
+  // mailbox it came from, rather than the meeting, is what decides it.
+  readonly property bool canAnswerOpenMeeting:
+    !openMeeting || demo || canRespond(meetingAlias(openMeeting))
 
   readonly property bool answeringMeeting: hub ? hub.answering : false
   readonly property string meetingAnswerError: hub ? hub.answerError : ""

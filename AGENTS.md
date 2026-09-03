@@ -36,6 +36,9 @@ src/MailWindow.qml    The window: folders, list, reading pane. ~1.7k lines.
 src/RecipientField.qml
                       A To/Cc field that completes from the address book.
 src/MailList.qml      A ListView, deliberately — read the comment at the top.
+src/SearchBar.qml     The window's search field and the line under it saying
+                      what came back. Its own row, not a header control: the
+                      header collapses when its pills outgrow the width.
 src/MeetingPane.qml   One meeting: who is coming, what they said, and the
                       Accept/Maybe/Decline that used to mean opening Outlook.
                       Shown where the agenda is, in both the popup and window.
@@ -239,6 +242,30 @@ keeps using the old client id or authority.
 - **`MailList.qml` is a `ListView` on purpose**, and the comment at the top says
   why a `Repeater` over a plain array was worse. The Slack and Teams plugins have
   not made that change yet; if you are porting UI between them, port this too.
+- **Two things are called searching, and they answer different questions.**
+  Typing narrows the rows already merged - `Model.filterMail` over
+  `Service.mailUnfiltered`, no request, instant. Enter runs the helper's
+  `search` across the mailbox, and its hits are put through `Model.searchViews`
+  so that `mergeMailAll` and everything after it - the optimistic overlay, the
+  unread and Focused filters, the threading, the cap, the colours - is the
+  pipeline that already exists rather than a second one. A row's `folder` is
+  set only on a hit; a fetched row has none, because the header names its
+  folder already. `searchedQuery` is what the rows in hand answer and is the
+  one flag saying the list is not a folder. The query goes to the helper on
+  **stdin**, for the reason a reply's text does.
+- **`$search` and `$orderby` are a 400 together.** Graph answers a search by
+  relevance and will not sort it, so `graph_search` sorts by date itself. A
+  tenant with search turned off answers 400 or 501, and the fallback is
+  `contains(subject,…)` with a warning that says only subjects were read - a
+  poorer search is worth more than none, but not if it claims to be the same
+  one.
+- **imaplib carries exactly one literal per command**, which is what shapes
+  the IMAP search. A term that is not ASCII has to travel as a literal for
+  `CHARSET UTF-8` to mean anything, so a non-ASCII query goes as one phrase
+  under a single `TEXT` key; an ASCII one is split into a `TEXT` key per word,
+  which is IMAP's "all of these". And IMAP has no search across folders at
+  all: everywhere is a SELECT and a SEARCH per folder, capped at
+  `SEARCH_FOLDER_CAP` with `complete` false rather than opening two hundred.
 - **`TEXT_BODY_CAP` governs how much of a body the reading pane shows.** When
   weighing a display limit against a preview/bandwidth cost, display wins.
 - **The window's header collapses if the pills outgrow the width beside the
@@ -335,6 +362,14 @@ keeps using the old client id or authority.
 - **`dev/link.sh` symlinks `dev/shell.qml` into the stage.** Writing a
   throwaway harness to `$STAGE/shell.qml` therefore writes it *into the repo*,
   through the symlink. Give a scratch harness any other name.
+- **Photographing the window needs a child of its content item, and a remap
+  to resize it.** `dev/shell.qml` grabs an `Item` it owns; `MailWindow` has
+  only `floatingWindow`, whose `contentItem` is a proxy and answers
+  `grabToImage: item has no QML engine`. Its first child - the `FocusScope`
+  that fills the window - grabs fine. And a mapped toplevel keeps the size the
+  compositor gave it, so setting `implicitWidth` does nothing: set `visible`
+  false, resize, set it true. Both are worth having, because the header
+  collapsing under one pill too many is only visible in a picture at ~720px.
 - **`open()` re-reads `shell.json` every time it is called.** A dev harness
   that calls it after putting fixture settings in place has them replaced by
   the real widget's - which points the harness at a real mailbox. Drive

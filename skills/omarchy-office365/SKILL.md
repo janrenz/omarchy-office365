@@ -33,6 +33,8 @@ settings, e.g. `FWU`. `python3 $HELPER list` names the ones that are set up.
     python3 $HELPER fetch   --account FWU --mails 15 --days 7
     python3 $HELPER folders --account FWU
     python3 $HELPER event   --account FWU --id 'AAMkAD…'
+    python3 $HELPER search  --account FWU --query 'rechnung'
+    python3 $HELPER search  --account FWU --query 'from:kees' --scope folder --folder FWU=inbox
 
 `message` is the one being read: sender, recipients, date, and the body already
 flattened to text where the message has a plain-text part, and left as the
@@ -40,6 +42,14 @@ sender's markup where it has none. `--body html` keeps the markup either way
 and `--body text` flattens it either way; text is rarely not what you want.
 `fetch` is the list — recent mail plus calendar events, and `--folder
 ALIAS=ID` reads a folder other than the inbox; `folders` names them.
+
+`search` is how to reach mail `fetch` does not: `fetch` reads the newest N of
+one folder, and everything older than that is only findable this way. It
+answers with rows in the same shape, each carrying the `folderId` it was found
+in, and searches every folder unless `--scope folder` says otherwise. On a
+Graph mailbox the query is Exchange's own - `from:`, `subject:` and the rest
+work; over IMAP it matches all of the words anywhere in the message. Fifty hits
+per mailbox. `--account` repeats, so one call can search several.
 
 A very long body is truncated by the *window*, not by the helper, so the helper
 is where to go for the whole of a long message.

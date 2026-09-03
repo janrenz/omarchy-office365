@@ -181,14 +181,53 @@ Both fill the list to `mails`: each mailbox is fetched three ways - newest,
 newest unread, and newest Focused - so whichever way you narrow it, there is
 enough to show.
 
+## Searching
+
+`/` in the window opens a search field, or the magnifier beside the pills.
+
+Typing narrows the list you are already looking at, straight away and without
+asking anybody anything: all of the words, anywhere in the sender, the address,
+the subject or the preview line. It is a way of finding the message three rows
+below the fold, and it is most of what searching a mail window is for.
+
+**Enter asks the mailbox itself**, which is the part that reaches mail that was
+never fetched. On a Graph mailbox that is Exchange's own index - subject, body,
+sender and recipients - and it takes Outlook's own prefixes, so `from:kees` and
+`subject:rechnung` work. Over IMAP it is `SEARCH TEXT`, which matches headers
+and body together. Either way the hits replace the folder in the list and each
+row says which folder it was found in, because a result list mixes them by
+definition.
+
+The line under the field is the honest part of it. `12 of 84 loaded here` means
+the query narrowed what is on screen and there may be more behind it; `Nothing
+in the 84 loaded here` means it is worth pressing Enter. After a search it
+counts the hits instead, and says `there may be more` when a cap cut the answer
+short.
+
+**Whole mailbox** / **This folder** says where Enter will look. All of it is
+the default: somebody who knew which folder it was in would have gone there.
+
+Hits are ordinary rows. They open, delete, move, flag and thread exactly as
+fetched ones do, the unread and Focused pills still narrow them, and the
+message you have open stays in the list even when you type past what it
+matches. Backspacing the field empty puts the folder back; `Escape`, **Close**
+or clicking a folder ends the search altogether.
+
+Two limits worth knowing. Fifty hits per mailbox come back, which is a search
+rather than a second inbox. And IMAP has no search across folders at all - so
+"whole mailbox" there is a walk, opening the inbox first and then the rest of
+the tree up to twenty-five folders; past that it says there may be more rather
+than working through a mailbox with two hundred of them. A tenant that has
+Exchange search turned off falls back to matching subjects, and says so.
+
 ## How long the list is
 
 `mails` is the bar panel's list, where seven is plenty. The window opens on
 twenty and asks for twenty more every time you reach the end of it, up to a
 hundred per mailbox - reading is what asks for the next page, there is nothing
 to press. It stops at a hundred because past that every poll would be
-re-reading the whole mailbox for a list nobody scrolled to, and search is the
-better tool for going further back.
+re-reading the whole mailbox for a list nobody scrolled to, and
+[search](#searching) is the better tool for going further back.
 
 The fetch is shared with the bar widget, so a window paged to a hundred would
 have the background poll reading a hundred as well - which is why the window
@@ -619,6 +658,7 @@ including inside a message, which is the one place they used to do nothing.
 | `s` | Save every file this message carries into your download folder |
 | `a` | Hand this message to your coding agent — see below |
 | `F` | Flag it for follow-up, or clear the flag (capital, since `f` is the Focused filter) |
+| `/` | Search: typing narrows this list, `Enter` asks the mailbox — see [Searching](#searching) |
 | `u` / `f` | Only unread / only Focused |
 | `t` | Group the list by conversation |
 | `r` | Refresh |
@@ -851,6 +891,37 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.10.0 — 2026-09-03
+
+- **Search, in the window.** `/` opens a field, or the magnifier beside the
+  pills. Typing narrows the rows already on screen as you type - every word,
+  anywhere in the sender, address, subject or preview - and **Enter** asks the
+  mailbox itself, which is the half that reaches mail older than the fetch
+  window. Graph mailboxes get Exchange's own index, including `from:` and
+  `subject:` prefixes; IMAP mailboxes get `SEARCH TEXT` across the folder tree.
+  Hits replace the folder in the list, each row naming the folder it was found
+  in, and they behave as ordinary rows in every other way - the same overlay,
+  the same filters, the same threading, the same delete and move. The line
+  under the field counts what was found against what there was, so "nothing
+  here" and "nothing anywhere" can be told apart before pressing Enter. What is
+  being looked for goes to the helper over stdin rather than in its command
+  line, the way a reply's text already does. See
+  [Searching](#searching).
+- **Answering a meeting asks for the permission it actually needs.** Accepting,
+  answering tentatively and declining are writes to the event, so
+  `Calendars.Read` is not enough - Graph answers ErrorAccessDenied. The sign-in
+  asks for `Calendars.ReadWrite` now, and a mailbox signed in before that keeps
+  working for everything else: the meeting pane says which mailbox cannot
+  answer rather than simply having no buttons, and its row in settings offers
+  **Update permissions…** to sign in again for it. Over IMAP the calendar is a
+  second sign-in with a row of its own, and is unaffected.
+- **The cursor stays on screen in the folder tree and the mail list.** Both
+  draw themselves at their full height inside a scroller, so walking `j`/`k`
+  past the fold moved a cursor nobody could see and no key brought it back. It
+  scrolls the smallest distance that puts the row back in view. One mailbox's
+  tree mostly fits the sidebar, which is why this only showed up with a second
+  mailbox in the window.
 
 ### 1.9.1 — 2026-09-03
 

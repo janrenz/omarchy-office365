@@ -803,6 +803,7 @@ Panel {
             error: root.service ? root.service.meetingError : ""
             answering: !!root.service && root.service.answeringMeeting
             answerError: root.service ? root.service.meetingAnswerError : ""
+            canAnswer: !root.service || root.service.canAnswerOpenMeeting
             fg: root.fg
             dim: root.dim
             accent: root.accent

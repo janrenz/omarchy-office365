@@ -584,6 +584,258 @@ class FolderActions(unittest.TestCase):
         self.assertEqual(self.commands("UNSUBSCRIBE"), [("UNSUBSCRIBE", '"Archive/2024"')])
 
 
+class GraphSearch(unittest.TestCase):
+    """Asking Exchange's own index, and what to do when it will not answer.
+
+    $search is the only way to reach mail older than the fetch window, and it
+    comes with two rules worth a test each: it will not sort, and a tenant that
+    has it turned off says 400 rather than answering empty. Getting the first
+    wrong gives a list in relevance order that looks shuffled; getting the
+    second wrong turns "your admin disabled search" into "no results".
+    """
+
+    def setUp(self):
+        self.calls = []
+        self.original = graph.graph_get
+        graph.graph_get = self.answer
+
+    def tearDown(self):
+        graph.graph_get = self.original
+
+    def answer(self, token, path, params, *a, **k):
+        self.calls.append((path, dict(params)))
+        return self.replies.pop(0)
+
+    @staticmethod
+    def message(mid, when, subject="Rechnung", folder="F-INBOX"):
+        return {"id": mid, "subject": subject, "receivedDateTime": when,
+                "from": {"emailAddress": {"name": "Her", "address": "her@example.com"}},
+                "bodyPreview": "text", "isRead": False, "parentFolderId": folder}
+
+    def test_the_query_travels_verbatim_and_unsorted(self):
+        self.replies = [(200, {"value": []})]
+        graph.graph_search("token", "from:kees rechnung", 50, "UTC")
+        path, params = self.calls[0]
+        # The whole mailbox, not one folder, and the KQL the user typed - the
+        # from: prefix is Exchange's to read, not this file's to parse.
+        self.assertEqual(path, "/me/messages")
+        self.assertEqual(params["$search"], '"from:kees rechnung"')
+        # $orderby with $search is a 400. Asking for it would fail every search.
+        self.assertNotIn("$orderby", params)
+        self.assertIn("parentFolderId", params["$select"])
+
+    def test_relevance_order_comes_back_as_date_order(self):
+        self.replies = [(200, {"value": [
+            self.message("old", "2026-01-02T09:00:00Z"),
+            self.message("new", "2026-08-02T09:00:00Z"),
+        ]})]
+        rows, warnings, error = graph.graph_search("token", "rechnung", 50, "UTC")
+        self.assertEqual([row["id"] for row in rows], ["new", "old"])
+        self.assertEqual((warnings, error), ([], ""))
+
+    def test_a_hit_says_which_folder_it_was_found_in(self):
+        self.replies = [(200, {"value": [self.message("a", "2026-08-02T09:00:00Z", folder="F-SENT")]})]
+        rows, _warnings, _error = graph.graph_search("token", "rechnung", 50, "UTC")
+        self.assertEqual(rows[0]["folderId"], "F-SENT")
+
+    def test_one_folder_when_that_is_what_was_asked_for(self):
+        self.replies = [(200, {"value": []})]
+        graph.graph_search("token", "rechnung", 50, "UTC", "F-ARCHIVE")
+        self.assertEqual(self.calls[0][0], graph.messages_path("F-ARCHIVE"))
+
+    def test_a_tenant_with_search_off_falls_back_to_subjects(self):
+        self.replies = [(400, {"error": {"message": "Search is not enabled"}}),
+                        (200, {"value": [self.message("a", "2026-08-02T09:00:00Z")]})]
+        rows, warnings, error = graph.graph_search("token", "rechnung", 50, "UTC")
+        self.assertEqual([row["id"] for row in rows], ["a"])
+        self.assertEqual(error, "")
+        # Said out loud: a subject-only search that claims to have read bodies
+        # is how somebody concludes the message is not there.
+        self.assertIn("subjects only", warnings[0]["message"])
+        self.assertEqual(self.calls[1][1]["$filter"], "contains(subject,'rechnung')")
+
+    def test_an_apostrophe_is_doubled_rather_than_ending_the_literal(self):
+        self.replies = [(400, {}), (200, {"value": []})]
+        graph.graph_search("token", "o'brien", 50, "UTC")
+        self.assertEqual(self.calls[1][1]["$filter"], "contains(subject,'o''brien')")
+
+    def test_a_quote_cannot_end_the_kql_string_early(self):
+        self.replies = [(200, {"value": []})]
+        graph.graph_search("token", 'say "hello" now', 50, "UTC")
+        self.assertEqual(self.calls[0][1]["$search"], '"say  hello  now"')
+
+    def test_a_refused_sort_is_dropped_before_the_search_is_given_up_on(self):
+        self.replies = [(400, {}), (400, {}), (200, {"value": []})]
+        graph.graph_search("token", "rechnung", 50, "UTC")
+        self.assertEqual(self.calls[1][1].get("$orderby"), "receivedDateTime desc")
+        self.assertNotIn("$orderby", self.calls[2][1])
+
+    def test_a_sign_in_failure_is_not_retried_as_a_subject_search(self):
+        self.replies = [(401, {"error": {"message": "Access token has expired"}})]
+        rows, _warnings, error = graph.graph_search("token", "rechnung", 50, "UTC")
+        self.assertEqual((rows, len(self.calls)), ([], 1))
+        self.assertIn("expired", error)
+
+    def test_nothing_worth_searching_for_asks_nothing(self):
+        self.replies = []
+        self.assertEqual(graph.graph_search("token", '  "  ', 50, "UTC"), ([], [], ""))
+
+
+class SearchCommand(unittest.TestCase):
+    """The command around it: where the query comes from, and what a full page means."""
+
+    def test_the_query_comes_off_stdin_so_it_is_not_in_argv(self):
+        args = graph.argparse.Namespace(account=["work"], query="", stdin=True,
+                                        scope="all", limit=50, demo=True, folder=[])
+        was = sys.stdin
+        sys.stdin = io.StringIO(json.dumps({"query": "invoice"}) + "\n")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                graph.cmd_search(args)
+        finally:
+            sys.stdin = was
+        answer = json.loads(printed.getvalue())
+        self.assertEqual(answer["query"], "invoice")
+        self.assertEqual([row["subject"] for row in answer["accounts"][0]["rows"]],
+                         ["Invoice INV-2026-0418"])
+
+    def test_nothing_to_search_for_is_refused_rather_than_answered_empty(self):
+        args = graph.argparse.Namespace(account=["work"], query="   ", stdin=False,
+                                        scope="all", limit=50, demo=True, folder=[])
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            with self.assertRaises(SystemExit):
+                graph.cmd_search(args)
+        self.assertEqual(json.loads(printed.getvalue())["error"]["code"], "no_query")
+
+    def test_a_full_page_is_reported_as_maybe_having_more_behind_it(self):
+        # Graph says nothing about what it left out, so a page that came back
+        # full is the only signal there is. Claiming completeness from it would
+        # be a claim this end cannot make.
+        rows = [{"id": str(n), "received": "2026-08-0%dT09:00:00Z" % (n % 9 + 1)} for n in range(3)]
+        original = (graph.read_json, graph.access_token, graph.graph_search)
+        graph.read_json = lambda *a, **k: {"username": "you@example.com"}
+        graph.access_token = lambda alias, account: ("token", account)
+        graph.graph_search = lambda *a, **k: (rows, [], "")
+        try:
+            args = graph.argparse.Namespace(query="x", scope="all", limit=3, folder=[])
+            self.assertFalse(graph.search_account("work", args, "UTC")["complete"])
+            args.limit = 9
+            self.assertTrue(graph.search_account("work", args, "UTC")["complete"])
+        finally:
+            (graph.read_json, graph.access_token, graph.graph_search) = original
+
+
+class SearchingIMAP(unittest.TestCase):
+    """The walk, and the criteria it walks with.
+
+    IMAP has no search across folders, so "everywhere" is a SELECT and a SEARCH
+    per folder. Two things are worth pinning down: that the walk is bounded and
+    says when it stopped short, and that the query reaches the server as
+    something the server will read - a term that is not ASCII has to travel as
+    a literal, and imaplib carries exactly one of those per command.
+    """
+
+    TREE = [("INBOX", "/", []), ("Archive", "/", []), ("Sent Items", "/", [])]
+
+    class Client:
+        capabilities = ("IMAP4REV1",)
+
+        def __init__(self, hits, unopenable=()):
+            self.hits = hits
+            self.unopenable = set(unopenable)
+            self.selected = None
+            self.searches = []
+            self.literal = None
+            self.untagged_responses = {"UIDVALIDITY": [b"42"]}
+
+        def select(self, mailbox, readonly=True):
+            import imaplib
+            name = mailbox.strip('"')
+            if name in self.unopenable:
+                raise imaplib.IMAP4.error("no such mailbox")
+            self.selected = name
+            return "OK", [b"3"]
+
+        def uid(self, command, *args):
+            if command == "SEARCH":
+                self.searches.append((self.selected, args, self.literal))
+                self.literal = None
+                return "OK", [" ".join(self.hits.get(self.selected, [])).encode()]
+            # A real header block, so the row is shaped by the shipped code
+            # rather than by a dict written here.
+            note = imap_message(subject="Rechnung 2026", sender="Her <her@example.com>")
+            return "OK", [(b'1 (UID 7 INTERNALDATE "01-Sep-2026 10:00:00 +0000" BODY[]<0>',
+                           note.as_bytes()), b")"]
+
+    def run_search(self, hits, query="rechnung", scope="all", unopenable=(), top=50):
+        import imapmail
+        client = self.Client(hits, unopenable)
+        original = (imapmail.connect, imapmail.close, imapmail.list_folders)
+        imapmail.connect = lambda *a, **k: client
+        imapmail.close = lambda *a, **k: None
+        imapmail.list_folders = lambda c: list(self.TREE)
+        try:
+            return client, imapmail.search({}, "token", query, "", scope, top)
+        finally:
+            (imapmail.connect, imapmail.close, imapmail.list_folders) = original
+
+    def test_ascii_words_are_anded_as_separate_text_keys(self):
+        client, _found = self.run_search({"INBOX": ["7"]}, "rechnung 2026")
+        # Two TEXT keys side by side is IMAP's "both of these".
+        self.assertEqual(client.searches[0][1], ("TEXT", '"rechnung"', "TEXT", '"2026"'))
+
+    def test_a_term_that_is_not_ascii_travels_as_a_utf8_literal(self):
+        client, _found = self.run_search({"INBOX": ["7"]}, "Rechnung über")
+        mailbox, args, literal = client.searches[0]
+        self.assertEqual(args, ("CHARSET", "UTF-8", "TEXT"))
+        self.assertEqual(literal, "Rechnung über".encode("utf-8"))
+
+    def test_the_inbox_is_searched_first(self):
+        client, _found = self.run_search({"INBOX": ["7"], "Archive": ["7"]})
+        self.assertEqual([call[0] for call in client.searches], ["INBOX", "Archive", "Sent Items"])
+
+    def test_one_folder_when_that_is_the_scope(self):
+        client, found = self.run_search({"INBOX": ["7"]}, scope="folder")
+        self.assertEqual([call[0] for call in client.searches], ["INBOX"])
+        self.assertTrue(found["complete"])
+
+    def test_every_hit_says_which_folder_it_came_from(self):
+        _client, found = self.run_search({"Archive": ["7"], "Sent Items": ["7"]})
+        self.assertEqual(sorted(row["folderId"] for row in found["rows"]),
+                         ["Archive", "Sent Items"])
+        # Shaped by the shipped code, not by the test.
+        self.assertEqual(found["rows"][0]["subject"], "Rechnung 2026")
+
+    def test_a_folder_that_will_not_open_is_a_warning_not_a_failure(self):
+        _client, found = self.run_search({"INBOX": ["7"], "Archive": ["7"]},
+                                         unopenable=("Archive",))
+        self.assertEqual([row["folderId"] for row in found["rows"]], ["INBOX"])
+        self.assertFalse(found["complete"])
+        self.assertIn("Archive", found["warnings"][0]["message"])
+
+    def test_the_walk_stops_at_the_cap_and_says_so(self):
+        import imapmail
+        original = imapmail.SEARCH_FOLDER_CAP
+        imapmail.SEARCH_FOLDER_CAP = 2
+        try:
+            client, found = self.run_search({"INBOX": ["7"]})
+            self.assertEqual(len(client.searches), 2)
+            self.assertFalse(found["complete"])
+        finally:
+            imapmail.SEARCH_FOLDER_CAP = original
+
+    def test_nothing_to_search_for_opens_nothing(self):
+        client, found = self.run_search({"INBOX": ["7"]}, query="   ")
+        self.assertEqual((client.searches, found["rows"]), ([], []))
+
+    def test_a_search_term_is_quoted_but_not_put_through_mutf7(self):
+        import imapmail
+        # `quoted` is for mailbox names and would turn this into "&APY-", which
+        # is a folder-name encoding and matches nothing in a message.
+        self.assertEqual(imapmail._search_string("über"), '"über"')
+        self.assertEqual(imapmail._search_string('say "hi"'), '"say \\"hi\\""')
+
+
 class Linkify(unittest.TestCase):
     """Plain-text mail, with its links put back.
 
@@ -739,6 +991,50 @@ class StripMarkupLinks(unittest.TestCase):
         out = self.strip('Click <a href="https://example.com/a">Sign in</a>', keep_links=False)
         self.assertNotIn("https://example.com/a", out)
         self.assertIn("Sign in", out)
+
+
+class SaslXoauth2(unittest.TestCase):
+    """The credentials string, in the type the library asking for it wants.
+
+    imaplib base64s what the callable returns and so needs bytes; smtplib
+    calls .encode("ascii") on it and so needs str. One helper served both
+    with bytes, so every send over SMTP died on an AttributeError inside
+    smtplib - before any of compose()'s own except clauses could turn it
+    into something the window could report.
+    """
+
+    def setUp(self):
+        import imapmail
+        self.imapmail = imapmail
+
+    def test_imaplib_gets_bytes_it_can_base64(self):
+        authobject = self.imapmail._sasl_xoauth2("me@example.com", "tok")
+        credentials = authobject(b"")
+        # What imaplib.authenticate does with the return value.
+        self.assertEqual(base64.b64decode(base64.b64encode(credentials)), credentials)
+        self.assertEqual(credentials, b"user=me@example.com\x01auth=Bearer tok\x01\x01")
+
+    def test_smtplib_gets_a_string_it_can_encode(self):
+        authobject = self.imapmail._sasl_xoauth2("me@example.com", "tok", binary=False)
+        credentials = authobject()
+        # What smtplib.auth does with the return value, and what used to raise.
+        self.assertEqual(credentials.encode("ascii").decode("ascii"), credentials)
+        self.assertEqual(credentials, "user=me@example.com\x01auth=Bearer tok\x01\x01")
+
+    def test_the_second_challenge_is_answered_with_nothing_of_the_same_type(self):
+        """A rejected exchange wants an empty line, not the credentials again -
+        and smtplib would encode() that empty answer too."""
+        binary = self.imapmail._sasl_xoauth2("me@example.com", "tok")
+        binary(b"")
+        self.assertEqual(binary(b'{"status":"401"}'), b"")
+
+        text = self.imapmail._sasl_xoauth2("me@example.com", "tok", binary=False)
+        text()
+        self.assertEqual(text(b'{"status":"401"}'), "")
+
+    def test_binary_is_the_default_because_imaplib_is_the_older_caller(self):
+        self.assertIsInstance(
+            self.imapmail._sasl_xoauth2("me@example.com", "tok")(), bytes)
 
 
 class Emitted(Exception):
@@ -1935,6 +2231,35 @@ class SendPermission(unittest.TestCase):
         # offering the draft, which works either way.
         self.assertFalse(graph.can_send({}))
         self.assertFalse(graph.can_send(None))
+
+
+class RespondPermission(unittest.TestCase):
+    """Whether a mailbox may answer a meeting.
+
+    Its own grant, and not the one that deletes mail: accept, tentative and
+    decline are writes to the event, so a token carrying Calendars.Read gets
+    ErrorAccessDenied from all three.
+    """
+
+    def test_reading_the_calendar_is_not_answering_it(self):
+        self.assertFalse(graph.can_respond(
+            {"scopes": "openid Mail.ReadWrite Mail.Send Calendars.Read"}))
+        self.assertTrue(graph.can_respond(
+            {"scopes": "openid Mail.ReadWrite Mail.Send Calendars.ReadWrite"}))
+
+    def test_write_access_to_mail_says_nothing_about_it(self):
+        self.assertFalse(graph.can_respond({"write": True, "scopes": "Mail.ReadWrite"}))
+
+    def test_a_mailbox_from_before_scopes_were_recorded_may_not_answer(self):
+        self.assertFalse(graph.can_respond({}))
+        self.assertFalse(graph.can_respond(None))
+
+    def test_over_imap_a_calendar_signed_in_at_all_may_answer(self):
+        # EWS has one scope and it is the whole mailbox, so there is no
+        # read-only calendar to tell apart here.
+        self.assertFalse(graph.can_respond({"transport": "imap"}))
+        self.assertTrue(graph.can_respond(
+            {"transport": "imap", "calendar": {"refresh_token": "x"}}))
 
 
 class SanitizeHtml(unittest.TestCase):

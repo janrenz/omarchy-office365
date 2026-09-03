@@ -57,6 +57,20 @@ Column {
     return ""
   }
 
+  // The row the cursor is on, for a caller that has to scroll it into view.
+  // This tree draws itself at its full height inside somebody else's scroller,
+  // so moving the cursor moves nothing by itself - and a window holding two
+  // mailboxes has most of its tree below the fold.
+  function cursorRow() {
+    if (cursorIndex < 0) return null
+    for (var i = 0; i < children.length; i++) {
+      // The Repeater is a child here too, and a header is never cursored:
+      // neither has a pickIndex that can match.
+      if (children[i] && children[i].pickIndex === cursorIndex) return children[i]
+    }
+    return null
+  }
+
   function activateCursor() {
     if (cursorIndex < 0 || cursorIndex >= pickable.length) return
     var row = rows[pickable[cursorIndex]]
