@@ -852,6 +852,23 @@ journalctl --user -f | grep -i office365
 
 ## Changelog
 
+### 1.9.1 — 2026-09-03
+
+- **Deleting a message no longer announces the one that takes its place.** A
+  fetch carries as many messages as the widget was asked to show, so the rest
+  of the mailbox sits below the fold where the notifier has never seen it.
+  Delete a row and the list refills to its cap, pulling one of those up - and
+  because it had never been seen, it was announced as new mail. Usually it was
+  a message already read: marking read is optimistic, applied here the instant
+  you open something, and the round that follows a delete goes out long before
+  the server agrees, so the answer still said unread. What is announced is now
+  read against the same overlay the lists on screen are drawn from, which is
+  the app's own answer to "have you read this" rather than the server's stale
+  one. A message deleted here is skipped for the same reason: it can still be
+  in the next answer, nothing on screen shows it, and nothing should say it
+  arrived. Both are still recorded as seen, so neither can be announced later
+  either.
+
 ### 1.9.0 — 2026-09-02
 
 - **A forward carries the original's attachments over IMAP.** It never did.

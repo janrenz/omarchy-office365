@@ -722,12 +722,29 @@ Item {
     if (folder !== "" && folder.toLowerCase() !== "inbox")
       place = place === "" ? folder : place + " · " + folder
 
+    // Read against the overlay and not the fetch alone, the same way every
+    // list on screen reads it. A message marked read here is read whatever
+    // this answer still says: marking is optimistic, and the round that
+    // follows a delete goes out long before the server agrees. Without this a
+    // row the list refilled to its cap with - one already read, sitting just
+    // below the fold until the delete pulled it up - is a message the notifier
+    // has never seen, carrying the server's stale unread, and it gets
+    // announced as new mail the moment it becomes visible.
+    var readHere = overrides.read || ({})
+    var deletedHere = overrides.deleted || ({})
+
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i]
       var id = String(row.id || "")
       if (id === "") continue
+      // Present, and so remembered, even when it is not worth announcing -
+      // that is what keeps it from being announced later.
       present.push(id)
-      if (row.read === true) continue
+      // Deleted here and not yet gone from the server's answer. Nothing on
+      // screen still shows it, so nothing should announce it either.
+      if (deletedHere[id] === true) continue
+      var read = readHere[id] === undefined ? row.read === true : readHere[id] === true
+      if (read) continue
       var from = String(row["from"] || "")
       fresh.push({
         id: id,
