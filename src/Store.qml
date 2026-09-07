@@ -680,6 +680,25 @@ Item {
     defaultExec: root.summonArgv("{}")
   }
 
+  // The oldest message each fetch has already had in view, as {key: millis}.
+  //
+  // A fetch carries the newest `mails` messages and stops, so a message older
+  // than every one of them was below the fold rather than absent. It did not
+  // arrive; something above it left, and the list refilled down to it. Deleting
+  // a row is the ordinary way that happens, and opening a window on a mailbox
+  // the bar was reading five messages of is another - the notifier has never
+  // seen what the extra twenty carried, and unseen is all "new" means to it.
+  //
+  // Zero when the last answer did not fill the cap: nothing can hide below a
+  // list with room to spare, so an old message turning up in one was really
+  // put there - moved in by a rule, say - and is worth announcing after all.
+  property var notifyFloor: ({})
+
+  // What the helper will read however much is asked of it - MAIL_CAP in
+  // graph.py, Service.qml's mailCeiling. A setting past it means every answer
+  // stops short of the cap, which is not the same as a mailbox that ran out.
+  readonly property int mailCeiling: 100
+
   // The argv omarchy's notification service runs when a toast is clicked. It
   // goes through the shell rather than a window of our own, because the click
   // may arrive when nothing is loaded - summon() mounts the window and hands
@@ -733,6 +752,10 @@ Item {
     var readHere = overrides.read || ({})
     var deletedHere = overrides.deleted || ({})
 
+    // See notifyFloor: how old a message may be and still be one that arrived.
+    var floor = Number(notifyFloor[key]) || 0
+    var oldest = 0
+
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i]
       var id = String(row.id || "")
@@ -740,11 +763,20 @@ Item {
       // Present, and so remembered, even when it is not worth announcing -
       // that is what keeps it from being announced later.
       present.push(id)
+      var when = Model.parseDate(row.received)
+      var at = when ? when.getTime() : 0
+      if (at > 0 && (oldest === 0 || at < oldest)) oldest = at
       // Deleted here and not yet gone from the server's answer. Nothing on
       // screen still shows it, so nothing should announce it either.
       if (deletedHere[id] === true) continue
       var read = readHere[id] === undefined ? row.read === true : readHere[id] === true
       if (read) continue
+      // Older than anything this fetch has ever carried, so it surfaced rather
+      // than landed. Still unread mail, and the list draws it in bold like any
+      // other - but a toast says something just happened, and what happened
+      // here was a delete. A message with no readable date is announced as
+      // before: guessing it is old would silence real mail.
+      if (floor > 0 && at > 0 && at < floor) continue
       var from = String(row["from"] || "")
       fresh.push({
         id: id,
@@ -759,6 +791,18 @@ Item {
         replaceKey: String(row.thread || "") !== ""
           ? key + "/" + String(row.thread) : ""
       })
+    }
+
+    // A full answer means there is more behind it, and its oldest row is the
+    // fold. A short one means the mailbox ran out, so there is no fold. Only
+    // with a cap to compare against, though: without the spec the two cannot
+    // be told apart, and the floor already recorded is the better guess.
+    var cap = spec ? Math.min(Number(spec.mails) || 0, mailCeiling) : 0
+    if (cap > 0) {
+      var nextFloor = {}
+      for (var f in notifyFloor) nextFloor[f] = notifyFloor[f]
+      nextFloor[key] = rows.length >= cap ? oldest : 0
+      notifyFloor = nextFloor
     }
 
     // Demo data is invented, and a screenshot run should not push six

@@ -145,6 +145,8 @@ New mail raises a desktop notification: who it is from, and the subject. More th
 
 What counts as new is *new since the shell started watching*, not *unread*. The first answer after a sign-in — or after a laptop wakes up to a morning of mail — is an entire mailbox at once, and announcing all of it is what makes people turn notifications off for good. So the first poll of each mailbox primes quietly and only what turns up after it is announced. A mailbox with notifications switched off is still watched, so switching them on later does not announce the backlog.
 
+A poll reads as many messages as the widget was asked to show and no more, so the rest of the mailbox sits below the fold, unseen. Delete a message and the list refills from down there; open the window and it asks for twenty where the bar asked for five. Neither is mail arriving, so neither is announced: a message older than everything the last poll carried has surfaced rather than landed. It is still unread, and the list still draws it in bold — it just does not raise a toast saying it has just come in.
+
 The announcement is made by the store, which is the one thing there is exactly one of: the bar widget and the window watching the same inbox share one fetch, and so share one notification rather than raising two.
 
 Clicking the notification opens that message: the right mailbox, the right folder, and the message in the reading pane. Several messages in one conversation update one notification rather than stacking, and the click still works after the shell has been restarted underneath it — the action travels as data on the notification rather than as a callback into the process that sent it.
@@ -891,6 +893,22 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.10.1 — 2026-09-07
+
+- **Deleting a message no longer announces the mail it uncovers.** The last
+  release stopped a delete announcing a message you had already read; an old
+  one still genuinely unread was left alone, and it still raised a toast. A
+  poll carries as many messages as the widget was asked to show, so the rest of
+  the mailbox is below the fold where the notifier has never seen it — and
+  unseen was all "new" meant. Delete a row and the list refills from down
+  there; open the window on a mailbox the bar was reading five messages of and
+  the extra twenty arrive the same way. What is announced is now decided
+  against the date a message was received, not against whether it has been seen
+  before: older than everything the last poll carried means it surfaced rather
+  than landed. It is still unread and still bold in the list. A mailbox whose
+  answer does not fill the cap has nothing below the fold, so a genuinely old
+  message put in one — moved there by a rule, say — is announced as before.
 
 ### 1.10.0 — 2026-09-03
 
