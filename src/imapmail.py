@@ -84,6 +84,9 @@ FOLDER_COUNT_CAP = 60
 # where it gives up and says so instead.
 SEARCH_FOLDER_CAP = 25
 SEARCH_CAP = 50
+# How many times the read may go back for more hits when the ones it read
+# answered with nothing. See the second pass in `search`.
+SEARCH_READ_PASSES = 3
 
 # Headers worth having for a list row. Content-Type and
 # Content-Transfer-Encoding are not for display: they are what makes the
@@ -93,6 +96,15 @@ HEADER_FIELDS = ("SUBJECT FROM DATE TO CC MESSAGE-ID REFERENCES IN-REPLY-TO "
                  "IMPORTANCE")
 LIST_ITEMS = "(UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (%s)])" % HEADER_FIELDS
 PREVIEW_ITEMS = "(UID BODY.PEEK[TEXT]<0.%d>)" % PREVIEW_BYTES
+# The two above in one command. A page of rows is two body items per message,
+# and asking for them together is one round trip instead of two - measured on
+# Exchange at roughly half the time for the same fifty messages, because the
+# server does the same work either way and the waiting is the rest of it.
+ROW_ITEMS = ("(UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (%s)] BODY.PEEK[TEXT]<0.%d>)"
+             % (HEADER_FIELDS, PREVIEW_BYTES))
+# What one message's arrival time costs to ask for, which is what a search
+# walk needs and nothing more. See search_candidates.
+DATE_ITEMS = "(UID INTERNALDATE)"
 
 # A Message-ID as RFC 5322 writes one. Deliberately loose about what may sit
 # inside the angle brackets - real mailers put spaces, slashes and unicode in
@@ -121,6 +133,33 @@ SPECIAL_FOLDERS = {
              "Éléments envoyés", "Elementos enviados", "Posta inviata", "Skickat", "Lähetetyt",
              "Elementy wysłane", "Sendte elementer"),
 }
+
+# The folders Exchange keeps for things that are not mail. Searching them is
+# the same wasted walk as searching a folder with nothing in it, and worse than
+# wasted in the answer: SEARCH matches a calendar item on its real contents and
+# then the fetch cannot render it, so the hit arrives as the stand-in below and
+# takes a place in the results that a message could have had.
+#
+# By name, like SPECIAL_FOLDERS above and for the same reason - Exchange
+# advertises no flag saying which folder is the calendar. Top-level names only:
+# the real ones always are, and a folder somebody made under their inbox and
+# called Notes is a folder full of mail.
+NON_MAIL_FOLDERS = {
+    "calendar": ("Calendar", "Kalender", "Kalenteri", "Calendrier", "Calendario", "Agenda",
+                 "Kalendarz", "Calendari"),
+    "contacts": ("Contacts", "Kontakte", "Kontakter", "Kontaktit", "Contactpersonen",
+                 "Contatti", "Contactos", "Kontakty", "Yhteystiedot"),
+    "tasks": ("Tasks", "Aufgaben", "Opgaver", "Taken", "Tâches", "Tareas", "Attività",
+              "Uppgifter", "Tehtävät", "Zadania"),
+    "notes": ("Notes", "Notizen", "Notities", "Notas", "Note", "Anteckningar",
+              "Muistiinpanot", "Notatki", "Noter"),
+    "journal": ("Journal", "Dagboek", "Diario", "Dziennik", "Päiväkirja", "Journalen"),
+}
+
+NON_MAIL_NAMES = frozenset(name.lower()
+                           for names in NON_MAIL_FOLDERS.values()
+                           for name in names)
+
 
 # Well-known destinations graph.py's `move` accepts, mapped onto the keys
 # above, so the window's Archive and Junk buttons mean the same thing whichever
@@ -466,6 +505,43 @@ def folder_counts(client, mailbox):
     return (int(unread.group(1)) if unread else 0, int(total.group(1)) if total else 0)
 
 
+def mail_folders(folders):
+    """`folders` minus the ones that hold something other than mail.
+
+    Children go with their parent: Exchange hangs holidays and birthdays off
+    the calendar, and a second calendar is still a calendar. `folder_rows`
+    lists parents before children, so one pass is enough to carry the
+    exclusion down.
+    """
+    excluded, kept = set(), []
+    for row in folders:
+        parent = str(row.get("parentId") or "")
+        name = str(row.get("name") or "").lower()
+        if parent in excluded or (not row.get("depth") and name in NON_MAIL_NAMES):
+            excluded.add(str(row.get("id") or ""))
+            continue
+        kept.append(row)
+    return kept
+
+
+def unreadable_row(row):
+    """Whether this row is Exchange's stand-in for an item it cannot render.
+
+    A calendar item or a task that SEARCH matched comes back as a message from
+    "Microsoft Exchange Server" whose subject is "Retrieval using the IMAP4
+    protocol failed for the following message: 51529". There is nothing in it
+    to read, reply to or place, so it is not an answer to anybody's search.
+
+    Matched on shape rather than on that sentence, which arrives in the
+    mailbox's own language: the stand-in carries no Message-ID and no address
+    on its sender, and real mail has both - a draft nobody has sent yet
+    included. Skipping the folders these live in catches most of them; this
+    catches the rest, because a deleted appointment sits in the same Deleted
+    Items as deleted mail and that folder is worth searching.
+    """
+    return not row.get("messageId") and "@" not in str(row.get("fromAddress") or "")
+
+
 def resolve_special(client, key, account=None):
     """The mailbox behind "trash", "archive", "junk", "drafts" or "sent".
 
@@ -508,6 +584,31 @@ def fetch_items(data):
         if isinstance(element, tuple) and len(element) >= 2 and element[1] is not None:
             items.append((element[0] or b"", element[1]))
     return items
+
+
+def fetch_records(data):
+    """A FETCH reply grouped per message: [(prefix, {"header": .., "text": ..})].
+
+    `fetch_items` answers one literal per message, which is all a reply that
+    asked for one body item has. A reply that asked for two - see ROW_ITEMS -
+    carries two, and imaplib hands each one back as its own tuple with only
+    the first carrying the UID. So a tuple with a UID in it opens a record and
+    the tuples after it belong to that record until the next UID appears.
+
+    Which literal is which is read off the prefix rather than assumed from the
+    order they were asked in, so a server that answers them the other way
+    round is still understood.
+    """
+    records = []
+    for element in data or []:
+        if not (isinstance(element, tuple) and len(element) >= 2 and element[1] is not None):
+            continue
+        prefix, literal = element[0] or b"", element[1]
+        if uid_of(prefix) or not records:
+            records.append((prefix, {}))
+        parts = records[-1][1]
+        parts["text" if b"BODY[TEXT]" in prefix.upper() else "header"] = literal
+    return records
 
 
 UID_RE = re.compile(rb"UID\s+(\d+)")
@@ -1053,23 +1154,43 @@ def fetch_previews(client, uid_set):
 
 
 def read_rows(client, mailbox, validity, spec, by_uid):
-    """Rows for a sequence range or UID set, newest first."""
+    """Rows for a sequence range or UID set, newest first.
+
+    Headers and preview text come back in one FETCH. They used to be two, one
+    after the other, which is a second wait for a server that was going to do
+    the same work either way - and on a search, where the rows are spread over
+    several folders, it was two waits per folder.
+    """
     if not spec:
         return []
-    try:
-        if by_uid:
-            typ, data = client.uid("FETCH", spec, LIST_ITEMS)
-        else:
-            typ, data = client.fetch(spec, LIST_ITEMS)
-    except imaplib.IMAP4.error as error:
-        raise TransportError("fetch_failed", "Could not read mail: " + _text(error))
-    if typ != "OK":
-        raise TransportError("fetch_failed", "Could not read mail: " + _text(data))
 
-    items = fetch_items(data)
-    uids = [uid_of(prefix) for prefix, _ in items]
-    previews = fetch_previews(client, ",".join(uid for uid in uids if uid))
-    rows = [row_from(prefix, blob, mailbox, validity, previews) for prefix, blob in items]
+    def fetch(items):
+        try:
+            if by_uid:
+                return client.uid("FETCH", spec, items)
+            return client.fetch(spec, items)
+        except imaplib.IMAP4.error as error:
+            raise TransportError("fetch_failed", "Could not read mail: " + _text(error))
+
+    typ, data = fetch(ROW_ITEMS)
+    records = fetch_records(data) if typ == "OK" else []
+    if records:
+        previews = {uid_of(prefix): parts.get("text", b"")
+                    for prefix, parts in records if uid_of(prefix)}
+        rows = [row_from(prefix, parts.get("header", b""), mailbox, validity, previews)
+                for prefix, parts in records]
+    else:
+        # A server that will not answer two body items in one command still
+        # answers them in two. Worth the extra trip rather than an empty list -
+        # and it is the same trip a range that matched nothing takes, which
+        # cannot be told apart from a refusal by the reply either way.
+        typ, data = fetch(LIST_ITEMS)
+        if typ != "OK":
+            raise TransportError("fetch_failed", "Could not read mail: " + _text(data))
+        items = fetch_items(data)
+        uids = [uid_of(prefix) for prefix, _ in items]
+        previews = fetch_previews(client, ",".join(uid for uid in uids if uid))
+        rows = [row_from(prefix, blob, mailbox, validity, previews) for prefix, blob in items]
     rows.sort(key=lambda row: row["received"], reverse=True)
     return rows
 
@@ -1213,6 +1334,44 @@ def search_uids(client, query):
     return _text(data).split()
 
 
+def search_candidates(client, mailbox, query, top):
+    """(arrival time, uid) for the newest `top` hits in the selected folder.
+
+    Rows would be the obvious thing to answer with, and were: the walk used to
+    fetch a page of headers and previews out of every folder it searched, then
+    throw all but the newest fifty of them away at the end. A hit's headers and
+    body preview weigh a hundred times what its arrival time does and most hits
+    are never shown, so the walk collects times, the merge picks the newest
+    `top` across the whole mailbox, and only those get fetched.
+
+    Returns (hits, whether that was all of them).
+    """
+    uids = search_uids(client, query)
+    if not uids:
+        return [], True
+    whole = len(uids) <= top
+    # UIDs ascend with arrival, so a folder's newest hits are its highest ones
+    # and the times only have to be asked for at the tail of the list.
+    uids = uids[-top:]
+    try:
+        typ, data = client.uid("FETCH", ",".join(uids), DATE_ITEMS)
+    except imaplib.IMAP4.error as error:
+        raise TransportError("search_failed", "Could not read the hits: " + _text(error))
+    if typ != "OK":
+        raise TransportError("search_failed", "Could not read the hits: " + _text(data))
+    hits = []
+    for element in data or []:
+        # Nothing in this reply is a literal, so imaplib answers with bare
+        # lines rather than the tuples fetch_items looks for.
+        line = element[0] if isinstance(element, tuple) else element
+        if not isinstance(line, bytes):
+            continue
+        uid = uid_of(line)
+        if uid:
+            hits.append((received_iso(line), uid))
+    return hits, whole
+
+
 def search(account, token, query, folder_id="", scope="all", top=SEARCH_CAP):
     """Messages matching `query`, in one folder or across the mailbox.
 
@@ -1222,6 +1381,14 @@ def search(account, token, query, folder_id="", scope="all", top=SEARCH_CAP):
     follow in the order the tree lists them, and the walk stops at
     SEARCH_FOLDER_CAP with `complete` false rather than working through a
     mailbox that has two hundred.
+
+    Two passes over that walk, because the expensive half of a row is the half
+    most rows do not need. The walk asks each folder what matched and when it
+    arrived - a SEARCH and a fetch of nothing but arrival times - and the
+    headers and previews are fetched once, for the newest `top` hits of the
+    whole mailbox. Fetching a page of rows per folder and discarding all but
+    the newest page at the end is what made this take twenty-five seconds on a
+    mailbox with a big inbox, a big Sent Items and a big Deleted Items.
 
     Rows come back in the same shape a fetch's do, with `folderId` on each -
     a result list mixes folders, and a hit in Sent Items that looks exactly
@@ -1247,27 +1414,29 @@ def search(account, token, query, folder_id="", scope="all", top=SEARCH_CAP):
         if str(scope) == "folder":
             wanted = [folder_to_open(client, account, folders, folder_id, warnings)]
         else:
-            selectable = [row["id"] for row in folders]
+            # Mail only. Not a bound like the cap below - the calendar is not
+            # part of the answer being cut short, it is not part of the
+            # question - so this does not make the answer incomplete.
+            selectable = [row["id"] for row in mail_folders(folders)]
             inbox = next((row["id"] for row in folders if row["isInbox"]), "INBOX")
             wanted = [inbox] + [name for name in selectable if name != inbox]
             if len(wanted) > SEARCH_FOLDER_CAP:
                 wanted = wanted[:SEARCH_FOLDER_CAP]
                 complete = False
 
+        # Pass one: what matched, and when it arrived.
+        found = {}
         for mailbox in wanted:
             try:
                 exists, validity = select(client, mailbox, readonly=True)
                 if exists <= 0:
                     continue
-                uids = search_uids(client, query)
-                if not uids:
+                hits, whole = search_candidates(client, mailbox, query, top)
+                if not hits:
                     continue
-                if len(uids) > top:
-                    uids = uids[-top:]
+                if not whole:
                     complete = False
-                for row in read_rows(client, mailbox, validity, ",".join(uids), by_uid=True):
-                    row["folderId"] = mailbox
-                    rows.append(row)
+                found[mailbox] = (validity, hits)
             except (TransportError, imaplib.IMAP4.error) as error:
                 # One folder that will not open or will not search is not worth
                 # failing the whole search over - the hits in the others are
@@ -1276,10 +1445,57 @@ def search(account, token, query, folder_id="", scope="all", top=SEARCH_CAP):
                                  "message": "Could not search %s: %s" % (mailbox, _text(error))})
                 complete = False
 
-        rows.sort(key=lambda row: row["received"], reverse=True)
+        # Pass two: the newest `top` of them, wherever they landed. This is the
+        # only fetch of headers and previews the search does, which is what
+        # makes it one page of them rather than one page per folder.
+        ranked = sorted(((when, mailbox, uid)
+                         for mailbox, (_validity, hits) in found.items()
+                         for when, uid in hits), reverse=True)
+
+        # Some of what SEARCH matches cannot be fetched: a calendar item or a
+        # task answers a body fetch with nothing at all, and Exchange lists
+        # plenty of both. Ranking first and reading after means those would
+        # take a place in the answer and give nothing back for it, so a batch
+        # that came up short is topped up from the next candidates down. Three
+        # passes at most - a folder that is all unreadable is not worth
+        # emptying one page at a time.
+        taken, unreadable = 0, 0
+        for _pass in range(SEARCH_READ_PASSES):
+            if taken >= len(ranked) or len(rows) >= top:
+                break
+            batch = ranked[taken:taken + (top - len(rows))]
+            taken += len(batch)
+            picked = {}
+            for _when, mailbox, uid in batch:
+                picked.setdefault(mailbox, []).append(uid)
+            for mailbox, uids in picked.items():
+                validity = found[mailbox][0]
+                try:
+                    select(client, mailbox, readonly=True)
+                    for row in read_rows(client, mailbox, validity, ",".join(uids), by_uid=True):
+                        if unreadable_row(row):
+                            unreadable += 1
+                            continue
+                        row["folderId"] = mailbox
+                        rows.append(row)
+                except (TransportError, imaplib.IMAP4.error) as error:
+                    warnings.append({"scope": "search",
+                                     "message": "Could not read the hits in %s: %s"
+                                                % (mailbox, _text(error))})
+                    complete = False
+        if taken < len(ranked):
+            complete = False
         if len(rows) > top:
             rows = rows[:top]
-            complete = False
+        # A folder somebody asked to search by name, whose every hit turned out
+        # to be one of those stand-ins. Worth saying, because "nothing found"
+        # is not what happened.
+        if not rows and unreadable:
+            warnings.append({"scope": "search",
+                             "message": "What matched here is not mail - calendar items and "
+                                        "tasks cannot be read over IMAP"})
+
+        rows.sort(key=lambda row: row["received"], reverse=True)
         return {"rows": rows, "complete": complete, "warnings": warnings}
     finally:
         close(client)

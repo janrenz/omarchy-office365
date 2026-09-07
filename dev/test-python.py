@@ -738,13 +738,36 @@ class SearchingIMAP(unittest.TestCase):
     TREE = [("INBOX", "/", []), ("Archive", "/", []), ("Sent Items", "/", [])]
 
     class Client:
+        """An IMAP server that answers the two fetch shapes a search uses.
+
+        The arrival times come back without a literal, which is why imaplib
+        hands those replies over as bare lines rather than tuples, and the rows
+        come back with two literals per message. Both shapes are answered here
+        because the walk depends on telling them apart: getting either wrong in
+        the fake is how a search that fetched everything twice would pass.
+        """
+
         capabilities = ("IMAP4REV1",)
 
-        def __init__(self, hits, unopenable=()):
+        def __init__(self, hits, unopenable=(), dates=None, combined=True, unreadable=(),
+                     placeholder=()):
             self.hits = hits
             self.unopenable = set(unopenable)
+            # UIDs that SEARCH matches and a body fetch answers with nothing,
+            # the way Exchange answers for a calendar item or a task.
+            self.unreadable = set(unreadable)
+            # UIDs that come back as Exchange's stand-in for an item it could
+            # not render, rather than as nothing at all.
+            self.placeholder = set(placeholder)
+            # UID -> INTERNALDATE, for the ones worth dating differently.
+            self.dates = dict(dates or {})
+            # Whether this server will answer two body items in one command.
+            self.combined = combined
             self.selected = None
             self.searches = []
+            # (folder, spec, items) per FETCH, so a test can say what was
+            # asked for as well as what came back.
+            self.fetches = []
             self.literal = None
             self.untagged_responses = {"UIDVALIDITY": [b"42"]}
 
@@ -756,24 +779,69 @@ class SearchingIMAP(unittest.TestCase):
             self.selected = name
             return "OK", [b"3"]
 
+        def stamp(self, uid):
+            return self.dates.get(uid, "01-Sep-2026 10:00:00 +0000")
+
         def uid(self, command, *args):
             if command == "SEARCH":
                 self.searches.append((self.selected, args, self.literal))
                 self.literal = None
                 return "OK", [" ".join(self.hits.get(self.selected, [])).encode()]
-            # A real header block, so the row is shaped by the shipped code
-            # rather than by a dict written here.
-            note = imap_message(subject="Rechnung 2026", sender="Her <her@example.com>")
-            return "OK", [(b'1 (UID 7 INTERNALDATE "01-Sep-2026 10:00:00 +0000" BODY[]<0>',
-                           note.as_bytes()), b")"]
 
-    def run_search(self, hits, query="rechnung", scope="all", unopenable=(), top=50):
+            spec, items = str(args[0]), str(args[1])
+            self.fetches.append((self.selected, spec, items))
+            uids = [uid for uid in spec.split(",") if uid]
+            head = "HEADER.FIELDS" in items
+            text = "BODY.PEEK[TEXT]" in items
+            if not head and not text:
+                return "OK", [('1 (UID %s INTERNALDATE "%s")'
+                               % (uid, self.stamp(uid))).encode() for uid in uids]
+            if head and text and not self.combined:
+                # Nothing this end understands, which is what a server that
+                # will not answer both at once amounts to.
+                return "OK", [b")"]
+            reply = []
+            for uid in uids:
+                if uid in self.unreadable:
+                    continue
+                # A real message, so the row is shaped by the shipped code
+                # rather than by a dict written here.
+                if uid in self.placeholder:
+                    # What Exchange hands over for a calendar item: a message
+                    # from itself, with no address on the sender and no
+                    # Message-ID, saying it could not fetch the real thing.
+                    note = imap_message(
+                        subject="Retrieval using the IMAP4 protocol failed for the "
+                                "following message: " + uid,
+                        sender="Microsoft Exchange Server", to="me@example.com", cc="",
+                        message_id="", body="The server couldn't retrieve the following message")
+                else:
+                    note = imap_message(subject="Rechnung 2026", sender="Her <her@example.com>")
+                # Headers only, the way BODY[HEADER.FIELDS] answers: the body
+                # arrives as its own literal, and a fake that put it in both
+                # would show a preview of the body twice over.
+                headers = re.split(rb"\r?\n\r?\n", note.as_bytes(), maxsplit=1)[0] + b"\r\n"
+                opened = ('1 (UID %s FLAGS (\\Seen) INTERNALDATE "%s"'
+                          % (uid, self.stamp(uid))).encode()
+                if head:
+                    reply.append((opened + b" BODY[HEADER.FIELDS (SUBJECT)]", headers))
+                    if text:
+                        # The second literal of the same message: imaplib gives
+                        # it its own tuple, and only the first carries the UID.
+                        reply.append((b" BODY[TEXT]<0>", b"the original body"))
+                elif text:
+                    reply.append((opened + b" BODY[TEXT]<0>", b"the original body"))
+                reply.append(b")")
+            return "OK", reply
+
+    def run_search(self, hits, query="rechnung", scope="all", unopenable=(), top=50,
+                   dates=None, combined=True, unreadable=(), placeholder=(), tree=None):
         import imapmail
-        client = self.Client(hits, unopenable)
+        client = self.Client(hits, unopenable, dates, combined, unreadable, placeholder)
         original = (imapmail.connect, imapmail.close, imapmail.list_folders)
         imapmail.connect = lambda *a, **k: client
         imapmail.close = lambda *a, **k: None
-        imapmail.list_folders = lambda c: list(self.TREE)
+        imapmail.list_folders = lambda c: list(tree or self.TREE)
         try:
             return client, imapmail.search({}, "token", query, "", scope, top)
         finally:
@@ -827,6 +895,128 @@ class SearchingIMAP(unittest.TestCase):
     def test_nothing_to_search_for_opens_nothing(self):
         client, found = self.run_search({"INBOX": ["7"]}, query="   ")
         self.assertEqual((client.searches, found["rows"]), ([], []))
+
+    def test_the_newest_hits_win_wherever_they_landed(self):
+        """The cap belongs to the mailbox, not to each folder in it.
+
+        A folder-by-folder cap answered with the newest fifty of every folder
+        and then kept the newest fifty of those, which is the same answer -
+        arrived at by fetching a page of headers per folder and throwing most
+        of them away.
+        """
+        _client, found = self.run_search(
+            {"INBOX": ["7"], "Archive": ["8"]},
+            dates={"7": "01-Sep-2026 10:00:00 +0000", "8": "02-Sep-2026 10:00:00 +0000"},
+            top=1)
+        self.assertEqual([row["folderId"] for row in found["rows"]], ["Archive"])
+        self.assertFalse(found["complete"])
+
+    def test_only_the_hits_that_won_are_read(self):
+        """What makes the walk cheap: every folder is asked when its hits
+        arrived, and only the hits that made the answer are read."""
+        client, _found = self.run_search(
+            {"INBOX": ["7"], "Archive": ["8"]},
+            dates={"7": "01-Sep-2026 10:00:00 +0000", "8": "02-Sep-2026 10:00:00 +0000"},
+            top=1)
+        dated = [(folder, spec) for folder, spec, items in client.fetches
+                 if "HEADER.FIELDS" not in items]
+        read = [(folder, spec) for folder, spec, items in client.fetches
+                if "HEADER.FIELDS" in items]
+        self.assertEqual(dated, [("INBOX", "7"), ("Archive", "8")])
+        self.assertEqual(read, [("Archive", "8")])
+
+    def test_a_row_is_one_fetch_of_two_body_items(self):
+        """Headers and preview text in one command rather than two. The
+        round trip is most of what a page of rows costs."""
+        client, found = self.run_search({"INBOX": ["7"]})
+        both = [items for _folder, _spec, items in client.fetches
+                if "HEADER.FIELDS" in items and "BODY.PEEK[TEXT]" in items]
+        self.assertEqual(len(both), 1)
+        self.assertEqual(found["rows"][0]["subject"], "Rechnung 2026")
+        self.assertEqual(found["rows"][0]["preview"], "the original body")
+
+    def test_a_server_that_will_not_answer_both_at_once_is_asked_twice(self):
+        """The fallback, because one command for two body items is an
+        optimisation and not something IMAP promises."""
+        client, found = self.run_search({"INBOX": ["7"]}, combined=False)
+        asked = [items for _folder, _spec, items in client.fetches if "BODY" in items]
+        self.assertEqual(len(asked), 3)
+        self.assertEqual(found["rows"][0]["subject"], "Rechnung 2026")
+        self.assertEqual(found["rows"][0]["preview"], "the original body")
+
+    def read_calls(self, client):
+        """The FETCHes that went for whole rows, in order."""
+        return [(folder, spec) for folder, spec, items in client.fetches
+                if "HEADER.FIELDS" in items and "BODY.PEEK[TEXT]" in items]
+
+    def test_a_hit_that_reads_back_as_nothing_is_topped_up(self):
+        """Exchange matches calendar items and tasks and then answers a body
+        fetch for them with nothing at all. Ranking before reading means those
+        would hold a place in the answer and give nothing back for it."""
+        client, found = self.run_search(
+            {"INBOX": ["7", "8"], "Archive": ["9"]},
+            dates={"8": "03-Sep-2026 10:00:00 +0000",
+                   "9": "02-Sep-2026 10:00:00 +0000"},
+            unreadable=("8",), top=1)
+        self.assertEqual([row["folderId"] for row in found["rows"]], ["Archive"])
+        # The newest hit first, and the next one down once it gave nothing back.
+        self.assertEqual(self.read_calls(client), [("INBOX", "8"), ("Archive", "9")])
+
+    def test_the_top_up_gives_up_rather_than_walking_a_dead_mailbox(self):
+        """A mailbox whose hits are all unreadable would otherwise be walked
+        one page at a time to say what a bounded read says sooner."""
+        import imapmail
+        original = imapmail.SEARCH_READ_PASSES
+        imapmail.SEARCH_READ_PASSES = 2
+        try:
+            client, found = self.run_search(
+                {"INBOX": ["7"], "Archive": ["8"], "Sent Items": ["9"]},
+                dates={"7": "03-Sep-2026 10:00:00 +0000",
+                       "8": "02-Sep-2026 10:00:00 +0000",
+                       "9": "01-Sep-2026 10:00:00 +0000"},
+                unreadable=("7", "8", "9"), top=1)
+        finally:
+            imapmail.SEARCH_READ_PASSES = original
+        self.assertEqual(found["rows"], [])
+        self.assertEqual(len(self.read_calls(client)), 2)
+        # Two of the three hits were looked at, so "that is all of them" is
+        # not something this answer can claim.
+        self.assertFalse(found["complete"])
+
+    def test_what_is_not_mail_is_not_walked(self):
+        """The calendar, the contacts and the tasks, and whatever hangs off
+        them. Exchange lists all three over IMAP and can render none of them."""
+        tree = [("INBOX", "/", []), ("Kalender", "/", []),
+                ("Kalender/Feiertage in Deutschland", "/", []), ("Kontakte", "/", []),
+                ("Aufgaben", "/", []), ("Aufgaben/Next Items", "/", []), ("Archiv", "/", [])]
+        client, _found = self.run_search(
+            {"INBOX": ["7"], "Kalender": ["8"], "Kontakte": ["9"]}, tree=tree)
+        self.assertEqual([call[0] for call in client.searches], ["INBOX", "Archiv"])
+
+    def test_a_folder_somebody_made_and_called_notes_is_still_mail(self):
+        """Only the top-level names are Exchange's own. A folder under the
+        inbox is one somebody made, and it holds what they filed in it."""
+        tree = [("INBOX", "/", []), ("INBOX/Notizen", "/", [])]
+        client, _found = self.run_search({"INBOX": ["7"], "INBOX/Notizen": ["8"]}, tree=tree)
+        self.assertEqual([call[0] for call in client.searches], ["INBOX", "INBOX/Notizen"])
+
+    def test_a_hit_that_reads_back_as_a_stand_in_is_not_an_answer(self):
+        """A deleted appointment sits in the same Deleted Items as deleted
+        mail, so skipping the calendar does not catch this one."""
+        _client, found = self.run_search(
+            {"INBOX": ["8"], "Archive": ["9"]},
+            dates={"8": "02-Sep-2026 10:00:00 +0000", "9": "01-Sep-2026 10:00:00 +0000"},
+            placeholder=("8",), top=1)
+        # The stand-in was the newer hit, and the answer is the message under it
+        # rather than one row short.
+        self.assertEqual([(row["folderId"], row["subject"]) for row in found["rows"]],
+                         [("Archive", "Rechnung 2026")])
+
+    def test_a_search_that_found_only_stand_ins_says_that_rather_than_nothing(self):
+        client, found = self.run_search({"INBOX": ["7"]}, placeholder=("7",))
+        self.assertEqual(found["rows"], [])
+        self.assertIn("not mail", found["warnings"][0]["message"])
+        del client
 
     def test_a_search_term_is_quoted_but_not_put_through_mutf7(self):
         import imapmail
