@@ -30,7 +30,7 @@ Column {
     ["l", "In a step: calendar, folders, list, message", "Moving"],
     ["C", "The calendar, from anywhere - Esc brings the mail back", "Moving"],
     ["Tab", "Between the folders and the list", "Moving"],
-    ["Esc", "Back one step: reply, folders, calendar, message, list, window", "Moving"],
+    ["Esc", "Back one step: reply, search, folders, calendar, the open message, the window", "Moving"],
 
     ["Page up / down", "A screenful of whatever has focus", "Scrolling"],
     ["Ctrl-d / Ctrl-u", "Half a screen", "Scrolling"],

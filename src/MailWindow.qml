@@ -771,7 +771,9 @@ Item {
   }
 
   // Esc unwinds one layer at a time: the reading pane first, the window only
-  // once there is nothing left inside it to close.
+  // once there is nothing left inside it to close. The open message counts as
+  // one layer, not two - closing it and taking the keyboard back to the list
+  // are the same press.
   function dismiss() {
     if (showHelp) { showHelp = false; return }
     // Over everything, including the move picker, because it is the newest
@@ -799,10 +801,19 @@ Item {
       pane = "mail"
       return
     }
-    // Back to the list with the message still open. Escape again closes it -
-    // one rung at a time, rather than shutting the message outright.
+    // The message, and the keyboard back to the list with it. One rung rather
+    // than two: the reading pane is on screen for as long as a message is open
+    // whichever column has focus, so an Escape that only moved the cursor out
+    // of it changed nothing anybody could see and read as a key that did
+    // nothing.
+    if (mailView.previewMail !== null) {
+      mailView.closePreview()
+      if (pane === "message") pane = "mail"
+      return
+    }
+    // Nothing open, but the keyboard is still in the reader's column - the
+    // agenda was put away over an empty pane, say.
     if (pane === "message") { pane = "mail"; return }
-    if (mailView.previewMail !== null) { mailView.closePreview(); return }
     // The meeting opened for its details, then the one merely picked in the
     // grid. Back to the agenda before back out of the window.
     if (mailView.meetingOpen) { mailView.closeMeeting(); return }
