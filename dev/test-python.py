@@ -2845,6 +2845,129 @@ class MeetingAnswers(unittest.TestCase):
             ewscal._post = original
 
 
+class TheAddressAMessageHasOnTheWeb(unittest.TestCase):
+    """"Open in web" on an IMAP mailbox used to land on the front page of
+    Outlook rather than on the message. EWS knows which item carries a
+    Message-ID, and that item's id is the only part of Outlook Web's own
+    address that varies."""
+
+    def find_item(self, item_id="AAMkAGI="):
+        return ('<?xml version="1.0"?>'
+                '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
+                "<s:Body><m:FindItemResponse "
+                'xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" '
+                'xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">'
+                '<m:ResponseMessages><m:FindItemResponseMessage ResponseClass="Success">'
+                "<m:RootFolder><t:Items>"
+                '<t:Message><t:ItemId Id="%s" ChangeKey="CQ"/></t:Message>'
+                "</t:Items></m:RootFolder>"
+                "</m:FindItemResponseMessage></m:ResponseMessages>"
+                "</m:FindItemResponse></s:Body></s:Envelope>") % item_id
+
+    def find_folder(self, folder_id="AAMkFOLDER=", name="Projekte"):
+        return ('<?xml version="1.0"?>'
+                '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
+                "<s:Body><m:FindFolderResponse "
+                'xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" '
+                'xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">'
+                '<m:ResponseMessages><m:FindFolderResponseMessage ResponseClass="Success">'
+                "<m:RootFolder><t:Folders>"
+                '<t:Folder><t:FolderId Id="%s"/><t:DisplayName>%s</t:DisplayName></t:Folder>'
+                "</t:Folders></m:RootFolder>"
+                "</m:FindFolderResponseMessage></m:ResponseMessages>"
+                "</m:FindFolderResponse></s:Body></s:Envelope>") % (folder_id, name)
+
+    def call(self, replies, *args, **kwargs):
+        import ewscal
+        sent = []
+
+        def canned(token, payload, timeout=None):
+            sent.append(payload)
+            return replies[len(sent) - 1]
+
+        original = ewscal._post
+        ewscal._post = canned
+        try:
+            return ewscal.web_link(*args, **kwargs), sent
+        finally:
+            ewscal._post = original
+
+    def test_a_well_known_folder_is_one_request_and_a_link(self):
+        import ewscal
+        link, sent = self.call([self.find_item()], "token", "<abc@example.com>", "inbox", "INBOX")
+        self.assertEqual(len(sent), 1)
+        self.assertIn('<t:DistinguishedFolderId Id="inbox"/>', sent[0])
+        self.assertIn("message:InternetMessageId", sent[0])
+        # The angle brackets a Message-ID is written with are XML's too.
+        self.assertIn("&lt;abc@example.com&gt;", sent[0])
+        self.assertEqual(link, ewscal.OWA_LINK % "AAMkAGI%3D")
+
+    def test_a_folder_somebody_made_is_found_by_its_name_first(self):
+        link, sent = self.call([self.find_folder(), self.find_item()],
+                               "token", "<abc@example.com>", "", "Projekte")
+        self.assertEqual(len(sent), 2)
+        self.assertIn('<m:FindFolder Traversal="Deep">', sent[0])
+        self.assertIn('<t:FolderId Id="AAMkFOLDER="/>', sent[1])
+        self.assertTrue(link.endswith("&viewmodel=ReadMessageItem"))
+
+    def test_a_folder_that_is_not_there_is_no_link_rather_than_a_wrong_one(self):
+        link, sent = self.call([self.find_folder(name="Anderes")],
+                               "token", "<abc@example.com>", "", "Projekte")
+        self.assertEqual(link, "")
+        self.assertEqual(len(sent), 1)
+
+    def test_a_message_exchange_cannot_place_is_no_link(self):
+        empty = self.find_item().replace(
+            '<t:Message><t:ItemId Id="AAMkAGI=" ChangeKey="CQ"/></t:Message>', "")
+        link, _sent = self.call([empty], "token", "<abc@example.com>", "inbox", "INBOX")
+        self.assertEqual(link, "")
+
+    def test_a_mailbox_that_refuses_ews_is_no_link_rather_than_an_error(self):
+        """The button has a fallback - the mailbox on the web - and a reader
+        opening a message must not be shown an error where a message goes."""
+        import ewscal
+
+        def refuse(token, payload, timeout=None):
+            raise ewscal.CalendarError("calendar_auth_required", "no")
+
+        original = ewscal._post
+        ewscal._post = refuse
+        try:
+            self.assertEqual(ewscal.web_link("token", "<abc@example.com>", "inbox"), "")
+        finally:
+            ewscal._post = original
+
+    def test_no_message_id_asks_nothing(self):
+        import ewscal
+
+        def explode(*a, **k):
+            raise AssertionError("reached the network")
+
+        original = ewscal._post
+        ewscal._post = explode
+        try:
+            self.assertEqual(ewscal.web_link("token", "", "inbox"), "")
+        finally:
+            ewscal._post = original
+
+    def test_which_folder_a_mailbox_name_is(self):
+        import imapmail
+        self.assertEqual(imapmail.special_key("INBOX"), "inbox")
+        self.assertEqual(imapmail.special_key("Gesendete Elemente"), "sent")
+        self.assertEqual(imapmail.special_key("Deleted Items"), "trash")
+        self.assertEqual(imapmail.special_key("Projekte"), "")
+
+    def test_a_folder_under_the_inbox_is_not_the_mailbox_s_own(self):
+        """"INBOX/Archive" is somebody's own folder. Calling it the archive
+        would search Exchange's for a message that is not in it."""
+        import imapmail
+        self.assertEqual(imapmail.special_key("INBOX/Archive"), "")
+        self.assertEqual(imapmail.folder_leaf("INBOX/Projekte/2026"), "2026")
+
+    def test_a_message_id_that_is_not_an_imap_one_asks_nothing(self):
+        self.assertEqual(graph.imap_web_link("token", "AAMkAGI=", "<abc@example.com>"), "")
+
+
 class MeetingPeople(unittest.TestCase):
     """Who was invited, and what they said, out of Graph's own shape."""
 

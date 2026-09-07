@@ -2366,6 +2366,34 @@ def body_mode(args):
     return "html" if getattr(args, "html", False) else "auto"
 
 
+def imap_web_link(token, message_id, internet_message_id):
+    """Outlook Web's address for a message read over IMAP, or "".
+
+    IMAP has no such address and Graph's `webLink` arrives empty on this
+    transport, so the reading pane's "Open in web" had nothing to open and
+    fell back to the mailbox's front page - which is not where the message is.
+
+    EWS knows. The mailbox's own token carries EWS as well as IMAP wherever
+    the calendar was ever consented to for it, because Entra grants a resource
+    the union of what has been consented for it - so this asks with the token
+    already in hand rather than refreshing the calendar's beside a message the
+    reader is waiting for. A mailbox with no EWS consent at all gets a 401,
+    which is swallowed, and the old fallback.
+
+    Empty on anything at all going wrong. This is a button's destination and
+    the button still works without it.
+    """
+    if ewscal is None or imapmail is None or not internet_message_id:
+        return ""
+    try:
+        mailbox, _validity, _uid = imapmail.parse_id(message_id)
+    except imapmail.TransportError:
+        return ""
+    return ewscal.web_link(token, internet_message_id,
+                           imapmail.special_key(mailbox),
+                           imapmail.folder_leaf(mailbox))
+
+
 def cmd_message(args):
     """One message with its body, fetched only when the user asks to read it.
 
@@ -2414,6 +2442,11 @@ def cmd_message(args):
             # somewhere else, which is the thing this pane exists to avoid.
             raw = need_imap().strip_markup(raw, keep_links=True)
             served_html = False
+        # The link the pane's "Open in web" needs, which this transport cannot
+        # mint on its own. After the body rather than before it: a mailbox
+        # that will not answer EWS costs the reader nothing but this button.
+        if not message.get("webLink"):
+            message["webLink"] = imap_web_link(token, args.id, message.get("messageId"))
         policy = ImagePolicy(message.get("inlineImages"), load_images) if show_html else None
         body, truncated, body_format = render_body(raw, served_html, show_html, policy)
         out(dict(ok=True, id=message["id"], subject=message["subject"], **{

@@ -505,6 +505,39 @@ def folder_counts(client, mailbox):
     return (int(unread.group(1)) if unread else 0, int(total.group(1)) if total else 0)
 
 
+def special_key(mailbox):
+    """Which well-known folder this IMAP mailbox is, or "".
+
+    The reverse of `resolve_special`, and against the same table of names, so
+    the two cannot drift apart. INBOX is the one folder IMAP itself names, and
+    it is spelled that way whatever language the rest of the tree is in.
+
+    Top-level names only, the same rule `mail_folders` matches on and for the
+    same reason: "INBOX/Archive" is a folder somebody made under their inbox,
+    not the mailbox's archive, and answering "archive" would send a reader
+    looking for their message into a folder it was never in. One that is not
+    well-known is found by its display name instead, which costs a request and
+    is right.
+    """
+    name = str(mailbox or "").strip()
+    if not name:
+        return ""
+    if name.upper() == "INBOX":
+        return "inbox"
+    if "/" in name:
+        return ""
+    leaf = name.strip().lower()
+    for key, names in SPECIAL_FOLDERS.items():
+        if any(leaf == candidate.lower() for candidate in names):
+            return key
+    return ""
+
+
+def folder_leaf(mailbox):
+    """The display name of an IMAP folder path - what EWS knows it by."""
+    return str(mailbox or "").strip().split("/")[-1].strip()
+
+
 def mail_folders(folders):
     """`folders` minus the ones that hold something other than mail.
 

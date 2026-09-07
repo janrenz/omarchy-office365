@@ -21,8 +21,11 @@ src/imapmail.py       IMAP/SMTP transport, for tenants that will not consent to
                       the source once, `shaped` turns it into the fields the
                       pane binds to, `attached_files` and `attachment_rows`
                       read the files out of it.
-src/ewscal.py         EWS calendar, for a mailbox read over IMAP — IMAP carries
-                      no calendar, and Entra issues one token per resource.
+src/ewscal.py         EWS, for a mailbox read over IMAP: the calendar, because
+                      IMAP carries none and Entra issues one token per
+                      resource — and `web_link`, because IMAP has no web
+                      address for a message and Outlook Web's own one is built
+                      out of an EWS item id.
 src/config.py         Shared config/paths for the three.
 src/Model.js          Pure JS: shaping, grouping, dates, link building, and
                       the recipient completion. No Qt types, so
@@ -176,6 +179,21 @@ keeps using the old client id or authority.
   `MailPreview` and `MeetingPane` call `bodyMarkup`, which is both passes in
   the one order that works - the link colour is a default that a sender's own
   anchor colour would beat, so the unreadable one has to be gone first.
+- **Outlook Web's address for a message is an EWS item id in a query string.**
+  Graph hands one over as `webLink` and it looks like Graph's own invention; it
+  is not. `https://outlook.office365.com/owa/?ItemID=<id>&exvsurl=1&viewmodel=
+  ReadMessageItem` is OWA's, and the id in it is an EWS ItemId - which is why an
+  IMAP mailbox can have one after all: `ewscal.web_link` asks EWS which item
+  carries the message's Message-ID and builds the same link. It is asked with
+  the *mail* token rather than the calendar's, because Entra grants a resource
+  the union of what has been consented for it, so a mailbox that ever signed a
+  calendar in carries EWS on its IMAP token too - and refreshing the calendar's
+  tokens while somebody is waiting for a message to open is a rotation nobody
+  asked for. EWS cannot search an item across folders in one call, so the folder
+  has to be named: well-known ones by their distinguished id, anything else by a
+  `FindFolder` on the display name. Every failure answers `""`, because the
+  button falls back to the mailbox's front page and an error where a message
+  should be is worse than the old behaviour.
 - **`out()` does not exit here.** In `slack.py` and `teams.py` it does, so a
   command ends at its `out(...)`. In `graph.py` only `fail()` exits: every
   `out(...)` needs the `return` after it, and code copied across from the chat

@@ -894,6 +894,40 @@ journalctl --user -f | grep -i office365
 
 ## Changelog
 
+### 1.11.0 — 2026-09-07
+
+- **Open in web opens the message on an IMAP mailbox.** It used to open
+  Outlook's front page and leave you to find the message in it. IMAP has no
+  notion of a web address for a message and Graph's `webLink` arrives empty on
+  that transport, so there was nothing to open — but Graph's link is not a
+  Graph invention. It is Outlook Web's own address for an item, and the only
+  part of it that varies is an EWS item id. So the message you open is looked
+  up in EWS by its Message-ID, and its id builds the same link Graph would have
+  handed over. It costs one request when you open a message, made with the
+  token the mailbox already holds — no new sign-in and no new consent, since a
+  mailbox that has ever consented to EWS carries it. A mailbox that has not
+  gets the front page as before: the button always does something.
+- **Escape closes the open message and gives the list back in one press.** It
+  used to take two — the first moved the keyboard out of the reading pane,
+  which changed nothing on screen, since the pane is drawn for as long as a
+  message is open whichever column has focus. It read as a key that did
+  nothing.
+- **Searching an IMAP mailbox stops answering with things that are not mail.**
+  Exchange keeps Calendar, Contacts, Tasks, Notes and Journal in the same tree,
+  and `SEARCH` matches an appointment on its real contents — then the fetch
+  cannot render one, so it arrived as Exchange's own stand-in ("Retrieval using
+  the IMAP4 protocol failed…") and took a place a message could have had. Those
+  folders are skipped, by name and language, and only at the top level: a folder
+  you made and called Notes is full of mail. The stand-ins that survive that —
+  a deleted appointment sits in the same Deleted Items as deleted mail — are
+  recognised by shape rather than by that sentence, which arrives translated. A
+  search that read back nothing but those goes back for more hits instead of
+  saying it found nothing, and gives up rather than walking a dead mailbox.
+- **A row is one fetch instead of two.** Headers and preview are asked for in
+  one command, which is roughly half the time for the same fifty messages on
+  Exchange — the server does the same work either way and the waiting is the
+  rest of it. A server that will not answer both at once is still asked twice.
+
 ### 1.10.1 — 2026-09-07
 
 - **Deleting a message no longer announces the mail it uncovers.** The last

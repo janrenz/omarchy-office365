@@ -22,6 +22,7 @@ Two things are worth stating plainly:
 
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timedelta, timezone
@@ -144,7 +145,7 @@ def _find_item(start_utc, end_utc):
     )
 
 
-def _post(token, payload):
+def _post(token, payload, timeout=None):
     request = urllib.request.Request(
         ENDPOINT,
         data=payload.encode("utf-8"),
@@ -156,7 +157,7 @@ def _post(token, payload):
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=timeout or TIMEOUT) as response:
             return response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as error:
         body = ""
@@ -471,7 +472,128 @@ def respond(token, item_id, reply, comment=""):
     return {"response": RESPONSES[str(reply).lower()]}
 
 
+# --------------------------------------------------------------------------
+# the address a message has on the web
+# --------------------------------------------------------------------------
+#
+# IMAP has no notion of one. Graph does - `webLink` on a message - and the
+# button in the reading pane was built on it, so on this transport it had
+# nothing to open and fell back to the mailbox's front page: you pressed
+# "Open in web" on a message and got Outlook's inbox, with the message
+# somewhere in it.
+#
+# Graph's webLink is not a Graph invention, though. It is Outlook Web's own
+# address for an item, and what varies in it is an EWS item id - which is
+# exactly what this file already talks to Exchange for. A message read over
+# IMAP carries its Message-ID, EWS can be asked which item has that
+# Message-ID, and the answer builds the same link Graph would have handed
+# over.
+
+OWA_LINK = "https://outlook.office365.com/owa/?ItemID=%s&exvsurl=1&viewmodel=ReadMessageItem"
+
+# Exchange's own name for the folders it has a well-known id for, against the
+# keys imapmail.py uses for the same folders. Anything else is found by its
+# display name, which costs a second request.
+DISTINGUISHED = {
+    "inbox": "inbox",
+    "sent": "sentitems",
+    "drafts": "drafts",
+    "trash": "deleteditems",
+    "junk": "junkemail",
+    "archive": "archive",
+}
+
+# Long enough for a mailbox that is thinking about it, short enough that the
+# message still opens promptly when EWS is not going to answer at all. The
+# link is a button in the pane; the body is what the reader is waiting for.
+LINK_TIMEOUT = 8
+
+
+def _folder_id(token, display_name):
+    """The id of the folder with this display name, or "".
+
+    Deep from the message root, because a folder somebody made is as likely to
+    be under the inbox as beside it. Names are not unique in a mailbox - two
+    "Archive" folders in different parents are allowed - and the first is
+    taken: the alternative is asking Exchange to walk a tree the IMAP path has
+    already walked, to break a tie that decides between two folders holding
+    the same message.
+    """
+    body = _post(token, _bare_envelope(
+        '<m:FindFolder Traversal="Deep">'
+        "<m:FolderShape><t:BaseShape>IdOnly</t:BaseShape>"
+        "<t:AdditionalProperties>"
+        '<t:FieldURI FieldURI="folder:DisplayName"/>'
+        "</t:AdditionalProperties></m:FolderShape>"
+        "<m:ParentFolderIds>"
+        '<t:DistinguishedFolderId Id="msgfolderroot"/>'
+        "</m:ParentFolderIds>"
+        "</m:FindFolder>"
+    ), timeout=LINK_TIMEOUT)
+    message = _response_message(body, "FindFolderResponseMessage")
+    wanted = str(display_name or "").strip().lower()
+    for folder in message.findall(".//t:Folder", NS):
+        name = (folder.findtext("t:DisplayName", "", NS) or "").strip().lower()
+        if name == wanted:
+            found = folder.find("t:FolderId", NS)
+            if found is not None:
+                return found.get("Id") or ""
+    return ""
+
+
+def web_link(token, internet_message_id, key="", display_name=""):
+    """Outlook Web's address for the message with this Message-ID, or "".
+
+    Empty rather than raised, everywhere and for every reason. This is a
+    button's destination, and the button has a working fallback - the mailbox
+    on the web - so a mailbox that will not answer should quietly get the old
+    behaviour rather than an error where a message should be.
+
+    `key` is imapmail.py's name for a well-known folder and costs nothing;
+    `display_name` is the fallback for a folder somebody made, and costs a
+    request. One of the two has to be right: EWS cannot search an item across
+    folders in one call, and walking a mailbox to find one message is a worse
+    answer than the front page.
+    """
+    message_id = str(internet_message_id or "").strip()
+    if not message_id:
+        return ""
+    try:
+        distinguished = DISTINGUISHED.get(str(key or "").lower(), "")
+        if distinguished:
+            parent = '<t:DistinguishedFolderId Id="%s"/>' % distinguished
+        else:
+            folder_id = _folder_id(token, display_name)
+            if not folder_id:
+                return ""
+            parent = '<t:FolderId Id="%s"/>' % _escape(folder_id)
+
+        body = _post(token, _bare_envelope(
+            '<m:FindItem Traversal="Shallow">'
+            "<m:ItemShape><t:BaseShape>IdOnly</t:BaseShape></m:ItemShape>"
+            "<m:Restriction><t:IsEqualTo>"
+            '<t:FieldURI FieldURI="message:InternetMessageId"/>'
+            "<t:FieldURIOrConstant><t:Constant Value=\"%s\"/></t:FieldURIOrConstant>"
+            "</t:IsEqualTo></m:Restriction>"
+            "<m:ParentFolderIds>%s</m:ParentFolderIds>"
+            "</m:FindItem>" % (_escape(message_id), parent)
+        ), timeout=LINK_TIMEOUT)
+        found = _response_message(body, "FindItemResponseMessage")
+        item = found.find(".//t:Message/t:ItemId", NS)
+        if item is None or not item.get("Id"):
+            return ""
+        return OWA_LINK % urllib.parse.quote(item.get("Id"), safe="")
+    except (CalendarError, ElementTree.ParseError, urllib.error.URLError, OSError):
+        return ""
+
+
 def capabilities():
-    """What a mailbox gains once its calendar is signed in. Focused/Other and
-    OWA deep links stay absent: both are Graph's, not the mailbox's."""
+    """What a mailbox gains once its calendar is signed in.
+
+    Focused/Other stays absent: that pile is Graph's, not the mailbox's.
+    `webLinks` too, and it is worth saying why now that `web_link` exists -
+    the flag means every row in a list carries a link, and on this transport
+    none do. One is resolved for the message somebody opens, which is where
+    the button that needs it lives.
+    """
     return {"calendar": True, "focused": False, "webLinks": False}
