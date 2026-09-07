@@ -288,45 +288,32 @@ Item {
   // should know about the mail the bar fetched - and per shell rather than
   // written down, so nothing about who is written to is persisted.
   //
-  // {lowercased address: {address, name, count, at}}.
+  // **Kept per mailbox, and that is the point.** One widget carries several,
+  // and a book pooled across them completes a reply from the work address with
+  // colleagues from the private one - which is a mistake that leaves the
+  // machine before anybody notices it. So the mailbox a draft is written
+  // *from* decides what is offered, and nothing merges the books: two
+  // mailboxes that share a correspondent each remember them separately, which
+  // costs a duplicate entry and buys never suggesting the wrong side of a
+  // divide the user drew themselves.
+  //
+  // {alias: {lowercased address: {address, name, count, at}}}.
   property var addressBook: ({})
 
   // Every address ever seen would grow without bound over a shell's life, and
-  // nobody reads past six suggestions. Least recently seen goes first.
+  // nobody reads past six suggestions. Least recently seen goes first, per
+  // mailbox - a busy account must not evict a quiet one's contacts.
   readonly property int addressCap: 400
 
-  function rememberAddresses(people) {
-    if (!people || people.length === 0) return
-    var next = {}
-    for (var existing in addressBook) next[existing] = addressBook[existing]
-    var added = false
-    for (var i = 0; i < people.length; i++) {
-      var person = people[i] || {}
-      var address = String(person.address || "").trim()
-      // At least one character before the @: a bare "@host" is not somebody to
-      // write to, and neither is a Message-ID that wandered in.
-      if (address.indexOf("@") < 1) continue
-      var key = address.toLowerCase()
-      var seen = next[key]
-      var name = String(person.name || "").trim()
-      next[key] = {
-        address: address,
-        // A later sighting fills in a name that was missing, and never replaces
-        // one already known: a header that carried only an address is not
-        // evidence that the name was wrong.
-        name: name !== "" ? name : (seen ? String(seen.name || "") : ""),
-        count: (seen ? Number(seen.count || 0) : 0) + 1,
-        at: Date.now()
-      }
-      added = true
-    }
-    if (!added) return
-    var keys = Object.keys(next)
-    if (keys.length > addressCap) {
-      keys.sort(function(a, b) { return Number(next[a].at || 0) - Number(next[b].at || 0) })
-      while (keys.length > addressCap) delete next[keys.shift()]
-    }
-    addressBook = next
+  // Both of these live in Model.js, where `node dev/test-model.js` can reach
+  // them: which mailbox an address is filed under is the part of this worth a
+  // test, and a property assignment in QML is not testable at all.
+  function bookFor(alias) {
+    return Model.bookFor(addressBook, alias)
+  }
+
+  function rememberAddresses(alias, people) {
+    addressBook = Model.rememberedAddresses(addressBook, alias, people, addressCap)
   }
 
   // Everyone a fetched page of mail mentions. Only the sender: a row carries no
@@ -338,19 +325,25 @@ Item {
       var row = account.mail[i] || {}
       people.push({ address: row.fromAddress, name: row.from })
     }
-    rememberAddresses(people)
+    // The fetch answers with the mailbox it was about, which is what files
+    // these under the right book.
+    rememberAddresses(account.alias, people)
   }
 
   // ...and everyone a message that was opened mentions, which is where the
   // people you were written to *alongside* come from - the ones a reply-all
   // would reach and a reply would not.
-  function harvestFromDetail(detail) {
+  //
+  // The alias comes from the job that asked for the body rather than from the
+  // message: a detail is one message's headers and says nothing about which
+  // mailbox it was read out of.
+  function harvestFromDetail(alias, detail) {
     if (!detail) return
     var people = [{ address: detail.fromAddress, name: detail.from }]
     var lists = [detail.to, detail.cc]
     for (var l = 0; l < lists.length; l++)
       for (var i = 0; i < (lists[l] || []).length; i++) people.push(lists[l][i])
-    rememberAddresses(people)
+    rememberAddresses(alias, people)
   }
 
   // ---- message bodies -----------------------------------------------------
@@ -435,13 +428,13 @@ Item {
     messageProc.running = true
   }
 
-  function finishBody(key, detail, message) {
+  function finishBody(key, alias, detail, message) {
     var next = {}
     for (var k in bodyPending) if (k !== key) next[k] = bodyPending[k]
     bodyPending = next
     if (detail) {
       rememberBody(key, detail)
-      harvestFromDetail(detail)
+      harvestFromDetail(alias, detail)
       bodyReady(key, detail)
     } else {
       bodyFailed(key, String(message || "Could not open this message"))
@@ -459,11 +452,11 @@ Item {
       if (job) {
         var parsed = Model.parseJson(messageOut.text, null)
         if (exitCode !== 0 || !parsed || parsed.ok === false) {
-          root.finishBody(job.key, null, parsed && parsed.error
+          root.finishBody(job.key, job.alias, null, parsed && parsed.error
             ? String(parsed.error.message)
             : Model.oneLine(messageErr.text || "Could not open this message", 160))
         } else {
-          root.finishBody(job.key, parsed, "")
+          root.finishBody(job.key, job.alias, parsed, "")
         }
       }
       root.pumpBodies()

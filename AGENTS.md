@@ -257,6 +257,26 @@ keeps using the old client id or authority.
   an IMAP mailbox has no contacts endpoint at all, so a book from either would
   be empty on the transport the FWU mailbox uses. It lives for the shell's
   lifetime and is never written down.
+- **And it is keyed by mailbox, which is not a detail.** One widget carries
+  several, and a pooled book completed a reply from the work address with
+  correspondents of the private one - a mistake that leaves the machine before
+  anybody notices it. So `addressBook` is `{alias: {address: entry}}`,
+  `Service.addressBook` is `hub.bookFor(composeAlias)`, and **composeAlias is
+  the right key rather than whatever is selected**: a reply from a merged list
+  takes its alias from the message, so the list can be showing everything while
+  the draft belongs to one mailbox. Three things follow and each has a test.
+  Nothing merges the books - a shared correspondent is remembered twice, which
+  is the price of never crossing the line. The cap counts one mailbox at a
+  time, or a busy account evicts a quiet one's contacts. And a harvest that
+  cannot say which mailbox it came from is **dropped**, because that is the one
+  path back into pooling; `harvestFromDetail` therefore takes the alias off the
+  job that asked for the body, since a detail is one message's headers and
+  knows nothing about the mailbox it was read out of.
+
+  The merge and the lookup live in `Model.js` (`rememberedAddresses`,
+  `bookFor`) rather than in the store, so `node dev/test-model.js` covers them.
+  A property assignment in QML is not testable, and this is the part where
+  being wrong is quiet.
 - **`MailList.qml` is a `ListView` on purpose**, and the comment at the top says
   why a `Repeater` over a plain array was worse. The Slack and Teams plugins have
   not made that change yet; if you are porting UI between them, port this too.

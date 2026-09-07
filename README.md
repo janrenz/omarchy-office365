@@ -479,7 +479,10 @@ which leaves for Outlook — went down with the rest.
 Addresses complete as you type, in both **To** and **Cc**: the suggestions
 come from mail that has already arrived and messages you have opened, so they
 are the people you actually correspond with, ranked so a name that *starts*
-with what you typed beats one that merely contains it. `↓`/`↑` move, `Tab` or
+with what you typed beats one that merely contains it. **From that mailbox
+only** — a widget can carry a work address and a private one, and the mailbox
+you are writing *from* decides who is offered, so a work reply never suggests
+somebody the other mailbox knows. `↓`/`↑` move, `Tab` or
 `Enter` accepts, `Escape` closes the list (and a second `Escape` backs out of
 the message). Nothing is fetched to build it and nothing is written down —
 Graph's contacts endpoints need consent this plugin does not ask for, and an
@@ -894,6 +897,29 @@ journalctl --user -f | grep -i office365
 
 ## Changelog
 
+### 1.11.1 — 2026-09-07
+
+- **Recipient completion no longer mixes your mailboxes up.** One widget can
+  carry several, and the address book was one pool for all of them — so
+  replying or forwarding from the work address offered correspondents of the
+  private one, and the other way round. It is now kept per mailbox, and the
+  mailbox a draft is written *from* decides what is offered. That is the
+  compose account rather than whatever the list happens to be showing: a reply
+  from a merged view takes its mailbox from the message, so the list can be
+  showing everything while the draft belongs to one address.
+
+  Nothing merges the books. Two mailboxes that share a correspondent each
+  remember them separately, which costs one duplicate entry and buys never
+  crossing a line you drew yourself — and the eviction cap counts one mailbox
+  at a time, so a busy account cannot push a quiet one's contacts out. An
+  address that arrives without a mailbox to file it under is dropped rather
+  than pooled, because pooling is the whole failure being prevented.
+
+  The harvest and the lookup moved into `Model.js` on the way, where
+  `node dev/test-model.js` can reach them — which mailbox an address belongs to
+  is the part of this worth a test, and a property assignment in QML is not
+  testable at all.
+
 ### 1.11.0 — 2026-09-07
 
 - **Open in web opens the message on an IMAP mailbox.** It used to open
@@ -1144,9 +1170,9 @@ journalctl --user -f | grep -i office365
   commas. What is genuinely unroutable is still refused, and named as you typed
   it rather than as fragments.
 - **Recipients complete as you type**, in **To** and in **Cc**, from mail that
-  has already arrived and messages you have opened. `↓`/`↑` move, `Tab` or
-  `Enter` accepts, `Escape` closes the list. Nothing is fetched to build it and
-  nothing is written down.
+  has already arrived at *that mailbox* and messages you have opened in it.
+  `↓`/`↑` move, `Tab` or `Enter` accepts, `Escape` closes the list. Nothing is
+  fetched to build it and nothing is written down.
 - **A forward is no longer a reply to the message it forwards.** It carried the
   original's `In-Reply-To`, which filed it under that conversation in the
   recipient's client as though they had been copied on it all along. It now

@@ -820,9 +820,17 @@ Item {
   readonly property bool composingNew: composeMode === "new"
   readonly property bool composeNeedsRecipient: composeMode === "forward" || composingNew
 
-  // Who this host's reply boxes complete recipients from. The store's, because
-  // the book is harvested from every fetch any host made - see Store.qml.
-  readonly property var addressBook: hub ? hub.addressBook : ({})
+  // Who this host's reply boxes complete recipients from: the book of the
+  // mailbox the draft is being written *from*, not of every mailbox the widget
+  // carries. One widget can hold a work address and a private one, and a
+  // pooled book completes a reply from one with correspondents of the other -
+  // a mistake that leaves the machine before anybody sees it.
+  //
+  // Keyed on composeAlias rather than on whatever is selected, because those
+  // differ: a reply from a merged list takes its alias from the message, so
+  // the list can be showing everything while the draft belongs to one mailbox.
+  // Empty until something is being composed, which is when the fields exist.
+  readonly property var addressBook: hub ? hub.bookFor(composeAlias) : ({})
 
   function canSend(alias) {
     var view = viewFor(String(alias || ""))

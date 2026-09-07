@@ -1020,6 +1020,79 @@ group("recipient completion - the entry being typed, and what it matches", () =>
   check("no match is an empty list, not everything", addresses("zzz"), [])
 })
 
+group("the address book is one per mailbox, not one per widget", () => {
+  // The bug this keying exists for: a widget carrying a work mailbox and a
+  // private one completed a reply from either with correspondents of both, so
+  // a work reply offered private addresses and the mistake left the machine
+  // before anybody saw it.
+  const person = (address, name) => ({ address: address, name: name })
+
+  let books = Model.rememberedAddresses({}, "work",
+    [person("colleague@work.example", "A Colleague")], 400)
+  books = Model.rememberedAddresses(books, "home",
+    [person("friend@home.example", "A Friend")], 400)
+
+  const at = (alias) => Object.keys(Model.bookFor(books, alias)).sort()
+
+  check("each mailbox keeps only what arrived at it",
+        at("work"), ["colleague@work.example"])
+  check("and the other keeps only its own", at("home"), ["friend@home.example"])
+  check("a mailbox nothing has arrived at completes from nothing",
+        at("elsewhere"), [])
+  // What a host asks with when no draft is open. Answering with everybody
+  // would put the pooled book back for exactly the case it is least wanted.
+  check("no mailbox is not a reason to offer everybody", at(""), [])
+
+  check("and a reply from one is only ever offered that one's people",
+        Model.matchAddresses(Model.bookFor(books, "work"), "e", 6)
+             .map((entry) => entry.address),
+        ["colleague@work.example"])
+
+  // An address with no mailbox to file it under is dropped rather than pooled:
+  // pooling is the failure being prevented, so the one harvest that cannot say
+  // where it came from must not become the exception that reintroduces it.
+  check("a harvest with no mailbox changes nothing",
+        Model.rememberedAddresses(books, "", [person("nowhere@x.de", "X")], 400), books)
+
+  // Two mailboxes that share a correspondent remember them separately. A
+  // duplicate entry is the price of never crossing the line.
+  let shared = Model.rememberedAddresses(books, "home",
+    [person("colleague@work.example", "A Colleague")], 400)
+  check("a shared correspondent is remembered on both sides, separately",
+        [at("work").length, Object.keys(Model.bookFor(shared, "home")).length], [1, 2])
+  check("filing one does not disturb the other",
+        Object.keys(Model.bookFor(shared, "work")).sort(), ["colleague@work.example"])
+
+  // The cap is per mailbox, or a busy account evicts a quiet one's contacts.
+  let many = []
+  for (let i = 0; i < 5; i++) many.push(person("p" + i + "@busy.de", "P" + i))
+  let capped = Model.rememberedAddresses(books, "work", many, 3)
+  check("the cap counts one mailbox at a time",
+        Object.keys(Model.bookFor(capped, "work")).length, 3)
+  check("and does not touch another mailbox's entries",
+        Object.keys(Model.bookFor(capped, "home")), ["friend@home.example"])
+
+  // The harvest rules that were already there, still there after the move.
+  let junk = Model.rememberedAddresses({}, "work",
+    [person("@host", "no local part"), person("", "nothing at all"),
+     person("real@x.de", "Real")], 400)
+  check("an address with nothing before the @ is not somebody to write to",
+        Object.keys(Model.bookFor(junk, "work")), ["real@x.de"])
+
+  let named = Model.rememberedAddresses({}, "work", [person("a@x.de", "")], 400)
+  named = Model.rememberedAddresses(named, "work", [person("a@x.de", "A Name")], 400)
+  named = Model.rememberedAddresses(named, "work", [person("a@x.de", "")], 400)
+  check("a later sighting fills a missing name in and never replaces one",
+        Model.bookFor(named, "work")["a@x.de"].name, "A Name")
+  check("and every sighting counts", Model.bookFor(named, "work")["a@x.de"].count, 3)
+
+  check("nothing to remember is the book unchanged",
+        Model.rememberedAddresses(books, "work", [], 400), books)
+  check("and an undefined book is not a crash",
+        Object.keys(Model.rememberedAddresses(undefined, "work",
+          [person("a@x.de", "A")], 400)), ["work"])
+})
+
 group("the merged view - one folder, every mailbox", () => {
   const views = [
     { alias: "work", username: "me@work", short: "W", color: "blue", unreadCount: 3,

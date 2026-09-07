@@ -1935,10 +1935,73 @@ function cssColor(color) {
 // --------------------------------------------------------------------------
 //
 // The address book is harvested from mail already in hand - see Store.qml's
-// rememberAddresses for why it is not a contacts API - and these three
-// functions are everything the recipient fields do with it. Pure, so
-// `node dev/test-model.js` covers the parts that are easy to get wrong: where
+// rememberAddresses for why it is not a contacts API - and these functions are
+// everything anybody does with it. Pure, so `node dev/test-model.js` covers the
+// parts that are easy to get wrong: which mailbox an address belongs to, where
 // one entry in a typed list ends, and what counts as a match.
+//
+// **The book is keyed by mailbox.** One widget can carry a work address and a
+// private one, and completing a reply from the first with correspondents of the
+// second is a mistake that leaves the machine before anybody notices it. So
+// every address is filed under the mailbox it arrived at, and the mailbox a
+// draft is written *from* decides what is offered. Nothing merges them: two
+// mailboxes that share a correspondent remember them separately, which costs a
+// duplicate entry and buys never crossing a line the user drew themselves.
+
+// One mailbox's book out of the keyed one. Empty for a mailbox nothing has
+// arrived at yet, and for the empty alias - which is what a host asks with
+// when no draft is open, and is not a reason to answer with everybody.
+function bookFor(books, alias) {
+  return (books || {})[String(alias || "")] || {}
+}
+
+// The keyed book with these people filed under one mailbox, as a new object.
+//
+// An address with no mailbox to file it under is dropped rather than pooled:
+// pooling is the bug this keying exists to prevent, and a harvest that cannot
+// say where it came from is the one path back into it.
+function rememberedAddresses(books, alias, people, cap) {
+  var all = books || {}
+  var owner = String(alias || "")
+  if (owner === "" || !people || people.length === 0) return all
+  var book = {}
+  var mine = all[owner] || {}
+  for (var existing in mine) book[existing] = mine[existing]
+  var added = false
+  for (var i = 0; i < people.length; i++) {
+    var person = people[i] || {}
+    var address = String(person.address || "").trim()
+    // At least one character before the @: a bare "@host" is not somebody to
+    // write to, and neither is a Message-ID that wandered in.
+    if (address.indexOf("@") < 1) continue
+    var key = address.toLowerCase()
+    var seen = book[key]
+    var name = String(person.name || "").trim()
+    book[key] = {
+      address: address,
+      // A later sighting fills in a name that was missing, and never replaces
+      // one already known: a header that carried only an address is not
+      // evidence that the name was wrong.
+      name: name !== "" ? name : (seen ? String(seen.name || "") : ""),
+      count: (seen ? Number(seen.count || 0) : 0) + 1,
+      at: Date.now()
+    }
+    added = true
+  }
+  if (!added) return all
+  // Least recently seen goes first, and per mailbox: a busy account must not
+  // evict a quiet one's contacts.
+  var limit = Number(cap || 400)
+  var keys = Object.keys(book)
+  if (keys.length > limit) {
+    keys.sort(function(a, b) { return Number(book[a].at || 0) - Number(book[b].at || 0) })
+    while (keys.length > limit) delete book[keys.shift()]
+  }
+  var next = {}
+  for (var other in all) if (other !== owner) next[other] = all[other]
+  next[owner] = book
+  return next
+}
 
 // Where the entry being typed begins.
 //
