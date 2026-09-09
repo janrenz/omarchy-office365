@@ -609,12 +609,12 @@ function folderNameFor(views, alias, selected) {
 // needs the first without the second: a cap of seven messages leaves seven
 // conversations with nothing to group, while a cap of seven *conversations*
 // wants every message that was fetched to sort them from.
-function mergeMail(views, unreadOnly, limit, state, focusedOnly) {
-  return capMail(mergeMailAll(views, unreadOnly, state, focusedOnly), limit, state)
+function mergeMail(views, unreadOnly, limit, state, focusedOnly, flaggedOnly) {
+  return capMail(mergeMailAll(views, unreadOnly, state, focusedOnly, flaggedOnly), limit, state)
 }
 
 
-function mergeMailAll(views, unreadOnly, state, focusedOnly) {
+function mergeMailAll(views, unreadOnly, state, focusedOnly, flaggedOnly) {
   var overrides = (state && state.read) || {}
   var deleted = (state && state.deleted) || {}
   var flagged = (state && state.flagged) || {}
@@ -637,11 +637,15 @@ function mergeMailAll(views, unreadOnly, state, focusedOnly) {
       if (deleted[id] === true) continue
 
       var read = overrides[id] === undefined ? mail.read === true : overrides[id] === true
+      var isFlagged = flagged[id] === undefined ? mail.flagged === true : flagged[id] === true
       // A message stays in the unread view while it is held, so it cannot go
       // out from under the pane reading it.
       if (unreadOnly === true && read && held[id] !== true) continue
       // Outlook's Other pile, hidden on request.
       if (focusedOnly === true && mail.focused === false) continue
+      // And the same courtesy for the flag: clearing one on the message being
+      // read must not take the message off the screen mid-sentence.
+      if (flaggedOnly === true && !isFlagged && held[id] !== true) continue
 
       merged.push({
         id: mail.id,
@@ -655,7 +659,7 @@ function mergeMailAll(views, unreadOnly, state, focusedOnly) {
         important: mail.important === true,
         hasAttachments: mail.hasAttachments === true,
         read: read,
-        flagged: flagged[id] === undefined ? mail.flagged === true : flagged[id] === true,
+        flagged: isFlagged,
         focused: mail.focused !== false,
         alias: view.alias,
         short: view.short,
@@ -714,6 +718,21 @@ function capMail(merged, limit, state) {
     }
   }
   return capped
+}
+
+// How many of the merged rows carry a flag, for the pill that filters on it.
+//
+// Counted over the rows rather than asked of the mailbox, and not for want of
+// a request: Graph counts unread mail per folder and counts nothing else, so
+// there is no flagged number to be had for the price the unread one costs.
+// What this counts is therefore exactly what pressing the pill will show,
+// which is the number worth printing on it - the flagged query behind the
+// fetch reaches back MAIL_FILTER_CAP messages, so a mailbox with more standing
+// flags than that says the cap rather than the truth. Nobody has that many.
+function countFlagged(rows) {
+  var total = 0
+  for (var i = 0; i < (rows || []).length; i++) if (rows[i].flagged === true) total++
+  return total
 }
 
 // ---- searching ------------------------------------------------------------

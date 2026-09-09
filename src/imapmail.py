@@ -1269,9 +1269,11 @@ def folder_to_open(client, account, folders, folder_id, warnings):
 def snapshot(account, token, top, folder_id="", want_folders=True):
     """One mailbox's unread count, folder tree and newest mail.
 
-    Two lists are read, matching the two the panel can ask for: the newest
-    messages in the folder, and the newest unread ones. The newest N need not
-    contain the newest N unread, so neither list can be derived from the other.
+    Three lists are read, matching the views the panel can ask for: the newest
+    messages in the folder, the newest unread ones, and the newest flagged
+    ones. The newest N need not contain the newest N unread, and a message
+    flagged for later is precisely one that has dropped out of the newest N, so
+    none of the three can be derived from the others.
     """
     client = None
     warnings = []
@@ -1302,14 +1304,19 @@ def snapshot(account, token, top, folder_id="", want_folders=True):
         except TransportError as error:
             warnings.append({"scope": "mail", "message": error.message})
 
-        try:
-            typ, data = client.uid("SEARCH", None, "UNSEEN")
-            if typ == "OK":
-                unseen = _text(data).split()
-                for row in read_rows(client, mailbox, validity, ",".join(unseen[-top:]), by_uid=True):
-                    collected.setdefault(row["id"], row)
-        except (imaplib.IMAP4.error, TransportError) as error:
-            warnings.append({"scope": "mail", "message": "Could not list unread mail: " + _text(error)})
+        # SEARCH answers oldest first, so the newest are the tail of it. One
+        # failure is a view left short rather than a fetch that failed: the
+        # folder's own rows are already in hand.
+        for key, missing in (("UNSEEN", "unread"), ("FLAGGED", "flagged")):
+            try:
+                typ, data = client.uid("SEARCH", None, key)
+                if typ == "OK":
+                    hits = _text(data).split()
+                    for row in read_rows(client, mailbox, validity, ",".join(hits[-top:]), by_uid=True):
+                        collected.setdefault(row["id"], row)
+            except (imaplib.IMAP4.error, TransportError) as error:
+                warnings.append({"scope": "mail",
+                                 "message": "Could not list %s mail: %s" % (missing, _text(error))})
 
         name = next((row["name"] for row in folders if row["id"] == mailbox), mailbox)
         return {

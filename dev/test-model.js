@@ -577,6 +577,54 @@ group("the follow-up flag", () => {
         [true])
 })
 
+// The pill that narrows the list to what somebody set aside. Its number is
+// counted off the same rows it would show, which is what lets it be printed on
+// the pill without a second merge to find out what it means.
+group("the flagged filter", () => {
+  const view = (alias, mail) => ({ alias, short: alias[0].toUpperCase(), color: "#fff",
+                                   write: true, mail })
+  const msg = (id, extra) => Object.assign(
+    { id, subject: id, from: "A", fromAddress: "a@example.com",
+      received: "2026-09-01T09:00:00Z", preview: "", read: true, flagged: false }, extra)
+  const idsOf = (rows) => rows.map((r) => r.id)
+
+  const rows = [view("work", [msg("a", { flagged: true }), msg("b"), msg("c", { flagged: true })])]
+
+  check("off, every row is there",
+        idsOf(Model.mergeMailAll(rows, false, {}, false, false)), ["a", "b", "c"])
+  check("on, only the flagged ones",
+        idsOf(Model.mergeMailAll(rows, false, {}, false, true)), ["a", "c"])
+  check("and the count is what it would show",
+        Model.countFlagged(Model.mergeMailAll(rows, false, {}, false, false)), 2)
+
+  // The overlay is what the pill is read against too, or unflagging a row
+  // would leave the number one ahead of the list for as long as the helper
+  // took to answer.
+  check("a flag raised optimistically counts at once",
+        idsOf(Model.mergeMailAll(rows, false, { flagged: { b: true } }, false, true)),
+        ["a", "b", "c"])
+  check("and one cleared optimistically stops counting",
+        Model.countFlagged(
+          Model.mergeMailAll(rows, false, { flagged: { a: false } }, false, false)), 1)
+
+  // The same courtesy the unread filter pays the message being read: clearing
+  // its flag must not take it off the screen mid-sentence.
+  check("the message being read keeps its row after the flag goes",
+        idsOf(Model.mergeMailAll(
+          rows, false, { flagged: { a: false }, held: { a: true } }, false, true)),
+        ["a", "c"])
+
+  // Both filters at once is an intersection, which is the whole reason the
+  // helper does not need a query per combination - see MAIL_QUERIES.
+  const mixed = [view("work", [
+    msg("read-flagged", { flagged: true }),
+    msg("unread-flagged", { flagged: true, read: false }),
+    msg("unread-plain", { read: false })
+  ])]
+  check("with unread on as well, only mail that is both",
+        idsOf(Model.mergeMailAll(mixed, true, {}, false, true)), ["unread-flagged"])
+})
+
 group("where a message can be filed", () => {
   // Two mailboxes, because the answer has to come from one of them: a folder
   // id names a folder in a single mailbox, and Graph cannot move a message

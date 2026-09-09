@@ -296,6 +296,10 @@ Panel {
         else if (text === "u") root.service.unreadOnly = !root.service.unreadOnly
         // Capital F, the same as in the window, and clear of the f above.
         else if (text === "F") root.flagAtCursor()
+        // Both letters are spoken for - f narrows to Focused, F flags the row
+        // - so the flag filter takes the mark mail clients have drawn beside a
+        // flagged message since mutt, which is also what IMAP calls it.
+        else if (text === "!") root.service.flaggedOnly = !root.service.flaggedOnly
         // The same key as the window's, for the popup's own shorter list.
         else if (text === "?") root.showHelp = !root.showHelp
       }
@@ -549,6 +553,24 @@ Panel {
             accent: root.accent
             fontFamily: root.fontFamily
             onClicked: if (root.service) root.service.unreadOnly = !root.service.unreadOnly
+          }
+
+          // The mail somebody set aside. It sits beside Unread because it
+          // answers the other half of "what still wants me", and it is the
+          // only pill here that reaches mail the panel would otherwise never
+          // show: a flag is put on a message precisely so it can be forgotten
+          // for a fortnight, by which time it is far below the newest five.
+          FilterPill {
+            label: "Flagged"
+            detail: root.service && root.service.flaggedCount > 0
+              ? String(root.service.flaggedCount) : ""
+            alert: !!root.service && root.service.flaggedCount > 0
+            selected: !!root.service && root.service.flaggedOnly
+            fg: root.fg
+            dim: root.dim
+            accent: root.accent
+            fontFamily: root.fontFamily
+            onClicked: if (root.service) root.service.flaggedOnly = !root.service.flaggedOnly
           }
         }
 

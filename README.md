@@ -165,10 +165,13 @@ While a mailbox is fetching for the first time the panel shows placeholder
 rows at its full width instead, so nothing shifts under the pointer when the
 data lands. Click a mailbox to see only its mail and meetings -
 the others fade - and click it again, or another one, to change your mind.
-**Unread** narrows the mail list to what you have not read yet, and
-**Focused** hides what Outlook sorted into Other. Press **u** and **f** to
-toggle them from the keyboard, and set `focusedByDefault` to open on Focused
-every time.
+**Unread** narrows the mail list to what you have not read yet,
+**Focused** hides what Outlook sorted into Other, and **Flagged** shows only
+the mail you set aside for follow-up. Press **u**, **f** and **!** to toggle
+them from the keyboard, and set `focusedByDefault` to open on Focused every
+time. Flagged has no such setting: a flag is a note to come back to something,
+and a panel that opens on that list rather than on what has arrived is a
+different widget.
 
 **Focused/Other is Outlook's own split, and Graph is the only way to it.** A
 mailbox signed in over IMAP has no such thing, so the pill is not offered
@@ -179,9 +182,12 @@ whose mail it cannot speak for - `Focused  FWU: all` - because that mail is
 still in the list and a filter that seems to have missed some is worse than
 one that says what it left.
 
-Both fill the list to `mails`: each mailbox is fetched three ways - newest,
-newest unread, and newest Focused - so whichever way you narrow it, there is
-enough to show.
+They all fill the list to `mails`: each mailbox is fetched several ways -
+newest, newest unread, newest Focused and newest flagged - so whichever way you
+narrow it, there is enough to show. The flagged query is the one that reaches
+*outside* the list: a message is flagged precisely so it can be forgotten for a
+fortnight, by which time it is far below the newest few, so asking for it
+separately is the only way the pill can show it at all.
 
 ## Searching
 
@@ -631,6 +637,7 @@ Once the bar panel is up:
 | Enter or Space | Read the message under the cursor |
 | f | Show only Outlook's Focused mail, or stop |
 | u | Show only unread, or stop |
+| ! | Show only flagged mail, or stop |
 | Delete, Backspace or x | Delete it - the mailbox must allow changes |
 | Escape | Close the reading pane, then the panel |
 | Tab | Move to the next bar panel |
@@ -665,6 +672,7 @@ including inside a message, which is the one place they used to do nothing.
 | `F` | Flag it for follow-up, or clear the flag (capital, since `f` is the Focused filter) |
 | `/` | Search: typing narrows this list, `Enter` asks the mailbox — see [Searching](#searching) |
 | `u` / `f` | Only unread / only Focused |
+| `!` | Only flagged, wherever in the mailbox it is |
 | `t` | Group the list by conversation |
 | `r` | Refresh |
 | `?` | This list |
@@ -913,6 +921,35 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.12.0 — 2026-09-08
+
+- **A Flagged filter, beside Unread and Focused.** The flag has been there to
+  set for a while — `F` on a row, or the flag on the reading pane — but there
+  was no way to ask for the mail you had flagged, which is most of the point of
+  flagging it. There is a **Flagged** pill in the window and in the bar popup
+  now, with a count on it, and `!` toggles it from the keyboard (both letters
+  were taken: `f` is Focused and `F` sets the flag, and `!` is the mark mail
+  clients have drawn beside a flagged message since mutt — it is also what IMAP
+  calls the flag).
+
+  It is the one filter here that reaches mail the list would otherwise not
+  hold. A message is flagged so it can be forgotten for a fortnight, by which
+  time it is nowhere near the newest few that a fetch carries — so each mailbox
+  is now asked for its standing flags as a query of its own, on Graph
+  (`flag/flagStatus eq 'flagged'`, which leaves out follow-ups already ticked
+  off) and over IMAP (a `FLAGGED` search per folder). Flagged is not crossed
+  with Unread and Focused the way those two are crossed with each other:
+  while the whole flagged set fits in the filter cap, "flagged and unread" is
+  an exact intersection of two lists already in hand, and crossing all three
+  would cost eight requests a mailbox on every poll.
+
+  The count on the pill is read off the rows the pill would show rather than
+  asked of the mailbox — Graph counts unread mail per folder and counts nothing
+  else — and it respects the optimistic overlay, so a flag you raise or clear
+  is on the pill before the server has heard about it. Clearing the flag on the
+  message you are reading does not take it off the screen mid-sentence, the
+  same courtesy the unread filter already paid.
 
 ### 1.11.1 — 2026-09-07
 

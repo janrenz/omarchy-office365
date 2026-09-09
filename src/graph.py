@@ -883,11 +883,21 @@ ORDERABLE_PREFIX = "receivedDateTime ge 1970-01-01T00:00:00Z and "
 # The panel's filters, and the query behind each. The label names the view a
 # failure would leave short, so a warning can say which one rather than only
 # that something went wrong.
+#
+# Unread and Focused are crossed with each other because neither list contains
+# the other's: the newest unread need not be Focused. Flagged is not crossed
+# with either, and that is a judgement rather than an oversight. A flag is
+# something a person put there by hand, so the whole flagged set is normally
+# smaller than MAIL_FILTER_CAP - and while it is, "flagged and unread" is an
+# exact intersection of two lists already in hand. Crossing all three would
+# cost eight requests a mailbox on every poll to make a mailbox with more than
+# twenty-five standing flags read correctly.
 MAIL_QUERIES = (
-    ("all mail", False, False),
-    ("unread", True, False),
-    ("focused", False, True),
-    ("focused unread", True, True),
+    ("all mail", False, False, False),
+    ("unread", True, False, False),
+    ("focused", False, True, False),
+    ("focused unread", True, True, False),
+    ("flagged", False, False, True),
 )
 
 
@@ -997,7 +1007,8 @@ def fetch_folders(token, inbox_id=""):
     return rows[:FOLDER_CAP], "", not truncated[0]
 
 
-def fetch_messages(token, top, timezone_name, unread_only=False, focused_only=False, folder_id="inbox"):
+def fetch_messages(token, top, timezone_name, unread_only=False, focused_only=False,
+                   folder_id="inbox", flagged_only=False):
     """The newest messages in one folder, or the newest matching the given filters.
 
     Sorting is more than some mailboxes will do in one query (Exchange answers
@@ -1013,6 +1024,11 @@ def fetch_messages(token, top, timezone_name, unread_only=False, focused_only=Fa
         clauses.append("isRead eq false")
     if focused_only:
         clauses.append("inferenceClassification eq 'focused'")
+    if flagged_only:
+        # The same one state message_row reads: Graph's third, "complete", is a
+        # flag that has been ticked off, and a filter that let those through
+        # would fill the view with mail already dealt with.
+        clauses.append("flag/flagStatus eq 'flagged'")
     predicate = " and ".join(clauses)
 
     attempts = []
@@ -1250,25 +1266,29 @@ def fetch_account(alias, args, timezone_name):
     reading_inbox = folder_id == "inbox" or folder_id == inbox_id
 
     # ---- mail ------------------------------------------------------------
-    # One list per combination of the panel's two filters. Each query backs one
-    # view, and they are not interchangeable: the newest unread need not be
-    # Focused and the newest Focused need not be unread, so the both-on view is
-    # not something the other three can be made to answer. One that fails
-    # leaves its own view short even while the rest look full.
+    # One list per view the panel's filters can ask for. Each query backs one,
+    # and they are not interchangeable: the newest unread need not be Focused
+    # and the newest Focused need not be unread, so the both-on view is not
+    # something the others can be made to answer. Nor is the flagged one, whose
+    # whole point is the message set aside weeks ago - see MAIL_QUERIES. One
+    # that fails leaves its own view short even while the rest look full.
     top = max(1, min(args.mails, MAIL_CAP))
     collected = {}
     failures = []
 
     # Focused/Other is a split Outlook draws across the inbox and nowhere else,
     # so outside it those two queries would cost two round trips to answer a
-    # question the folder cannot be asked.
+    # question the folder cannot be asked. A flag means the same thing in every
+    # folder, so that query stays wherever the reader is.
     queries = MAIL_QUERIES if reading_inbox else tuple(q for q in MAIL_QUERIES if not q[2])
 
-    for label, unread_only, focused_only in queries:
+    for label, unread_only, focused_only, flagged_only in queries:
         # The list being read grows a page at a time; the filtered views behind
         # it stay the length they have always been - see MAIL_FILTER_CAP.
-        want = top if not (unread_only or focused_only) else min(top, MAIL_FILTER_CAP)
-        status, payload = fetch_messages(token, want, timezone_name, unread_only, focused_only, folder_id)
+        filtered = unread_only or focused_only or flagged_only
+        want = top if not filtered else min(top, MAIL_FILTER_CAP)
+        status, payload = fetch_messages(token, want, timezone_name, unread_only, focused_only,
+                                         folder_id, flagged_only)
         if status != 200:
             failures.append((label, graph_error(payload, "Could not read mail")))
             continue

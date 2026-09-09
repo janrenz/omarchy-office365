@@ -1229,6 +1229,10 @@ Item {
           else if (text === "C") root.toggleAgenda()
           // Capital, because f is already the Focused filter.
           else if (text === "F") root.flagAtCursor()
+          // Both letters are spoken for, so the flag filter takes the mark
+          // mail clients have drawn beside a flagged message since mutt -
+          // which is also what IMAP calls the flag itself.
+          else if (text === "!") mailView.flaggedOnly = !mailView.flaggedOnly
           // The key every list in every terminal searches with, and the one
           // reason a plain letter would not do: / is not a letter, so it can
           // never be the first character of something somebody meant to type.
@@ -1448,6 +1452,26 @@ Item {
                 accent: Color.accent
                 fontFamily: Style.font.family
                 onClicked: mailView.focusedOnly = !mailView.focusedOnly
+              }
+
+              // The mail somebody set aside, which is the one filter here that
+              // reaches messages the list would otherwise not hold: a flag is
+              // put on a message so it can be forgotten for a fortnight, and
+              // the fetch has a query of its own for exactly that reason.
+              //
+              // A glyph, and the same one the rows carry - this is the row
+              // that collapses the header when it outgrows the width beside
+              // the title, and a fourth word here is what would do it.
+              FilterPill {
+                icon: "\u{F023B}"   // nf-md-flag, as drawn on a flagged row
+                label: "Flagged"     // the name of a pill that shows a glyph
+                detail: mailView.flaggedCount > 0 ? String(mailView.flaggedCount) : ""
+                alert: mailView.flaggedCount > 0
+                selected: mailView.flaggedOnly
+                fg: Color.foreground
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: mailView.flaggedOnly = !mailView.flaggedOnly
               }
 
               // A glyph, like the two above it and for the same reason: this

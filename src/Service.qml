@@ -327,6 +327,11 @@ Item {
   property string filterAlias: ""
   property bool unreadOnly: false
   property bool focusedOnly: false
+  // Only the mail somebody put a flag on. No default setting behind it, unlike
+  // the two above: a flag is a note to come back to something, and a panel
+  // that opens on that list rather than on what has arrived is a different
+  // widget.
+  property bool flaggedOnly: false
 
   // Settings arrive after this object is built, so pick the defaults up when
   // they resolve rather than only at construction. Never Focused-only where
@@ -346,6 +351,7 @@ Item {
     filterAlias = ""
     unreadOnly = unreadByDefault
     focusedOnly = focusedByDefault && canFocus
+    flaggedOnly = false
     selectedEvent = null
     expandedStart = -1
     expandedEnd = -1
@@ -1387,7 +1393,7 @@ Item {
   // out what 84 was.
   readonly property var mailUnfiltered: Model.mergeMailAll(
     searchShowing ? Model.searchViews(mailViews, searchResults) : mailViews,
-    unreadOnly, listState, focusedOnly)
+    unreadOnly, listState, focusedOnly, flaggedOnly)
 
   // What the query left, and what there was - so "nothing here" and "nothing
   // anywhere" can be told apart without pressing Enter to find out.
@@ -1549,6 +1555,12 @@ Item {
                                                 String(root.openMeeting.id), root.demo)
     }
   }
+
+  // What the Flagged pill counts. Read off mailUnfiltered rather than off the
+  // mailboxes, so the number is the rows that pill would show and not a total
+  // the list cannot reach - and it holds still when the pill is pressed,
+  // because with the filter on every row it counts is already every row there.
+  readonly property int flaggedCount: Model.countFlagged(mailUnfiltered)
 
   readonly property int unreadCount: {
     var total = 0

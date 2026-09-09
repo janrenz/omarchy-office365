@@ -291,11 +291,12 @@ class Args:
 class FetchAccount(unittest.TestCase):
     """The real fetch_account, with the network answering to order.
 
-    Each mail query backs one of the panel's filter combinations, and they
-    cannot stand in for each other: nothing in the unread list need be Focused,
-    nor anything in the Focused list unread. One that fails leaves its own view
-    short while the others look full, so "did anything come back at all" is not
-    the test.
+    Each mail query backs one of the views the panel's filters can ask for, and
+    they cannot stand in for each other: nothing in the unread list need be
+    Focused, nor anything in the Focused list unread, and the flagged list is
+    mostly mail that fell out of the newest N weeks ago. One that fails leaves
+    its own view short while the others look full, so "did anything come back
+    at all" is not the test.
     """
 
     def fetch(self, failing_queries=(), inbox_ok=True, timezone_name="UTC",
@@ -337,10 +338,11 @@ class FetchAccount(unittest.TestCase):
                 setattr(graph, name, value)
 
     def messages(self, failing):
-        def answer(token, top, tz, unread_only=False, focused_only=False, folder_id="inbox"):
+        def answer(token, top, tz, unread_only=False, focused_only=False, folder_id="inbox",
+                   flagged_only=False):
             self.folders_read.append(folder_id)
-            for label, unread, focused in graph.MAIL_QUERIES:
-                if (unread, focused) != (unread_only, focused_only):
+            for label, unread, focused, flagged in graph.MAIL_QUERIES:
+                if (unread, focused, flagged) != (unread_only, focused_only, flagged_only):
                     continue
                 if label in failing:
                     return 400, {"error": {"message": "InefficientFilter"}}
@@ -362,7 +364,7 @@ class FetchAccount(unittest.TestCase):
         self.assertIn("focused unread", result["warnings"][0]["message"])
 
     def test_every_query_failing_reports_the_failure_itself(self):
-        result = self.fetch(failing_queries=[label for label, _, _ in graph.MAIL_QUERIES])
+        result = self.fetch(failing_queries=[label for label, *_ in graph.MAIL_QUERIES])
         self.assertEqual(result["mail"], [])
         self.assertEqual(result["warnings"][0]["message"], "InefficientFilter")
 
@@ -420,11 +422,13 @@ class Folders(FetchAccount):
 
     def test_outside_the_inbox_focused_is_not_asked_for(self):
         # Focused/Other is an inbox split, so those two queries would spend two
-        # round trips on a question the folder cannot answer.
+        # round trips on a question the folder cannot answer. The other three -
+        # the folder itself, its unread and its flagged - are asked everywhere,
+        # because a flag means the same thing in every folder.
         self.fetch(folder=["work=ARCHIVE-ID"], folders=[INBOX_ROW, ARCHIVE])
-        self.assertEqual(len(self.folders_read), 2)
+        self.assertEqual(len(self.folders_read), 3)
         self.fetch(folders=[INBOX_ROW, ARCHIVE])
-        self.assertEqual(len(self.folders_read), 4)
+        self.assertEqual(len(self.folders_read), 5)
 
     def test_a_folder_that_is_gone_falls_back_to_the_inbox(self):
         result = self.fetch(folder=["work=DELETED-ID"], folders=[INBOX_ROW, ARCHIVE])
@@ -443,7 +447,7 @@ class Folders(FetchAccount):
         # still readable, so the mail must still arrive.
         result = self.fetch(folders_error="Access is denied")
         self.assertTrue(result["ok"])
-        self.assertEqual(len(result["mail"]), 4)
+        self.assertEqual(len(result["mail"]), 5)
         self.assertEqual(result["folders"], [])
         self.assertIn("Access is denied", [w["message"] for w in result["warnings"]])
 
@@ -743,6 +747,78 @@ class SearchCommand(unittest.TestCase):
             self.assertTrue(graph.search_account("work", args, "UTC")["complete"])
         finally:
             (graph.read_json, graph.access_token, graph.graph_search) = original
+
+
+class ImapSnapshotLists(unittest.TestCase):
+    """The lists one IMAP fetch reads, and what a failing one costs.
+
+    IMAP has no filtered listing, so each view is a SEARCH and a fetch of the
+    tail of what it matched. Flagged is here for the same reason it is on the
+    Graph path: a message set aside is one that has already fallen out of the
+    newest N, so a filter that only looked at those rows would be empty for
+    exactly the mail it exists to find.
+    """
+
+    class Client:
+        capabilities = ("IMAP4REV1",)
+
+        def __init__(self, hits, refusing=()):
+            self.hits = dict(hits)
+            self.refusing = set(refusing)
+            self.searches = []
+
+        def uid(self, command, *args):
+            import imaplib
+            key = str(args[-1])
+            self.searches.append(key)
+            if key in self.refusing:
+                raise imaplib.IMAP4.error("SEARCH not supported")
+            return "OK", [" ".join(self.hits.get(key, [])).encode()]
+
+    def snapshot(self, hits=(), refusing=()):
+        import imapmail
+        client = self.Client(hits, refusing)
+        row = lambda uid: {"id": "<%s@example.com>" % uid, "subject": uid,
+                           "received": "2026-09-0%s 10:00:00" % uid, "flagged": False,
+                           "read": True}
+        patched = {
+            "connect": lambda account, token: client,
+            "close": lambda c: None,
+            "folder_rows": lambda c, want_counts=True: (
+                [{"id": "INBOX", "name": "Inbox", "isInbox": True}], True),
+            "folder_counts": lambda c, mailbox: (2, 40),
+            "select": lambda c, mailbox, readonly=True: (9, "42"),
+            "sequence_window": lambda exists, top: "7,8,9",
+            # The window's own rows, then whichever uids a SEARCH matched.
+            "read_rows": lambda c, mailbox, validity, spec, by_uid: [
+                row(uid) for uid in str(spec).split(",") if uid],
+        }
+        original = {name: getattr(imapmail, name) for name in patched}
+        for name, stub in patched.items():
+            setattr(imapmail, name, stub)
+        try:
+            return client, imapmail.snapshot({"alias": "work"}, "token", 3)
+        finally:
+            for name, value in original.items():
+                setattr(imapmail, name, value)
+
+    def test_both_filtered_views_are_asked_for(self):
+        client, result = self.snapshot(hits={"UNSEEN": ["4"], "FLAGGED": ["1"]})
+        self.assertEqual(client.searches, ["UNSEEN", "FLAGGED"])
+        # The flagged one is mail the window itself never listed: uid 1 is
+        # nowhere in the newest three, and that is the point of asking.
+        self.assertIn("<1@example.com>", [row["id"] for row in result["mail"]])
+        self.assertIn("<4@example.com>", [row["id"] for row in result["mail"]])
+        self.assertEqual(result["warnings"], [])
+
+    def test_a_server_that_refuses_one_says_which_view_is_short(self):
+        # A view left short is not a fetch that failed - the folder's own rows
+        # are already in hand, and a warning naming the view is the only way
+        # anybody could tell an empty filter from a broken one.
+        _client, result = self.snapshot(hits={"UNSEEN": ["4"]}, refusing=["FLAGGED"])
+        self.assertTrue(result["mail"])
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn("flagged", result["warnings"][0]["message"])
 
 
 class SearchingIMAP(unittest.TestCase):
@@ -1439,6 +1515,64 @@ class MessageRowFlag(unittest.TestCase):
     def test_a_completed_follow_up_is_not_a_standing_flag(self):
         row = graph.message_row({"id": "1", "flag": {"flagStatus": "complete"}})
         self.assertFalse(row["flagged"])
+
+
+class TheFlaggedQuery(unittest.TestCase):
+    """The query behind the Flagged pill.
+
+    It is the one filtered view whose whole purpose is mail *outside* the fetch
+    window: a flag is put on a message so it can be left for a fortnight, by
+    which time it is a hundred messages down. So it is a query rather than a
+    walk over the rows already in hand, and it has to be spelled the way Graph
+    will both filter and sort - the same rule ORDERABLE_PREFIX exists for.
+    """
+
+    def setUp(self):
+        self.calls = []
+        self.original = graph.graph_get
+        graph.graph_get = self.answer
+
+    def tearDown(self):
+        graph.graph_get = self.original
+
+    def answer(self, token, path, params, *a, **k):
+        self.calls.append(dict(params))
+        return self.replies.pop(0)
+
+    def test_it_asks_for_standing_flags_newest_first(self):
+        self.replies = [(200, {"value": []})]
+        graph.fetch_messages("token", 25, "UTC", flagged_only=True)
+        params = self.calls[0]
+        self.assertEqual(params["$filter"], graph.ORDERABLE_PREFIX + "flag/flagStatus eq 'flagged'")
+        self.assertEqual(params["$orderby"], "receivedDateTime desc")
+
+    def test_a_ticked_off_follow_up_is_not_asked_for(self):
+        # "complete" is a flag somebody has dealt with, and message_row does
+        # not call it flagged either - a filter that let it through would fill
+        # the view with mail already seen to.
+        self.replies = [(200, {"value": []})]
+        graph.fetch_messages("token", 25, "UTC", flagged_only=True)
+        self.assertNotIn("complete", self.calls[0]["$filter"])
+
+    def test_a_mailbox_that_refuses_the_sorted_form_is_asked_again(self):
+        # The same climb-down every filtered view gets: an Exchange that calls
+        # the query too complex is answered with a plainer one rather than an
+        # empty pill.
+        self.replies = [(400, {"error": {"message": "InefficientFilter"}}),
+                        (200, {"value": [{"id": "1"}]})]
+        status, _payload = graph.fetch_messages("token", 25, "UTC", flagged_only=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.calls[1]["$filter"], "flag/flagStatus eq 'flagged'")
+
+    def test_unread_and_flagged_is_not_a_query(self):
+        # Every combination of unread and Focused has its own query because
+        # neither list contains the other's. Flagged does not, and that is the
+        # judgement recorded in MAIL_QUERIES: the flagged set is small enough
+        # that the panel can intersect it with the unread one itself, and
+        # crossing all three would cost eight requests a poll.
+        self.assertEqual(
+            [q for q in graph.MAIL_QUERIES if q[3]],
+            [("flagged", False, False, True)])
 
 
 class ComposeArgs:
