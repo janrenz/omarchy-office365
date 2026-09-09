@@ -820,6 +820,21 @@ class ImapSnapshotLists(unittest.TestCase):
         self.assertEqual(len(result["warnings"]), 1)
         self.assertIn("flagged", result["warnings"][0]["message"])
 
+    def test_the_fold_is_the_page_and_not_the_searches(self):
+        """mailPage says how far back the *folder's page* reaches.
+
+        It is what tells a message that has just arrived from one that only
+        surfaced because the row above it was deleted - Store.qml's
+        notifyFloor. The searches above deliberately reach past the page, so a
+        fold measured against everything the fetch returned lands as far back
+        as the oldest standing flag: delete four rows and four toasts go off
+        about mail from months ago.
+        """
+        _client, result = self.snapshot(hits={"UNSEEN": ["4"], "FLAGGED": ["1"]})
+        # uids 7, 8 and 9 are the window; 1 and 4 came out of the searches.
+        self.assertEqual(result["mailPage"], {"oldest": "2026-09-07 10:00:00", "full": True})
+        self.assertIn("<1@example.com>", [row["id"] for row in result["mail"]])
+
 
 class SearchingIMAP(unittest.TestCase):
     """The walk, and the criteria it walks with.
@@ -2161,6 +2176,285 @@ class ComposeStopsWhenItIsDone(unittest.TestCase):
         self.assertEqual([call["url"].rsplit("/", 1)[-1] for call in self.calls],
                          ["createReply", "attachments", "send"])
         self.assertFalse(any(call["url"].endswith("/reply") for call in self.calls))
+
+
+class TheFoldTheNotifierReadsFrom(FetchAccount):
+    """mailPage, on the Graph path: the page's own oldest row.
+
+    `mail` is the union of every query above it, and the unread and flagged
+    ones exist precisely to fetch messages from far below the page - so it is
+    the one list the fold cannot be measured against. It was, in QML, and the
+    result was a floor weeks in the past on any mailbox with old unread mail:
+    every row the list refilled with after a delete was announced as new mail.
+    """
+
+    page_rows = 5
+
+    def messages(self, failing):
+        """A page of the folder, and one much older message per filtered query.
+
+        The parent's own tests run against this too, so a refused query has to
+        still be refused here - what changes is only the shape of what comes
+        back when it is not.
+        """
+        def answer(token, top, tz, unread_only=False, focused_only=False, folder_id="inbox",
+                   flagged_only=False):
+            self.folders_read.append(folder_id)
+            for label, unread, focused, flagged in graph.MAIL_QUERIES:
+                if (unread, focused, flagged) != (unread_only, focused_only, flagged_only):
+                    continue
+                if label in failing:
+                    return 400, {"error": {"message": "InefficientFilter"}}
+                if unread or focused or flagged:
+                    # January, which is what a filtered query is for: mail that
+                    # fell out of the newest few a long time ago.
+                    return 200, {"value": [{"id": label, "isRead": False,
+                                            "receivedDateTime": "2026-01-02T08:00:00Z"}]}
+                rows = [{"id": "page-%d" % n, "isRead": False,
+                         "receivedDateTime": "2026-08-2%dT10:00:00Z" % n}
+                        for n in range(self.page_rows)]
+                return 200, {"value": rows}
+            raise AssertionError("unexpected query")
+        return answer
+
+    def test_a_full_page_reports_its_own_oldest_row(self):
+        result = self.fetch()
+        self.assertEqual(result["mailPage"], {"oldest": "2026-08-20T10:00:00Z", "full": True})
+        # And the union really does reach further back, which is the whole
+        # reason the fold cannot be read off it.
+        self.assertIn("flagged", [row["id"] for row in result["mail"]])
+
+    def test_a_page_the_folder_could_not_fill_has_no_fold_at_all(self):
+        # Nothing can be hiding below a list with room to spare, so an old
+        # message turning up in one was really put there - moved in by a rule,
+        # say - and is worth announcing after all.
+        self.page_rows = 2
+        result = self.fetch()
+        self.assertFalse(result["mailPage"]["full"])
+
+
+class PhasesOfASend(unittest.TestCase):
+    """The progress a send reports, and the count it promised up front.
+
+    A bar has to be told its length before the first step or it draws itself
+    full and then rewinds, so the number is worked out from the arguments
+    before anything is sent - see graph.compose_phases. That makes it a promise
+    about a path nobody walks until later, and the two drifting apart is how a
+    bar comes to overrun itself. So every test here counts what was actually
+    emitted and holds the promise to it.
+
+    The lines go to stderr on purpose: stdout is exactly one JSON object, which
+    is what every caller of this helper parses.
+    """
+
+    def phases(self, responses, attach=(), **overrides):
+        captured = io.StringIO()
+        queue = list(responses)
+        self.calls = []
+        self.printed = []
+
+        def http(url, method="GET", data=None, json_body=None, headers=None, timeout=20):
+            self.calls.append(url)
+            return queue.pop(0) if queue else (202, {})
+
+        args = ComposeArgs()
+        args.attach = list(attach)
+        args.progress = True
+        for key, value in overrides.items():
+            setattr(args, key, value)
+
+        patched = {
+            "read_json": lambda *a, **k: {"write": True,
+                                          "scopes": "Mail.ReadWrite Mail.Send"},
+            "access_token": lambda alias, account: ("token", account),
+            "http": http,
+            "out": self.printed.append,
+        }
+        original = {name: getattr(graph, name) for name in patched}
+        for name, stub in patched.items():
+            setattr(graph, name, stub)
+        stderr = sys.stderr
+        sys.stderr = captured
+        try:
+            graph.cmd_compose(args)
+        finally:
+            sys.stderr = stderr
+            for name, value in original.items():
+                setattr(graph, name, value)
+
+        lines = [line for line in captured.getvalue().splitlines() if line.strip()]
+        return [json.loads(line)["progress"] for line in lines]
+
+    def assertCounts(self, steps):
+        """Every step counted once, in order, against one total that held."""
+        self.assertTrue(steps, "a send that reported nothing at all")
+        self.assertEqual([step["done"] for step in steps],
+                         list(range(1, len(steps) + 1)))
+        self.assertEqual({step["total"] for step in steps}, {len(steps)},
+                         "the total moved while the bar was on screen")
+
+    def test_a_plain_reply_is_the_token_and_the_request(self):
+        steps = self.phases([(202, {})])
+        self.assertEqual([step["what"] for step in steps], ["Signing in", "Sending"])
+        self.assertCounts(steps)
+
+    def test_a_reply_with_a_file_names_the_file_it_is_on(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "quote.pdf")
+        with open(path, "wb") as handle:
+            handle.write(b"%PDF-1.4")
+        steps = self.phases([(201, {"id": "D1"}), (201, {}), (202, {})], attach=[path])
+        self.assertEqual([step["what"] for step in steps],
+                         ["Signing in", "Building the message", "Attaching quote.pdf", "Sending"])
+        self.assertCounts(steps)
+
+    def test_a_forward_with_a_file_has_the_recipients_to_put_on_as_well(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "quote.pdf")
+        with open(path, "wb") as handle:
+            handle.write(b"%PDF-1.4")
+        steps = self.phases([(201, {"id": "D1"}), (200, {}), (201, {}), (202, {})],
+                            attach=[path], mode="forward", to="k@example.com")
+        self.assertEqual([step["what"] for step in steps],
+                         ["Signing in", "Building the message", "Addressing it",
+                          "Attaching quote.pdf", "Sending"])
+        self.assertCounts(steps)
+
+    def test_a_draft_stops_where_the_draft_does(self):
+        steps = self.phases([(201, {"id": "D1", "webLink": "https://outlook/d1"})], draft=True)
+        self.assertEqual([step["what"] for step in steps],
+                         ["Signing in", "Building the draft"])
+        self.assertCounts(steps)
+
+    def test_a_whole_new_message_is_one_request_with_everything_in_it(self):
+        steps = self.phases([(202, {})], mode="new", to="k@example.com",
+                            subject="Kickoff")
+        self.assertEqual([step["what"] for step in steps], ["Signing in", "Sending"])
+        self.assertCounts(steps)
+
+    def test_nobody_who_did_not_ask_is_told_anything(self):
+        # Running this helper by hand has to read exactly as it did before
+        # there were phases at all.
+        steps = self.phases([(202, {})], progress=False)
+        self.assertEqual(steps, [])
+
+    def test_a_closed_pipe_does_not_take_the_send_with_it(self):
+        """The window that asked for the phases can be shut mid-send.
+
+        The message is already leaving by then, and a broken pipe is not a
+        reason to fail it - so the rest of the send happens quietly.
+        """
+        class Closed:
+            def write(self, _text):
+                raise OSError("broken pipe")
+
+            def flush(self):
+                pass
+
+        progress = graph.Progress(True)
+        stderr = sys.stderr
+        sys.stderr = Closed()
+        try:
+            progress.step("Signing in")
+            progress.step("Sending")
+        finally:
+            sys.stderr = stderr
+        self.assertEqual((progress.done, progress.enabled), (2, False))
+
+
+class PhasesOverSmtp(unittest.TestCase):
+    """The same promise, on the transport that plans its own phases.
+
+    imapmail.compose_phases is the count and imapmail.compose is what walks it,
+    which is why graph.py asks the transport rather than repeating the
+    arithmetic - see graph.compose_phases.
+    """
+
+    def phases(self, mode="reply", draft=False):
+        import imapmail
+        emitted = []
+
+        class Counter(graph.Progress):
+            def step(self, what):
+                graph.Progress.step(self, what)
+                emitted.append(what)
+
+        class FakeSMTP:
+            def __init__(self, *a, **k):
+                pass
+
+            def ehlo(self):
+                pass
+
+            def starttls(self):
+                pass
+
+            def auth(self, *a, **k):
+                pass
+
+            def send_message(self, note):
+                pass
+
+            def quit(self):
+                pass
+
+        class FakeClient:
+            """Enough of an IMAP client for an APPEND, and nothing else."""
+
+            def append(self, *a, **k):
+                return "OK", [b"done"]
+
+        progress = Counter(False)
+        saved = (imapmail.fetch_parsed, imapmail.smtplib.SMTP, imapmail.connect,
+                 imapmail.resolve_special, imapmail.close)
+        imapmail.fetch_parsed = imap_fetch(imap_message(body="the original", cc=""))
+        imapmail.smtplib.SMTP = FakeSMTP
+        imapmail.connect = lambda *a, **k: FakeClient()
+        imapmail.resolve_special = lambda client, which, account: "Drafts"
+        imapmail.close = lambda client: None
+        try:
+            imapmail.compose({"username": "me@example.com"}, "token", "1", mode,
+                             "here you go", ["k@example.com"], draft, None, "Kickoff",
+                             None, progress)
+        finally:
+            (imapmail.fetch_parsed, imapmail.smtplib.SMTP, imapmail.connect,
+             imapmail.resolve_special, imapmail.close) = saved
+        return emitted, progress
+
+    def test_a_reply_reads_the_original_first(self):
+        emitted, progress = self.phases()
+        self.assertEqual(emitted, ["Reading the original", "Building the message",
+                                   "Connecting to " + imapmail_host(), "Sending"])
+        self.assertEqual(len(emitted), imapmail_phases(False, False))
+        self.assertEqual(progress.total, len(emitted))
+
+    def test_a_new_message_has_no_original_to_read(self):
+        emitted, _progress = self.phases(mode="new")
+        self.assertEqual(emitted[0], "Building the message")
+        self.assertEqual(len(emitted), imapmail_phases(True, False))
+
+    def test_a_draft_is_an_append_rather_than_a_conversation(self):
+        emitted, _progress = self.phases(draft=True)
+        self.assertEqual(emitted[-1], "Saving it to Drafts")
+        self.assertEqual(len(emitted), imapmail_phases(False, True))
+
+    def test_graph_asks_the_transport_for_the_count_it_promises(self):
+        # The one number the two sides share. A copy of this arithmetic in
+        # graph.py is how a bar comes to overrun itself.
+        for new in (True, False):
+            for draft in (True, False):
+                self.assertEqual(graph.compose_phases(True, new, draft, [], []),
+                                 1 + imapmail_phases(new, draft))
+
+
+def imapmail_phases(new, draft):
+    import imapmail
+    return imapmail.compose_phases(new, draft)
+
+
+def imapmail_host():
+    import imapmail
+    return imapmail.DEFAULT_SMTP_HOST
 
 
 class RecipientsWithNames(unittest.TestCase):

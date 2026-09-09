@@ -26,7 +26,7 @@ Column {
   // window's keys and none of its folder or scrolling ones, so it asks for the
   // two sections it can honour rather than showing a list that is mostly
   // wrong. Everything, in the window.
-  property var sections: ["Moving", "Scrolling", "Doing", "Folders"]
+  property var sections: ["Moving", "Scrolling", "Doing", "Folders", "Outbox"]
 
   // Keys this host does not handle, however they are filed above. The popup
   // shares the ladder's j/k/Enter/Esc/Tab but has no reading pane to step
@@ -84,7 +84,14 @@ Column {
     ["n / N", "New folder, inside this one / at the top level", "Folders"],
     ["R", "Rename the folder under the cursor", "Folders"],
     ["m", "Put it under another folder, or back at the top", "Folders"],
-    ["x", "Delete it, and the mail in it", "Folders"]
+    ["x", "Delete it, and the mail in it", "Folders"],
+
+    // And in the outbox they are about a message that has not left yet. Its
+    // own section for the same reason the folder keys have one: what a key
+    // means here depends on what is on screen.
+    ["Enter", "Send it again, or open one that is still waiting", "Outbox"],
+    ["e", "Put it back in the compose box, as you left it", "Outbox"],
+    ["x", "Throw it away without sending it", "Outbox"]
   ]
 
   spacing: Style.spacing.md

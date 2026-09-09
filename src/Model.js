@@ -385,7 +385,24 @@ function unifiedFolderName(id) {
   return ""
 }
 
-function folderRows(views, selected, activeAlias, unified) {
+// The id the Outbox row carries in the folder tree.
+//
+// A control character, deliberately: the tree's other ids are Graph ids and
+// IMAP folder paths, both of which a person can influence - a mailbox may well
+// hold a folder called "Outbox" - and this one has to be unmistakable, because
+// what it selects is not a folder on any server but this shell's own queue.
+// Nothing can be typed here and nothing on a server can collide with it.
+var OUTBOX_FOLDER = "\u0001outbox"
+
+// ...and the same string, as something QML can ask for. Every other thing this
+// file lends the window is a function, and a plain variable read across the
+// import is one more rule about how a QML JavaScript library behaves than this
+// plugin needs to depend on.
+function outboxFolder() {
+  return OUTBOX_FOLDER
+}
+
+function folderRows(views, selected, activeAlias, unified, outbox) {
   var rows = []
   var list = views || []
   var multi = list.length > 1
@@ -477,6 +494,29 @@ function folderRows(views, selected, activeAlias, unified) {
         placeholder: false
       })
     }
+  }
+
+  // The outbox, under everything. Not a folder and not one mailbox's - it is
+  // one queue for every mailbox the widget carries, which is why it sits at
+  // the bottom at depth 0 rather than in a tree.
+  //
+  // Drawn only when there is something in it, or while it is the thing being
+  // looked at. A permanent row for a queue that is empty nearly all the time
+  // is a row that means nothing, and one that vanishes the moment the last
+  // message leaves would take the open view out from under the reader.
+  var queue = outbox || {}
+  var waiting = Number(queue.count || 0)
+  if (waiting > 0 || queue.showing === true) {
+    rows.push({
+      kind: "folder", key: "outbox", alias: "", id: OUTBOX_FOLDER, name: "Outbox",
+      unread: waiting, total: 0, depth: 0, color: "", short: "",
+      isInbox: false, placeholder: false,
+      selected: queue.showing === true,
+      // What the count is drawn in. A message that did not go out is the one
+      // thing in this tree that wants a person rather than time.
+      alert: Number(queue.failed || 0) > 0,
+      outbox: true
+    })
   }
   return rows
 }
@@ -1503,6 +1543,116 @@ function stackAllDay(bars) {
     bars[i].row = placed
   }
   return bars
+}
+
+// ---- the outbox -----------------------------------------------------------
+//
+// What a message on its way out says about itself: what to call it, who it is
+// going to, which phase it is in, and how far along that is. Here rather than
+// in the store or the row, for the usual reason - a state machine drawn on
+// screen is worth a test, and neither a QML binding nor a Process handler is
+// testable at all.
+
+// What to call a queued message. A reply inherits its subject from the message
+// it answers and the person never typed one, so there would otherwise be
+// nothing to draw the row with - and "(no subject)" for every reply in the
+// queue is a list nobody can read.
+//
+// The prefix is the one the helper will put on it, so the row says what will
+// arrive rather than what was typed. A subject that already carries the prefix
+// is left alone, which is what makes replying to a reply "Re: x" and not
+// "Re: Re: x".
+function outboxTitle(mode, subject, mail) {
+  var typed = String(subject || "").trim()
+  var original = mail && mail.subject ? String(mail.subject).trim() : ""
+  if (String(mode) === "new") return typed !== "" ? typed : "(no subject)"
+  var base = original !== "" ? original : typed
+  var prefix = String(mode) === "forward" ? "Fwd: " : "Re: "
+  if (base === "") return prefix.replace(/:\s$/, "")
+  if (base.toLowerCase().indexOf(prefix.trim().toLowerCase()) === 0) return base
+  return prefix + base
+}
+
+// Who it is going to, for the line under the title. The typed field wins
+// because it is what somebody chose; a plain reply has an empty one and goes
+// back to whoever wrote the original.
+//
+// Handed on exactly as it was typed, and left to the row to elide. Not split
+// into addresses and counted: parsing a To field correctly means scanning it
+// for separators that are outside quotes and angle brackets, which is a rule
+// that already lives in three places - graph.py's split_address_list,
+// imapmail's, and lastAddressFragment below - and a fourth copy of it here
+// would buy nothing but "and 2 more" on a line that is elided anyway.
+function outboxRecipient(to, mail) {
+  var typed = String(to || "").trim()
+  if (typed !== "") return typed
+  return mail ? senderName(mail) : ""
+}
+
+// The queue as rows to draw. One job becomes one row and nothing is merged or
+// hidden: a failed send has to stay visible until somebody deals with it, and
+// three queued messages are three things waiting.
+function outboxRows(jobs) {
+  var rows = []
+  var list = jobs || []
+  for (var i = 0; i < list.length; i++) {
+    var job = list[i]
+    var state = String(job.state || "queued")
+    var total = Number(job.total) || 0
+    var done = Number(job.done) || 0
+    rows.push({
+      id: String(job.id),
+      alias: String(job.alias || ""),
+      title: String(job.title || "") !== "" ? String(job.title) : "(no subject)",
+      recipient: String(job.recipient || ""),
+      state: state,
+      sending: state === "sending",
+      failed: state === "failed",
+      // What the helper said it was doing, or what the row is waiting for. A
+      // send that has not reported a phase yet is still "Sending": the process
+      // is running, and saying "Waiting" under a moving bar would be a lie.
+      status: state === "failed" ? "Not sent"
+            : state === "sending" ? (String(job.what || "") !== "" ? String(job.what) : "Sending")
+            : "Waiting to send",
+      // 0 to 1, and only ever what the helper counted. An indeterminate bar is
+      // drawn for a send that has not said anything yet rather than a made-up
+      // number moving on a timer, because a bar that advances while nothing
+      // happens is how "it is nearly done" comes to mean nothing.
+      progress: state === "sending" && total > 0 ? Math.min(1, done / total) : 0,
+      determinate: state === "sending" && total > 0,
+      attachments: (job.attachments || []).length,
+      error: String(job.error || ""),
+      code: String(job.code || ""),
+      at: Number(job.at) || 0
+    })
+  }
+  return rows
+}
+
+// The queue in one line, for the bar - which has no room for the rows and
+// still has to say that something is on its way out, or that something failed
+// while nobody was looking.
+//
+// A failure leads. Two queued messages will send themselves; one that did not
+// is the only state here that wants a person.
+function outboxSummary(jobs) {
+  var rows = outboxRows(jobs)
+  var failed = 0
+  var waiting = 0
+  var sending = null
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].failed) failed++
+    else if (rows[i].sending) sending = rows[i]
+    else waiting++
+  }
+  if (failed > 0)
+    return failed === 1 ? "1 message was not sent" : failed + " messages were not sent"
+  if (sending) {
+    var behind = waiting > 0 ? " · " + waiting + " waiting" : ""
+    return sending.status + " " + sending.title + behind
+  }
+  if (waiting > 0) return waiting === 1 ? "1 message waiting to send" : waiting + " messages waiting to send"
+  return ""
 }
 
 // ---- one meeting -----------------------------------------------------------

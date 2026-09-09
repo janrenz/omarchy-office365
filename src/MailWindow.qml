@@ -90,6 +90,9 @@ Item {
     // and callLater because the mailbox that was just selected has to have
     // become the active one before startNewMessage reads it.
     if (messageId === "" && action === "new") Qt.callLater(root.startNewMessage)
+    // The queue, which is where the bar's outbox line points: it can say that
+    // a message did not go out but has no business retrying it.
+    if (payload.outbox === true) openOutbox()
   }
 
   // What to do with a message once it is on screen. Kept to the actions the
@@ -269,6 +272,7 @@ Item {
   }
 
   readonly property string folderTitle: {
+    if (mailView.outboxShowing) return "Outbox"
     if (!mailView.configured) return "Office 365"
     // A list of hits is not a folder, and naming one over it is the same
     // mistake as naming one mailbox over three - see below. The query is what
@@ -468,6 +472,7 @@ Item {
     // had room to become a sidebar is drawn by the sidebar's copy, and the
     // keys have to act on the one on screen.
     if (pane === "folders") return columns.folderPicking ? drawerFolderScroll : folderScroll
+    if (outboxShowing) return outboxScroll
     return listScroll
   }
 
@@ -586,6 +591,12 @@ Item {
       scrollBy(readerScroll, step * lineStep)
       return
     }
+    // The queue is in the list's place, so the list's keys are about it.
+    if (outboxShowing) {
+      outboxList.moveCursor(step)
+      revealRow(outboxScroll, outboxList.cursorRow())
+      return
+    }
     var count = mailView.mail.length
     if (count === 0) { mailCursor = -1; return }
     mailCursor = mailCursor < 0 ? (step > 0 ? 0 : count - 1)
@@ -611,6 +622,16 @@ Item {
     // not what Return was pressed at.
     if (pane === "agenda") return
     if (pane === "message") return
+    // In the queue, Return is "do the obvious thing with this": send a failed
+    // message again, or open one that has not gone yet for editing. There is
+    // nothing to open a queued message *into* otherwise - it has no reading
+    // pane, it is a message being written.
+    if (outboxShowing) {
+      var queued = outboxRow()
+      if (queued && queued.failed) retryOutboxRow()
+      else if (queued) editOutboxRow()
+      return
+    }
     var rows = mailView.mail
     if (mailCursor >= 0 && mailCursor < rows.length) {
       mailView.showPreview(rows[mailCursor])
@@ -763,6 +784,10 @@ Item {
     // is the only thing there to delete.
     if (folderActing) return
     if (pane === "folders") { startFolderAction("delete"); return }
+    // In the queue it throws the message away rather than deleting mail in a
+    // folder nobody is looking at. A send already on the wire is refused by
+    // the store, which is the honest answer: it may already have arrived.
+    if (outboxShowing) { discardOutboxRow(); return }
     if (moving || pane !== "mail") return
     var rows = mailView.mail
     if (mailCursor < 0 || mailCursor >= rows.length) return
@@ -792,6 +817,9 @@ Item {
     // A tree that was asked for is the layer Escape takes back first, whether
     // it ended up over the list or beside it.
     if (folderDrawer) { folderDrawer = false; pane = "mail"; return }
+    // The queue, back to the folder that was open behind it. Nothing was
+    // fetched to show it and nothing is fetched to leave.
+    if (outboxShowing) { leaveOutbox(); return }
     // The calendar, and whatever was opened out of it, before the mail behind
     // it. A message left open while the agenda was asked for is not what
     // Escape was pressed at, and the rungs below would close it unseen.
@@ -834,7 +862,63 @@ Item {
     searchBar.takeFocus()
   }
 
+  // ---- the outbox ---------------------------------------------------------
+  //
+  // The queue stands in the list's column, in the place of a folder, because
+  // it answers the same question there: what is waiting in here. It is not a
+  // folder on any server - see Store.qml - so nothing is fetched for it and
+  // the folder every mailbox was on is left exactly as it was, which is what
+  // makes leaving the outbox a matter of putting the list back rather than
+  // re-reading a mailbox.
+  readonly property bool outboxShowing: mailView.outboxShowing
+
+  function openOutbox() {
+    mailView.outboxShowing = true
+    // A message open in the reader while a queue is being read is the previous
+    // thing on screen, and on a narrow window it is what the list gives way
+    // to - so the outbox would open behind it.
+    mailView.closePreview()
+    outboxList.cursorIndex = -1
+    pane = "mail"
+    if (columns.folderPicking) folderDrawer = false
+  }
+
+  function leaveOutbox() {
+    mailView.outboxShowing = false
+    outboxList.cursorIndex = -1
+  }
+
+  // The row the outbox keys act on, or null.
+  function outboxRow() {
+    return outboxShowing ? outboxList.currentRow : null
+  }
+
+  function retryOutboxRow() {
+    var row = outboxRow()
+    if (row && row.failed) mailView.retrySend(row.id)
+  }
+
+  function editOutboxRow() {
+    var row = outboxRow()
+    if (!row) return
+    mailView.editSend(row.id)
+    // The box opens where the mail is written, and the queue behind it is not
+    // where the words now are. A message taken back out of it is being written
+    // again, not waiting.
+    if (mailView.composing) leaveOutbox()
+  }
+
+  function discardOutboxRow() {
+    var row = outboxRow()
+    if (row && !row.sending) mailView.discardSend(row.id)
+  }
+
   function pickFolder(alias, folderId) {
+    // The queue, which is not a folder and fetches nothing.
+    if (String(folderId) === Model.outboxFolder()) { openOutbox(); return }
+    // Anything else is a real folder, so the outbox stops standing in front
+    // of the list.
+    leaveOutbox()
     // "*" is one of the merged rows at the top of the tree - see
     // Model.folderRows - and means this folder in every mailbox.
     if (String(alias) === "*") mailView.selectFolderEverywhere(folderId)
@@ -1209,6 +1293,18 @@ Item {
             if (text === "m") { root.startFolderAction("move"); return }
             if (text === "x") { root.startFolderAction("delete"); return }
           }
+          // In the queue the letters are about a message that has not left
+          // yet. e edits it, and x - which the catcher turns into
+          // onDeleteRequested - discards it.
+          //
+          // The rest are refused rather than passed through: the list they
+          // would act on is a folder that is not on screen, so u, F, m, s and
+          // the others would flag, move or file a message nobody can see.
+          // Only what is about the window itself carries on below.
+          if (root.outboxShowing) {
+            if (text === "e") { root.editOutboxRow(); return }
+            if ("fumtaFsc!/".indexOf(text) >= 0) return
+          }
           // Only where there is a split to filter on. A key that answers
           // nothing is indistinguishable from a key that is broken.
           if (text === "f") { if (mailView.canFocus) mailView.focusedOnly = !mailView.focusedOnly }
@@ -1327,10 +1423,15 @@ Item {
                   font.pixelSize: Style.font.caption
                 }
 
-                // "Sent", or where the draft went. Cleared by the next compose.
+                // "In the outbox", or where the draft went. Cleared by the
+                // next compose.
+                //
+                // Superseded by the queue's own row the moment there is one:
+                // "Sending Re: Rechnung Q3" says everything "In the outbox"
+                // does and more, in a place a narrow window still draws.
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
-                  visible: mailView.composeNotice !== ""
+                  visible: mailView.composeNotice !== "" && mailView.outboxSummary === ""
                   width: Math.min(implicitWidth, header.width * 0.45)
                   text: mailView.composeNotice
                   textFormat: Text.PlainText
@@ -1339,6 +1440,7 @@ Item {
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
+
               }
             }
 
@@ -1534,6 +1636,64 @@ Item {
           // window has to be able to hand it the keyboard focus the instant /
           // is pressed, and because what is typed into it survives the row
           // being closed and reopened only if the row is the same row.
+          // What the queue is doing, in a row of its own.
+          //
+          // Its own row for the reason SearchBar has one: the header's title
+          // and everything grouped beside it is anchored to the left edge of
+          // the pills, and on a narrow window the pills take the whole row -
+          // the title, and anything sharing its space, is squeezed to nothing
+          // and simply is not drawn. A send is exactly the thing somebody
+          // needs to see on a half-screen window, so it cannot live there.
+          //
+          // Nothing at all when the queue is empty and the last send has been
+          // acknowledged, which is nearly always - and nothing while the
+          // Outbox itself is the open view, where the rows say more than a
+          // summary of them could.
+          Rectangle {
+            id: outboxBar
+            width: parent.width
+            readonly property bool sending: mailView.outboxSummary !== ""
+            readonly property string line: sending ? mailView.outboxSummary : mailView.sendNotice
+            visible: mailView.configured && root.settingsError === ""
+                     && line !== "" && !mailView.outboxShowing
+            implicitHeight: visible ? outboxLine.implicitHeight + Style.spacing.sm * 2 : 0
+            radius: Style.space(5)
+            color: outboxBarHover.containsMouse
+              ? Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.08)
+              : "transparent"
+
+            Behavior on color { ColorAnimation { duration: 120 } }
+
+            Text {
+              id: outboxLine
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.spacing.sm
+              anchors.rightMargin: Style.spacing.sm
+              // The glyph mail clients have drawn an outbox with since Outlook
+              // did: an envelope on its way somewhere.
+              text: "\u{F048A}  " + outboxBar.line
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              // The accent only for the state that wants a person: a message
+              // on its way is information, one that did not go is a problem,
+              // and "Sent" is worth seeing.
+              color: mailView.outboxFailed > 0 || !outboxBar.sending
+                ? Color.accent : Qt.darker(Color.foreground, 1.5)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            MouseArea {
+              id: outboxBarHover
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.openOutbox()
+            }
+          }
+
           SearchBar {
             id: searchBar
             width: parent.width
@@ -1619,8 +1779,12 @@ Item {
             // Whether the list is standing aside for the reading pane - or for
             // a message being written, which wants the same column and in a
             // window too narrow for two of them wants the list's.
+            // `composing` rather than `composingNew`: a reply taken back out
+            // of the outbox for editing has no message open above it, so on a
+            // narrow window there was no column for the box to appear in and
+            // Edit looked like a button that did nothing.
             readonly property bool listGivesWay: !showReader
-              && (mailView.previewMail !== null || mailView.composingNew
+              && (mailView.previewMail !== null || mailView.composing
                   || root.pane === "agenda")
             // The calendar asked for by name. It goes where the reading pane's
             // content goes, so it stands in front of a message rather than
@@ -1726,7 +1890,11 @@ Item {
               width: columns.listWidth
               // Also the very first fetch, which had nothing at all to show
               // for itself - an empty column while the mailbox loaded.
-              visible: !columns.folderPicking
+              //
+              // Never over the queue: nothing is being fetched for it, so
+              // placeholder rows there would be waiting for an answer that is
+              // not coming.
+              visible: !columns.folderPicking && !root.outboxShowing
                        && (mailView.switchingFolder
                            || (mailView.mail.length === 0 && mailView.loading))
               fg: Color.foreground
@@ -1760,11 +1928,39 @@ Item {
               function onContentHeightChanged() { columns.askForMore() }
             }
 
+            // The queue, in the list's column and in its place. It is the
+            // only thing here that is not a folder of mail, which is exactly
+            // why it belongs in this column: from where the reader sits it is
+            // one more place to look in.
+            ScrollView {
+              id: outboxScroll
+              width: columns.listWidth
+              height: columns.height
+              visible: !columns.folderPicking && root.outboxShowing
+              clip: true
+
+              OutboxList {
+                id: outboxList
+                width: columns.listWidth
+                rows: mailView.outboxRows
+                fg: Color.foreground
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onRetryRequested: function(jobId) { mailView.retrySend(jobId) }
+                onEditRequested: function(jobId) {
+                  mailView.editSend(jobId)
+                  if (mailView.composing) root.leaveOutbox()
+                }
+                onDiscardRequested: function(jobId) { mailView.discardSend(jobId) }
+              }
+            }
+
             ScrollView {
               id: listScroll
               width: columns.listWidth
               height: columns.height
               visible: !columns.folderPicking && !columns.listGivesWay
+                       && !root.outboxShowing
                        && !mailView.switchingFolder
                        && !(mailView.mail.length === 0 && mailView.loading)
               clip: true

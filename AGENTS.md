@@ -39,6 +39,8 @@ src/MailWindow.qml    The window: folders, list, reading pane. ~1.7k lines.
 src/RecipientField.qml
                       A To/Cc field that completes from the address book.
 src/MailList.qml      A ListView, deliberately — read the comment at the top.
+src/OutboxList.qml    Mail on its way out, in the list's own column. Three
+                      states, and what each of them offers.
 src/SearchBar.qml     The window's search field and the line under it saying
                       what came back. Its own row, not a header control: the
                       header collapses when its pills outgrow the width.
@@ -158,6 +160,46 @@ keeps using the old client id or authority.
   its flags is guarded with a leading space in `asText()`; and `-r` needs the id
   a previous send printed with `-p`, which is what makes several messages in one
   conversation update one toast instead of stacking.
+- **Sending happens in the store, and only sending.** `Send` puts a job in
+  `Store.outbox` and the compose box closes; the store runs one send at a time,
+  in the order they were written, for the reason fetches are serialised — a
+  send is a token refresh too. It is in the store rather than in the host
+  because the window can be closed while a message is leaving, and a send that
+  died with the window it was written in is a message silently lost. **Save as
+  draft is still inline in `Service.qml`**, deliberately: it ends by opening
+  the draft in Outlook, so its answer has to come back to the host that asked
+  and there is nothing to carry on doing in the background. A failure stays in
+  the queue with its error, `takeBackSend` hands the whole job back to the
+  compose box, and the job carries `mail`, `title` and `recipient` that the
+  store never reads — a reply's subject belongs to the message it answers, and
+  the store has no idea what that is.
+- **The send phases are the helper's, and the total is promised before the
+  first one.** `compose --progress` writes one JSON object per line to
+  *stderr* — stdout is exactly one object, which is invariant 5 — and
+  `Store.qml` reads them with a `SplitParser`, keeping any line that is not a
+  phase as the error of last resort. `graph.compose_phases` counts the steps
+  before the token is refreshed, because a bar told its length after the first
+  step draws itself full and then rewinds; it asks `imapmail.compose_phases`
+  for the IMAP number rather than repeating the arithmetic, and
+  `dev/test-python.py` counts what was actually emitted against what was
+  promised. A phase added without a step in that count is a bar that overruns
+  itself.
+- **The Outbox row in the folder tree is not a folder.** `Model.outboxFolder()`
+  is a control character precisely so nothing on a server can collide with it —
+  a mailbox may well hold a folder called "Outbox" — and `pickFolder`
+  intercepts it before `selectFolder` can try to fetch it. It is drawn only
+  while the queue has something in it *or* while it is the open view, or the
+  row would go out from under the reader as the last message left. While it is
+  showing, the letters that act on a row are refused rather than passed
+  through: the list they would reach is a folder that is not on screen.
+- **The notifier's fold is `mailPage`, and it has to be.** A fetch returns the
+  folder's page *and* the newest unread and flagged mail, and those two exist
+  to reach messages from far below the page. `Store.notifyFloor` used to
+  measure the fold against that union, which put it weeks in the past on any
+  mailbox with old unread mail — so deleting four rows, which refills the list
+  from below the fold, set off four toasts about mail from last month. The
+  helpers report `{"oldest", "full"}` for the unfiltered query alone, and only
+  the helper can: nothing downstream can tell which rows came from which query.
 - **The poll gate's signals arrive late.** For the first second or two of a
   shell's life UPower has no devices, NetworkManager reports `Unknown`
   connectivity and `canCheckConnectivity` is false - measured, on this machine.

@@ -1298,9 +1298,21 @@ def snapshot(account, token, top, folder_id="", want_folders=True):
         exists, validity = select(client, mailbox, readonly=True)
 
         collected = {}
+        # How far back the folder's own page reaches, and whether anything is
+        # behind it - see graph.py's mailPage, and Store.qml's notifyFloor. The
+        # searches below deliberately reach past the page, so the union cannot
+        # be measured for this.
+        page_oldest = ""
+        page_full = False
         try:
-            for row in read_rows(client, mailbox, validity, sequence_window(exists, top), by_uid=False):
+            page = read_rows(client, mailbox, validity, sequence_window(exists, top), by_uid=False)
+            for row in page:
                 collected[row["id"]] = row
+            # A page as long as was asked for has more behind it; a short one
+            # means the folder ran out and nothing can be below the fold.
+            page_full = len(page) >= top
+            dates = [row["received"] for row in page if row["received"]]
+            page_oldest = min(dates) if dates else ""
         except TransportError as error:
             warnings.append({"scope": "mail", "message": error.message})
 
@@ -1326,6 +1338,7 @@ def snapshot(account, token, top, folder_id="", want_folders=True):
             "folderId": mailbox,
             "folderName": name,
             "mail": sorted(collected.values(), key=lambda row: row["received"], reverse=True),
+            "mailPage": {"oldest": page_oldest, "full": page_full},
             "warnings": warnings,
         }
     finally:
@@ -1790,8 +1803,22 @@ def forwarded_original(original):
     return "\n".join(lines) + "\n\n" + original_text(original)
 
 
+def compose_phases(new, draft):
+    """How many phases `compose` will report over this transport.
+
+    Asked for by graph.py before the first one is announced, so that the bar
+    knows its length up front - see graph.compose_phases. It lives here rather
+    than there because the phases do: a copy of this arithmetic in the caller
+    is a bar that overruns itself the first time a step is added.
+    """
+    # The original, for anything that answers one; the message itself; and then
+    # either an APPEND to Drafts or an SMTP conversation, which is worth two
+    # because the sign-in and the upload are separately slow.
+    return (0 if new else 1) + 1 + (1 if draft else 2)
+
+
 def compose(account, token, message_id, mode, comment, to_addresses, draft, attachments=None,
-            subject_line="", cc_addresses=None):
+            subject_line="", cc_addresses=None, progress=None):
     """Reply, reply all, forward, or write a message of your own.
 
     Graph builds the quoting, the recipients and the threading headers itself
@@ -1818,10 +1845,18 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
     """
     new = mode == "new"
     forward = mode == "forward"
+    # The phases this transport takes, on top of whatever the caller has
+    # already counted (its token). `progress` is optional and duck-typed - a
+    # caller that wants nothing said passes nothing, and everything below
+    # simply does not report.
+    if progress:
+        progress.plan(progress.done + compose_phases(new, draft))
     # Not fetched for a new message: there is no original, and asking the
     # server for message id "" is a round trip that can only fail.
     original, carried = {}, []
     if not new:
+        if progress:
+            progress.step("Reading the original")
         parsed, prefix, cut = fetch_parsed(
             account, token, message_id,
             FORWARD_FETCH_BYTES if forward else MAX_MESSAGE_BYTES)
@@ -1861,6 +1896,8 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
     if not recipients:
         raise TransportError("no_recipient", "There is nobody to send this to")
 
+    if progress:
+        progress.step("Building the message")
     note = EmailMessage(policy=email.policy.SMTP)
     note["From"] = me
     note["To"] = ", ".join(recipients)
@@ -1926,6 +1963,8 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
     if draft:
         client = None
         try:
+            if progress:
+                progress.step("Saving it to Drafts")
             client = connect(account, token)
             folder = resolve_special(client, "drafts", account)
             try:
@@ -1942,6 +1981,8 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
     host = str(account.get("smtp_host") or DEFAULT_SMTP_HOST)
     port = int(account.get("smtp_port") or DEFAULT_SMTP_PORT)
     try:
+        if progress:
+            progress.step("Connecting to " + host)
         server = smtplib.SMTP(host, port, timeout=TIMEOUT)
         try:
             server.ehlo()
@@ -1949,6 +1990,10 @@ def compose(account, token, message_id, mode, comment, to_addresses, draft, atta
             server.ehlo()
             server.auth("XOAUTH2", _sasl_xoauth2(me, token, binary=False),
                         initial_response_ok=True)
+            if progress:
+                # The message and every file on it, up the uplink. On a mail
+                # with three attachments this is the whole wait.
+                progress.step("Sending")
             server.send_message(note)
         finally:
             try:

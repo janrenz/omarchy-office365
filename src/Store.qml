@@ -673,18 +673,30 @@ Item {
     defaultExec: root.summonArgv("{}")
   }
 
-  // The oldest message each fetch has already had in view, as {key: millis}.
+  // The fold each fetch left behind, as {key: millis}: how old a message may
+  // be and still be one that has just arrived.
   //
-  // A fetch carries the newest `mails` messages and stops, so a message older
-  // than every one of them was below the fold rather than absent. It did not
-  // arrive; something above it left, and the list refilled down to it. Deleting
-  // a row is the ordinary way that happens, and opening a window on a mailbox
-  // the bar was reading five messages of is another - the notifier has never
-  // seen what the extra twenty carried, and unseen is all "new" means to it.
+  // A fetch carries the newest `mails` messages of the folder and stops, so a
+  // message older than every one of them was below the fold rather than
+  // absent. It did not arrive; something above it left, and the list refilled
+  // down to it. Deleting a row is the ordinary way that happens, and opening a
+  // window on a mailbox the bar was reading five messages of is another - the
+  // notifier has never seen what the extra twenty carried, and unseen is all
+  // "new" means to it.
   //
-  // Zero when the last answer did not fill the cap: nothing can hide below a
-  // list with room to spare, so an old message turning up in one was really
-  // put there - moved in by a rule, say - and is worth announcing after all.
+  // Zero when the page did not fill: nothing can hide below a list with room
+  // to spare, so an old message turning up in one was really put there - moved
+  // in by a rule, say - and is worth announcing after all.
+  //
+  // **It is the folder page's own fold, and the helper is the only thing that
+  // can say where that is.** The `mail` in an answer is the union of every
+  // query the fetch made, and the unread and flagged ones exist precisely to
+  // reach messages from far below the page - so measuring the fold against the
+  // union put it weeks in the past on any mailbox with old unread mail in it,
+  // which let through exactly what this guard is for: delete four rows, the
+  // list refills from below the fold, and four toasts go off about mail from
+  // last month. So the fold is `mailPage` now - see graph.py's fetch_account
+  // and imapmail.snapshot - and this only remembers what they reported.
   property var notifyFloor: ({})
 
   // What the helper will read however much is asked of it - MAIL_CAP in
@@ -747,7 +759,6 @@ Item {
 
     // See notifyFloor: how old a message may be and still be one that arrived.
     var floor = Number(notifyFloor[key]) || 0
-    var oldest = 0
 
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i]
@@ -758,7 +769,6 @@ Item {
       present.push(id)
       var when = Model.parseDate(row.received)
       var at = when ? when.getTime() : 0
-      if (at > 0 && (oldest === 0 || at < oldest)) oldest = at
       // Deleted here and not yet gone from the server's answer. Nothing on
       // screen still shows it, so nothing should announce it either.
       if (deletedHere[id] === true) continue
@@ -786,15 +796,16 @@ Item {
       })
     }
 
-    // A full answer means there is more behind it, and its oldest row is the
-    // fold. A short one means the mailbox ran out, so there is no fold. Only
-    // with a cap to compare against, though: without the spec the two cannot
-    // be told apart, and the floor already recorded is the better guess.
-    var cap = spec ? Math.min(Number(spec.mails) || 0, mailCeiling) : 0
-    if (cap > 0) {
+    // What the helper said about the page it read: `full` if there is more
+    // behind it, and the oldest row it carried. A helper that said nothing at
+    // all leaves the fold where it was rather than guessing from the union of
+    // the queries, which is the mistake this used to make.
+    var page = account.mailPage || null
+    if (page) {
       var nextFloor = {}
       for (var f in notifyFloor) nextFloor[f] = notifyFloor[f]
-      nextFloor[key] = rows.length >= cap ? oldest : 0
+      var edge = Model.parseDate(page.oldest)
+      nextFloor[key] = page.full === true && edge ? edge.getTime() : 0
       notifyFloor = nextFloor
     }
 
@@ -1123,6 +1134,271 @@ Item {
       }
       root.actionNotice = moveProc.destination !== "" ? "Moved to " + moveProc.destination : "Moved"
       root.refresh([moveProc.mailbox])
+    }
+  }
+
+  // ---- the outbox ---------------------------------------------------------
+  //
+  // Mail on its way out, and the one queue for the whole shell.
+  //
+  // Sending used to happen in the host that pressed the button: Service.qml
+  // ran the helper, and every control in the compose box was disabled until it
+  // came back. That is a token refresh, a message with its attachments going
+  // up somebody's uplink, and on the IMAP path an SMTP conversation as well -
+  // twenty seconds is ordinary and a minute is not unusual. For all of it the
+  // window said "Sending..." and took no keys, so the thing to do with a mail
+  // client while a mail was leaving it was wait.
+  //
+  // Now Send hands the message over and the box closes at once. The queue is
+  // here rather than in the host for two reasons: the window is one of several
+  // hosts and it can be closed, and a send that dies because somebody shut the
+  // window they wrote it in is a message silently lost. Here it outlives the
+  // window, the bar can say how many are waiting, and a failure has somewhere
+  // to sit until the person who wrote it decides what to do about it.
+  //
+  // What is *not* here: "Save as draft". It ends by opening the draft in
+  // Outlook, so its answer has to arrive back in the host that asked for it,
+  // and there is nothing to wait for in the background - see Service.qml.
+  //
+  // One job:
+  //   { id, alias, mode, messageId, to, cc, subject, text, attachments,
+  //     demo, title, recipient,
+  //     state: "queued" | "sending" | "failed",
+  //     what, done, total, error, code, at }
+  // `title` and `recipient` are for drawing the row and are never read here -
+  // a reply's subject belongs to the message it answers, which the host has
+  // and the store does not.
+  property var outbox: []
+  property int outboxSerial: 0
+
+  // Sent, and gone from the queue. Hosts refresh on this rather than on the
+  // press: what is in Sent Items is what the next fetch brings back. `notice`
+  // says what rode along with it, because a forward carrying files is worth
+  // more than "Sent".
+  signal sendFinished(string jobId, string notice)
+  // Still in the queue, with its error, waiting to be retried or discarded.
+  signal sendFailed(string jobId, string message)
+
+  readonly property int outboxFailed: {
+    var n = 0
+    for (var i = 0; i < outbox.length; i++)
+      if (outbox[i].state === "failed") n++
+    return n
+  }
+
+  function outboxJob(jobId) {
+    var wanted = String(jobId)
+    for (var i = 0; i < outbox.length; i++)
+      if (String(outbox[i].id) === wanted) return outbox[i]
+    return null
+  }
+
+  // Replace one job, by id. The list is copied rather than mutated in place
+  // because QML notices an assignment and does not notice a write into an
+  // array it already has - a progress line that changed a row without
+  // replacing the list left the bar sitting where it was.
+  function patchJob(jobId, patch) {
+    var wanted = String(jobId)
+    var next = []
+    for (var i = 0; i < outbox.length; i++) {
+      var job = outbox[i]
+      if (String(job.id) !== wanted) { next.push(job); continue }
+      var merged = {}
+      for (var k in job) merged[k] = job[k]
+      for (var j in patch) merged[j] = patch[j]
+      next.push(merged)
+    }
+    outbox = next
+  }
+
+  function dropJob(jobId) {
+    var wanted = String(jobId)
+    var next = []
+    for (var i = 0; i < outbox.length; i++)
+      if (String(outbox[i].id) !== wanted) next.push(outbox[i])
+    outbox = next
+  }
+
+  // Put a message in the queue. Answers the job's id, which is what a host
+  // holds on to if it wants to follow this one.
+  function queueSend(job) {
+    outboxSerial = outboxSerial + 1
+    var id = String(outboxSerial)
+    var queued = {
+      id: id,
+      alias: String(job.alias || ""),
+      mode: String(job.mode || "reply"),
+      messageId: String(job.messageId || ""),
+      to: String(job.to || ""),
+      cc: String(job.cc || ""),
+      subject: String(job.subject || ""),
+      text: String(job.text || ""),
+      attachments: (job.attachments || []).slice(),
+      demo: job.demo === true,
+      // The message being answered, carried untouched and never read here.
+      // Edit on a failed row has to put the reply back together as it was, and
+      // a mode that answers an original cannot be rebuilt from an id alone.
+      mail: job.mail || null,
+      title: String(job.title || ""),
+      recipient: String(job.recipient || ""),
+      state: "queued",
+      what: "",
+      done: 0,
+      total: 0,
+      error: "",
+      code: "",
+      at: Date.now()
+    }
+    var next = outbox.slice()
+    next.push(queued)
+    outbox = next
+    pumpOutbox()
+    return id
+  }
+
+  // A failed job, sent again from the top. Its error goes now rather than when
+  // the helper answers: a row still showing last time's failure while a bar
+  // moves under it says two things at once.
+  function retrySend(jobId) {
+    var job = outboxJob(jobId)
+    if (!job || job.state !== "failed") return
+    patchJob(jobId, { state: "queued", error: "", code: "", what: "", done: 0, total: 0 })
+    pumpOutbox()
+  }
+
+  // Give it back to whoever wants to edit it, and take it out of the queue.
+  // The words are the person's, so they are handed over rather than copied and
+  // left here to be sent by a later pump as well.
+  function takeBackSend(jobId) {
+    var job = outboxJob(jobId)
+    if (!job || job.state === "sending") return null
+    dropJob(jobId)
+    return job
+  }
+
+  function discardSend(jobId) {
+    var job = outboxJob(jobId)
+    // A send already on the wire cannot be called back - the message may
+    // already be in the recipient's mailbox - so this refuses rather than
+    // pretending. It becomes discardable again the moment it fails.
+    if (!job || job.state === "sending") return
+    dropJob(jobId)
+  }
+
+  // One at a time, and in the order they were written. A send is a token
+  // refresh as well, and Entra rotates refresh tokens - two at once for one
+  // mailbox risks an avoidable sign-in, which is the same reason fetches for a
+  // mailbox are serialised. The order matters on its own account, too: two
+  // replies to the same thread should leave in the order somebody wrote them.
+  function pumpOutbox() {
+    if (sendProc.running || pluginDir === "") return
+    var next = null
+    for (var i = 0; i < outbox.length && !next; i++)
+      if (outbox[i].state === "queued") next = outbox[i]
+    if (!next) return
+
+    var command = ["python3", helper(), "compose",
+                   "--account", next.alias,
+                   "--mode", next.mode,
+                   "--stdin", "--progress"]
+    if (next.mode !== "new") command = command.concat(["--id", next.messageId])
+    // A harness runs with this on. Without it, pressing Send there reaches the
+    // mailbox with a real token - see graph.py's demo line in cmd_compose.
+    if (next.demo) command.push("--demo")
+    for (var a = 0; a < next.attachments.length; a++)
+      command = command.concat(["--attach", String(next.attachments[a])])
+
+    sendProc.jobId = next.id
+    sendProc.problem = ""
+    patchJob(next.id, { state: "sending", what: "", done: 0, total: 0 })
+    sendProc.command = command
+    sendProc.running = true
+  }
+
+  Process {
+    id: sendProc
+    running: false
+    stdinEnabled: true
+    // Which job is on the wire. Read in onExited, so it has to survive the
+    // list being rewritten under it - an id rather than an index or the object.
+    property string jobId: ""
+    // Whatever the helper said on stderr that was not a phase. It is the error
+    // message of last resort, for a helper that died before printing its own.
+    property string problem: ""
+
+    onStarted: {
+      var job = root.outboxJob(sendProc.jobId)
+      if (!job) return
+      // The words go over stdin, never in argv: anyone on this machine can
+      // read /proc/<pid>/cmdline while a process runs, and this is somebody's
+      // letter. The subject travels the same way for the same reason.
+      sendProc.write(JSON.stringify({ comment: job.text, to: job.to,
+                                      cc: job.cc, subject: job.subject }) + "\n")
+    }
+
+    stdout: StdioCollector { id: sendOut; waitForEnd: true }
+
+    // The phases, one JSON object per line - see graph.py's Progress. Not
+    // stdout: that is exactly one JSON object and every caller parses it as
+    // one, which is invariant 5. A line that is not a phase is kept as the
+    // error of last resort instead of being thrown away.
+    stderr: SplitParser {
+      splitMarker: "\n"
+      onRead: function(line) {
+        var text = String(line || "")
+        if (text.trim() === "") return
+        var parsed = Model.parseJson(text, null)
+        if (parsed && parsed.progress) {
+          var step = parsed.progress
+          root.patchJob(sendProc.jobId, {
+            what: String(step.what || ""),
+            done: Number(step.done) || 0,
+            total: Number(step.total) || 0
+          })
+          return
+        }
+        sendProc.problem = sendProc.problem === "" ? text : sendProc.problem + " " + text
+      }
+    }
+
+    onExited: function(exitCode) {
+      var jobId = sendProc.jobId
+      var job = root.outboxJob(jobId)
+      sendProc.jobId = ""
+      var parsed = Model.parseJson(sendOut.text, null)
+      if (exitCode !== 0 || !parsed || parsed.ok === false) {
+        var error = parsed && parsed.error ? parsed.error : null
+        var message = error ? String(error.message || "Could not send this message")
+                            : Model.oneLine(sendProc.problem || "Could not send this message", 200)
+        // It stays in the queue with what went wrong on it. Nobody's words are
+        // thrown away by a failure: Retry, Edit and Discard are all still
+        // there, and Edit hands the whole draft back to the compose box.
+        root.patchJob(jobId, { state: "failed", what: "",
+                               error: message,
+                               code: error ? String(error.code || "") : "" })
+        // The window it was written in may well be closed by now - that is
+        // half of why the queue is here - so a failure nobody would otherwise
+        // see gets a toast. Critical, because a mail that did not go out is
+        // not something to notice tomorrow.
+        if (job && job.demo !== true)
+          root.notify("Mail not sent", (job && job.title !== "" ? job.title + ": " : "") + message, true)
+        root.sendFailed(jobId, message)
+        root.pumpOutbox()
+        return
+      }
+      // Say what rode along with it. A forward on the IMAP path used to drop
+      // the original's attachments without a word, and "Sent" was the last
+      // thing said before it did - so the count is worth the two lines.
+      var carried = parsed.carried && parsed.carried.length ? parsed.carried.length : 0
+      var notice = carried > 0
+        ? ("Sent, with " + carried + (carried === 1 ? " file" : " files"))
+        : "Sent"
+      root.dropJob(jobId)
+      root.sendFinished(jobId, notice)
+      // A reply usually means the message is dealt with, and a new message
+      // lands in Sent - which is a folder a window may be looking at.
+      if (job) root.refresh([job.alias])
+      root.pumpOutbox()
     }
   }
 

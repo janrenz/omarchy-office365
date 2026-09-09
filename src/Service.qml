@@ -919,8 +919,20 @@ Item {
     composeError = ""
   }
 
-  // asDraft: build it in Outlook and open it there, rather than sending from
-  // here. Also the fallback when the mailbox may not send.
+  // Two ways out of the box, and they leave by different doors now.
+  //
+  // **Send** puts the message in the store's outbox and the box closes at
+  // once. It used to run the helper here and disable every control until it
+  // answered, which is a token refresh, an upload of everything attached and
+  // on the IMAP path an SMTP conversation - twenty seconds of a window that
+  // took no keys, for a message that was already written. See Store.qml's
+  // outbox for where it goes and what watches it.
+  //
+  // **Save as draft** still waits here, and that is not an oversight: it ends
+  // by opening the draft in Outlook, so its answer has to come back to the
+  // host that asked for it, and there is nothing to carry on doing here
+  // afterwards. It is also one request against a mailbox rather than a message
+  // leaving the machine, so a failure has nothing to sit in a queue about.
   function submitCompose(asDraft) {
     if (!composing || composeRunning || pluginDir === "") return
     // Every mode but `new` is an answer to a row, and without one there is
@@ -933,6 +945,39 @@ Item {
                                   : "A forward needs somebody to forward it to"
       return
     }
+
+    if (asDraft !== true) {
+      if (!hub) return
+      // `title` and `recipient` are for the outbox row to draw itself with:
+      // the subject of a reply belongs to the message it answers, and the
+      // store has no idea what that is. `mail` rides along untouched so that
+      // Edit on a failed row can put the reply back together exactly as it
+      // was - a mode that answers an original needs the original.
+      hub.queueSend({
+        alias: alias,
+        mode: composeMode,
+        messageId: composingNew ? "" : String(composeMail.id),
+        to: composeTo,
+        cc: composeCc,
+        subject: composeSubject,
+        text: composeText,
+        attachments: composeAttachments,
+        demo: demo,
+        mail: composeMail,
+        title: Model.outboxTitle(composeMode, composeSubject, composeMail),
+        recipient: Model.outboxRecipient(composeTo, composeMail)
+      })
+      // The box goes now. Nothing is lost by that: the message is in the
+      // queue, the Outbox row in the folder tree carries it, and a failure
+      // puts every word of it back with Edit.
+      cancelCompose()
+      // The last send's "Sent" is about the last message, and this is a new
+      // one - two notices side by side, one of them stale.
+      sendNotice = ""
+      composeNotice = "In the outbox"
+      return
+    }
+
     composeRunning = true
     composeError = ""
     composeNotice = ""
@@ -944,9 +989,8 @@ Item {
     var command = ["python3", helper(), "compose",
                    "--account", alias,
                    "--mode", composeMode,
-                   "--stdin"]
+                   "--stdin", "--draft"]
     if (!composingNew) command = command.concat(["--id", String(composeMail.id)])
-    if (asDraft === true) command.push("--draft")
     // A harness runs with this on. Without it, pressing Send there reaches the
     // mailbox with a real token - see graph.py's demo line in cmd_compose.
     if (demo) command.push("--demo")
@@ -979,20 +1023,11 @@ Item {
         root.composeSendBlocked = code === "send_permission_required"
         return
       }
-      if (parsed.drafted === true) {
-        // The draft is on the server with its quoting and recipients already
-        // right; Outlook is where it gets finished.
-        root.openUrl(String(parsed.webLink || ""), String(root.composeAlias))
-        root.composeNotice = parsed.warning ? String(parsed.warning) : "Draft opened in Outlook"
-      } else {
-        // Say what rode along with it. A forward on the IMAP path used to drop
-        // the original's attachments without a word, and "Sent" was the last
-        // thing said before it did - so the count is worth the two lines.
-        var carried = parsed.carried && parsed.carried.length ? parsed.carried.length : 0
-        root.composeNotice = carried > 0
-          ? ("Sent, with " + carried + (carried === 1 ? " file" : " files"))
-          : "Sent"
-      }
+      // The draft is on the server with its quoting and recipients already
+      // right; Outlook is where it gets finished. Sending does not come
+      // through here any more - see submitCompose and Store.qml's outbox.
+      root.openUrl(String(parsed.webLink || ""), String(root.composeAlias))
+      root.composeNotice = parsed.warning ? String(parsed.warning) : "Draft opened in Outlook"
       root.cancelCompose()
       // A reply changes the conversation and a forward marks nothing, but both
       // are worth a fresh look - a sent reply usually means the message is
@@ -1005,6 +1040,75 @@ Item {
   // Set when a send failed for want of permission, so the window can say what
   // to do about it rather than repeating the error.
   property bool composeSendBlocked: false
+
+  // ---- the outbox, as this host sees it -----------------------------------
+  //
+  // The queue itself is in the store, because a send outlives the window it
+  // was written in - see Store.qml. What is here is the reading of it, and the
+  // three things a person can do to a message that did not go out.
+  readonly property var outbox: hub ? hub.outbox : []
+  readonly property var outboxRows: Model.outboxRows(outbox)
+  readonly property int outboxFailed: hub ? hub.outboxFailed : 0
+  readonly property int outboxCount: outbox.length
+  // One line about the queue, for a surface with no room to draw it.
+  readonly property string outboxSummary: Model.outboxSummary(outbox)
+
+  // What the last send said, for the host to show. Kept out of composeNotice:
+  // the box is long closed by the time a send answers, and the answer belongs
+  // to the list rather than to a box that is not there.
+  property string sendNotice: ""
+
+  function retrySend(jobId) {
+    if (hub) hub.retrySend(jobId)
+  }
+
+  function discardSend(jobId) {
+    if (hub) hub.discardSend(jobId)
+  }
+
+  // A failed message, back in the compose box with every word where it was.
+  // This is what makes a failure recoverable rather than merely visible: the
+  // recipients, the subject, the text and the files are all still the
+  // person's, and Send puts it back in the queue.
+  function editSend(jobId) {
+    if (!hub) return
+    if (composing) {
+      // Two half-written messages and one box. Refusing says so where the
+      // person is looking, which silently replacing their draft would not.
+      composeError = "Finish or cancel the message you are writing first"
+      return
+    }
+    var job = hub.takeBackSend(jobId)
+    if (!job) return
+    composeMode = String(job.mode || "reply")
+    composeMail = job.mail || null
+    composeAlias = String(job.alias || "")
+    composeTo = String(job.to || "")
+    composeCc = String(job.cc || "")
+    composeSubject = String(job.subject || "")
+    composeText = String(job.text || "")
+    composeAttachments = (job.attachments || []).slice()
+    // Why it is back in the box, said in the box.
+    composeError = String(job.error || "")
+    composeNotice = ""
+  }
+
+  Connections {
+    target: root.hub
+    ignoreUnknownSignals: true
+
+    function onSendFinished(jobId, notice) { root.sendNotice = notice }
+
+    function onSendFailed(jobId, message) {
+      root.sendNotice = ""
+      // The one failure with an obvious next step. The box is closed by now,
+      // so this is for the box Edit is about to reopen: it puts "Allow
+      // sending..." in it instead of leaving the error to be read twice.
+      var job = root.hub ? root.hub.outboxJob(jobId) : null
+      if (job && String(job.code) === "send_permission_required")
+        root.composeSendBlocked = true
+    }
+  }
 
   // ---- the files a message carries ------------------------------------
   //
@@ -1181,8 +1285,16 @@ Item {
   readonly property string unifiedFolder: aliases.length > 1 && pickedAlias === ""
     ? Model.unifiedFolder(aliases, selectedFolders) : ""
 
+  // Whether this host is showing the outbox rather than a folder. It lives
+  // here, with the tree that has to draw the Outbox row as the selected one,
+  // and the host sets it - see MailWindow.openOutbox.
+  property bool outboxShowing: false
+
   readonly property var folderRows: Model.folderRows(views, selectedFolders,
-                                                     activeAlias, unifiedFolder)
+                                                     activeAlias, unifiedFolder,
+                                                     { count: outboxCount,
+                                                       failed: outboxFailed,
+                                                       showing: outboxShowing })
 
   // The name to call what is on screen, when it is every mailbox's version of
   // one folder. Empty when they are not all on the same folder.

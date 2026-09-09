@@ -513,6 +513,48 @@ Sending needs permission the plugin does not ask for by default — see
 than sending does and is always offered, so a mailbox signed in for reading and
 writing can still write the message and finish it in Outlook.
 
+### The outbox
+
+**Send closes the box and the message goes to the outbox.** Sending is a token
+refresh, then the message and everything attached to it climbing your uplink,
+and over IMAP an SMTP conversation as well — twenty seconds is ordinary and a
+minute is not unusual on a slow connection with a file on the mail. That used
+to happen with the compose box still on screen and every button in it
+disabled, which meant the thing to do with your mail client while a mail was
+leaving it was wait.
+
+An **Outbox** row appears at the bottom of the folder tree while anything is in
+it, with a count, and it is where the messages are:
+
+- **Waiting to send** — queued behind another one. Sends go out one at a time
+  and in the order you wrote them.
+- **Sending** — with the phase it is in, and a bar when there is something to
+  count: `Signing in`, `Building the message`, `Attaching report.pdf`,
+  `Sending`. The helper reports each one as it starts, so the bar only ever
+  moves when something actually happened; a send that has not reported yet
+  turns rather than advancing.
+- **Not sent** — with what went wrong, and **Retry**, **Edit** and **Discard**.
+  Nothing you wrote is thrown away by a failure: Edit puts the whole message
+  back in the compose box, recipients, subject, text and files, exactly as you
+  left it.
+
+The queue belongs to the shell rather than to the window, so closing the window
+while a message is on its way does not kill the send — that was the other half
+of the reason for having one. And a message that failed while the window was
+closed sends a notification, because a mail that did not go out is not
+something to find out about tomorrow. The bar's dropdown carries a line saying
+what the queue is doing, and clicking it opens the window on the Outbox.
+
+In the outbox, `Enter` sends a failed message again (or opens a waiting one for
+editing), `e` puts it back in the compose box, and `x` throws it away. A send
+already on the wire offers none of the three: it may already be in the
+recipient's mailbox, so there is nothing honest to offer.
+
+**Save as draft still waits.** It ends by opening the draft in Outlook, so
+there is nothing to carry on doing here while it happens — and it is one
+request against your own mailbox rather than a message leaving the machine, so
+a failure has nothing to sit in a queue about.
+
 ### Sending a file with a reply
 
 **Attach** in the reply box picks a file, and what is attached shows as a chip
@@ -674,6 +716,7 @@ including inside a message, which is the one place they used to do nothing.
 | `u` / `f` | Only unread / only Focused |
 | `!` | Only flagged, wherever in the mailbox it is |
 | `t` | Group the list by conversation |
+| `e` | In the Outbox: put the message back in the compose box |
 | `r` | Refresh |
 | `?` | This list |
 
@@ -921,6 +964,46 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.13.0 — 2026-09-09
+
+- **An outbox, so sending does not stop you working.** Send closes the compose
+  box now and the message goes into a queue. It used to hold the box open with
+  every button disabled until the mail was gone, which on a slow uplink with a
+  file attached is a minute of a mail client that takes no keys — a token
+  refresh, the upload, and over IMAP an SMTP conversation, none of which said
+  which part it was in.
+
+  An **Outbox** row appears at the bottom of the folder tree while there is
+  anything in it, with a count. A message in it is waiting, or sending — with
+  the phase it is in and a bar to go with it: `Signing in`, `Building the
+  message`, `Attaching report.pdf`, `Sending` — or it did not go out, in which
+  case it stays there with what went wrong and with **Retry**, **Edit** and
+  **Discard**. Edit puts the whole message back in the compose box exactly as
+  you left it, so nothing you wrote is lost to a failure. `Enter`, `e` and `x`
+  are the same three from the keyboard.
+
+  The queue lives in the shell's one service rather than in the window, so
+  closing the window mid-send no longer kills the send, and the bar's dropdown
+  can carry a line saying what is happening. A send that fails while the window
+  is closed raises a notification, because a mail that did not leave is not
+  something to discover tomorrow.
+
+  The phases are real, not a timer: the helper reports each one on stderr as it
+  starts it, and the bar is told how many there will be before the first one —
+  so it cannot overrun itself, and a send that has not reported anything yet
+  turns instead of advancing. Save as draft still waits, deliberately: it ends
+  by opening the draft in Outlook, so there is nothing to carry on doing here.
+
+- **Deleting mail no longer sets off notifications about old mail.** Deleting a
+  few messages made the list refill from below the fold, and the messages that
+  came up were announced as if they had just arrived. There was a guard against
+  exactly that — how old a message may be and still count as new — but it was
+  measured against everything a fetch returned, and a fetch returns the newest
+  unread and the flagged mail as well as the folder's own page. Both of those
+  reach back weeks by design, so the line sat weeks in the past and let
+  everything through. The helpers now report how far the folder's page itself
+  reaches, which is the only place that fold can be known.
 
 ### 1.12.0 — 2026-09-08
 

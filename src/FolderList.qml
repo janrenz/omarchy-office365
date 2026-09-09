@@ -159,13 +159,18 @@ Column {
 
         // Unread, not total: a folder's interest is what has not been read in
         // it. Folders with none say nothing rather than drawing a zero.
+        //
+        // The Outbox row counts what is waiting to go out instead, and asks
+        // for the accent when one of them did not - see Model.folderRows. That
+        // is the one count here that is about something being wrong rather
+        // than about something being new.
         Text {
           id: counter
           anchors.verticalCenter: parent.verticalCenter
           visible: !line.isHeader && Number(line.modelData.unread || 0) > 0
           text: Number(line.modelData.unread || 0) > 999 ? "999+" : String(line.modelData.unread || 0)
           textFormat: Text.PlainText
-          color: line.selected ? root.accent : root.dim
+          color: line.modelData.alert === true || line.selected ? root.accent : root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }

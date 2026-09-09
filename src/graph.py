@@ -223,6 +223,54 @@ def fail(code, message, **extra):
     sys.exit(0)
 
 
+class Progress:
+    """The phases of a long command, for a caller that draws a bar out of them.
+
+    Only `compose` has any use for this so far, and it earns it: a send is one
+    request on a good day and n+3 with files on it, each of them a whole
+    attachment climbing somebody's uplink, and the window used to sit with
+    every button disabled for as long as that took while saying nothing about
+    which part of it was slow.
+
+    The lines go to **stderr**, one JSON object per line. Stdout stays exactly
+    one JSON object, which is invariant 5 and the thing every caller parses -
+    interleaving progress there would break every one of them. A caller that
+    did not ask with --progress gets nothing at all, so running this by hand
+    reads as it always did.
+
+    The total belongs to whoever owns the path rather than to this class: a bar
+    that overruns its own total is worse than no bar, so `plan()` is called
+    where the branch is actually taken, and a transport that adds phases of its
+    own plans them on top of what has already been counted. The count can only
+    ever grow, because a step that has already been announced cannot be
+    un-announced.
+    """
+
+    def __init__(self, enabled=False):
+        self.enabled = bool(enabled)
+        self.total = 0
+        self.done = 0
+
+    def plan(self, total):
+        self.total = max(int(total), self.done)
+        return self
+
+    def step(self, what):
+        self.done += 1
+        self.total = max(self.total, self.done)
+        if not self.enabled:
+            return
+        line = {"progress": {"what": str(what), "done": self.done, "total": self.total}}
+        try:
+            sys.stderr.write(json.dumps(line) + "\n")
+            sys.stderr.flush()
+        except OSError:
+            # The reader hung up - the window was closed, say. A send that is
+            # already in flight is not worth failing over a closed pipe, so the
+            # rest of it happens quietly.
+            self.enabled = False
+
+
 class AccountError(Exception):
     """A failure that belongs to one mailbox.
 
@@ -1282,6 +1330,18 @@ def fetch_account(alias, args, timezone_name):
     # folder, so that query stays wherever the reader is.
     queries = MAIL_QUERIES if reading_inbox else tuple(q for q in MAIL_QUERIES if not q[2])
 
+    # How far back the folder's own page reaches, and whether anything is
+    # behind it. Reported rather than left to be worked out from `mail`,
+    # because that list is the union of every query above and reaches much
+    # further back than the page does - the unread and flagged ones exist
+    # precisely to fetch mail from below the fold. The notifier reads this to
+    # tell a message that has just arrived from one that merely surfaced when
+    # the row above it was deleted, and measuring the fold against the union
+    # put that line weeks in the past: every such surfacing was announced as
+    # new mail. See Store.qml's notifyFloor.
+    page_oldest = ""
+    page_full = False
+
     for label, unread_only, focused_only, flagged_only in queries:
         # The list being read grows a page at a time; the filtered views behind
         # it stay the length they have always been - see MAIL_FILTER_CAP.
@@ -1292,12 +1352,22 @@ def fetch_account(alias, args, timezone_name):
         if status != 200:
             failures.append((label, graph_error(payload, "Could not read mail")))
             continue
+        rows = []
         for message in payload.get("value", []):
             row = message_row(message)
             if row["id"]:
                 collected[row["id"]] = row
+                rows.append(row)
+        if not filtered:
+            # A page that came back full has more behind it, and its oldest row
+            # is the fold. A short one means the folder ran out, so there is no
+            # fold at all and nothing can be hiding below it.
+            page_full = len(rows) >= want
+            dates = [row["received"] for row in rows if row["received"]]
+            page_oldest = min(dates) if dates else ""
 
     result["mail"] = sorted(collected.values(), key=lambda row: row["received"], reverse=True)
+    result["mailPage"] = {"oldest": page_oldest, "full": page_full}
     if len(failures) == len(queries):
         result["warnings"].append({"scope": "mail", "message": failures[0][1]})
     elif failures:
@@ -3064,9 +3134,17 @@ def read_attachments(paths):
     return files
 
 
-def attach_to_draft(draft_id, files, headers):
-    """Put each file on a draft. Returns "" or what went wrong."""
+def attach_to_draft(draft_id, files, headers, progress=None):
+    """Put each file on a draft. Returns "" or what went wrong.
+
+    One request per file, and each of them is the whole file climbing the
+    uplink - which is why this is the one loop here that says which file it is
+    on. `progress` is optional so that a caller who did not ask for phases
+    needs to know nothing about them.
+    """
     for name, body in files:
+        if progress:
+            progress.step("Attaching " + name)
         status, payload = http(
             GRAPH + "/me/messages/" + urllib.parse.quote(draft_id, safe="") + "/attachments",
             method="POST",
@@ -3218,6 +3296,30 @@ def read_stdin_json():
     return parsed if isinstance(parsed, dict) else {}
 
 
+def compose_phases(transport_imap, new, draft, files, recipients):
+    """How many phases a send will report, counted before the first one runs.
+
+    The bar has to know its own length before the first step is announced, or
+    it draws itself full and then rewinds. Everything the count turns on is in
+    hand by then: the transport and the send permission come out of the account
+    file, and the mode, the files and the recipients out of the arguments.
+
+    The IMAP number is asked of the transport rather than repeated here - see
+    imapmail.compose_phases - because the two drifting apart is exactly how a
+    bar comes to overrun itself.
+    """
+    if transport_imap:
+        return 1 + need_imap().compose_phases(new, draft)
+    # Graph, where the token is one phase and the rest is the request pattern:
+    # a plain reply or a whole new message is a single call, and anything with
+    # a file on it is the draft-attach-send dance instead.
+    if not new and files:
+        return 3 + len(files) + (1 if recipients else 0)
+    if not new and draft:
+        return 2 + len(files) + (1 if recipients else 0)
+    return 2
+
+
 def cmd_compose(args):
     """Reply, reply all, forward, or write a message of your own.
 
@@ -3288,12 +3390,21 @@ def cmd_compose(args):
         fail("auth_required", "Not signed in")
     if not account.get("write"):
         fail("write_required", "This mailbox is signed in for reading only")
+
+    # Whoever asked for phases gets them from here on. The token is the first
+    # and on a cold start the slowest: it is a round trip to Entra, and it is
+    # the part that made pressing Send look like nothing had happened.
+    imap = transport_of(account) == TRANSPORT_IMAP
+    progress = Progress(getattr(args, "progress", False))
+    progress.plan(compose_phases(imap, new, bool(args.draft), files, recipients))
+    progress.step("Signing in")
+
     try:
         token = access_token(args.account, account)[0]
     except AccountError as error:
         fail(error.code, error.message)
 
-    if transport_of(account) == TRANSPORT_IMAP:
+    if imap:
         addresses = [address_header(entry) for entry in recipients]
         copy_addresses = [address_header(entry) for entry in copies]
         if not args.draft and not can_send(account):
@@ -3304,7 +3415,7 @@ def cmd_compose(args):
                  "or sign in again to allow sending.")
         out(imap_run(need_imap().compose, account, token, args.id, args.mode,
                      comment, addresses, bool(args.draft), files,
-                     subject, copy_addresses))
+                     subject, copy_addresses, progress))
         return
 
     headers = {"Authorization": "Bearer " + token}
@@ -3315,6 +3426,7 @@ def cmd_compose(args):
             # POST to the collection, which is what makes a draft: there is no
             # createReply to ask for one. Needs only Mail.ReadWrite, so a
             # mailbox that may not send can still write and finish in Outlook.
+            progress.step("Saving the draft")
             status, payload = http(GRAPH + "/me/messages", method="POST",
                                    json_body=message, headers=headers)
             if status not in (200, 201):
@@ -3327,6 +3439,9 @@ def cmd_compose(args):
             fail("send_permission_required",
                  "This mailbox is signed in without permission to send. Sign in again to allow it, "
                  "or save this as a draft and finish it in Outlook.")
+        # One request, attachments inside it: /me/sendMail takes the whole
+        # message, so there is no draft to hang them off.
+        progress.step("Sending")
         status, payload = http(GRAPH + "/me/sendMail", method="POST",
                                json_body={"message": message, "saveToSentItems": True},
                                headers=headers)
@@ -3342,6 +3457,7 @@ def cmd_compose(args):
     base = GRAPH + "/me/messages/" + urllib.parse.quote(args.id, safe="")
 
     if args.draft:
+        progress.step("Building the draft")
         status, payload = http(base + "/" + draft_path, method="POST",
                                json_body={"comment": comment}, headers=headers)
         if status not in (200, 201):
@@ -3352,8 +3468,9 @@ def cmd_compose(args):
         # is a warning rather than a failure.
         warning = ""
         if files and draft_id:
-            warning = attach_to_draft(draft_id, files, headers)
+            warning = attach_to_draft(draft_id, files, headers, progress)
         if recipients and draft_id:
+            progress.step("Addressing it")
             patch_status, patch_payload = http(
                 GRAPH + "/me/messages/" + urllib.parse.quote(draft_id, safe=""),
                 method="PATCH", json_body={"toRecipients": recipients}, headers=headers)
@@ -3379,6 +3496,7 @@ def cmd_compose(args):
         # draft the --draft path builds is made here, the files go on it, and
         # the draft is sent. Three requests instead of one, and only for a
         # message that has something attached.
+        progress.step("Building the message")
         status, payload = http(base + "/" + draft_path, method="POST",
                                json_body={"comment": comment}, headers=headers)
         if status not in (200, 201):
@@ -3388,16 +3506,18 @@ def cmd_compose(args):
             fail("draft_failed", "Outlook built a draft but did not say which")
         draft_base = GRAPH + "/me/messages/" + urllib.parse.quote(draft_id, safe="")
         if recipients:
+            progress.step("Addressing it")
             status, payload = http(draft_base, method="PATCH",
                                    json_body={"toRecipients": recipients}, headers=headers)
             if status not in (200, 204):
                 fail("send_failed", graph_error(payload, "Could not address the message"))
-        problem = attach_to_draft(draft_id, files, headers)
+        problem = attach_to_draft(draft_id, files, headers, progress)
         if problem:
             # The draft is in Drafts with whatever did attach. Say so: it is
             # somewhere the user can finish it, which "failed" does not suggest.
             fail("attach_failed",
                  problem + ". The message is waiting in your drafts with what did attach.")
+        progress.step("Sending")
         status, payload = http(draft_base + "/send", method="POST", headers=headers)
         if status == 403:
             fail("send_permission_required",
@@ -3414,6 +3534,7 @@ def cmd_compose(args):
     if recipients:
         body["toRecipients" if args.mode == "forward" else "message"] = (
             recipients if args.mode == "forward" else {"toRecipients": recipients})
+    progress.step("Sending")
     status, payload = http(base + "/" + send_path, method="POST", json_body=body, headers=headers)
     if status == 403:
         fail("send_permission_required",
@@ -3752,6 +3873,8 @@ def main():
                          help="answer as if it had been sent, and send nothing")
     compose.add_argument("--draft", action="store_true",
                          help="leave it as a draft in Outlook instead of sending it")
+    compose.add_argument("--progress", action="store_true",
+                         help="report each phase on stderr as one JSON object per line")
     compose.set_defaults(func=cmd_compose)
 
     with_account("folders", "list one mailbox's folders").set_defaults(func=cmd_folders)

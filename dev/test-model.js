@@ -625,6 +625,103 @@ group("the flagged filter", () => {
         idsOf(Model.mergeMailAll(mixed, true, {}, false, true)), ["unread-flagged"])
 })
 
+// The queue the window draws in the list's column, and the line the bar shows
+// instead of it. What a message on its way out says about itself is a state
+// machine, and the one part of the outbox that can be held to account without
+// a running shell.
+group("mail on its way out", () => {
+  const job = (extra) => Object.assign(
+    { id: "1", alias: "work", mode: "reply", title: "Re: Rechnung Q3",
+      recipient: "k.mueller@example.com", state: "queued", attachments: [] }, extra)
+
+  check("a reply takes the subject of what it answers",
+        Model.outboxTitle("reply", "", { subject: "Rechnung Q3" }), "Re: Rechnung Q3")
+  check("and is not prefixed twice",
+        Model.outboxTitle("reply", "", { subject: "Re: Rechnung Q3" }), "Re: Rechnung Q3")
+  check("a forward says so",
+        Model.outboxTitle("forward", "", { subject: "Protokoll" }), "Fwd: Protokoll")
+  check("a new message uses what was typed",
+        Model.outboxTitle("new", "Kickoff", null), "Kickoff")
+  check("and says as much when nothing was",
+        Model.outboxTitle("new", "   ", null), "(no subject)")
+
+  // The To field as typed, elided by the row. Parsing it into addresses is a
+  // rule that lives in three places already - see Model.outboxRecipient.
+  check("who it goes to is the field as typed",
+        Model.outboxRecipient("Jan Renz <jan@example.com>, team@example.com", null),
+        "Jan Renz <jan@example.com>, team@example.com")
+  check("and a plain reply goes back to the sender",
+        Model.outboxRecipient("", { from: "Klara Müller", fromAddress: "k@example.com" }),
+        "Klara Müller")
+
+  const waiting = Model.outboxRows([job({})])[0]
+  check("a queued message says it is waiting", waiting.status, "Waiting to send")
+  check("with no bar to draw", [waiting.determinate, waiting.progress], [false, 0])
+
+  const sending = Model.outboxRows([job({ state: "sending", what: "Attaching report.pdf",
+                                          done: 3, total: 5 })])[0]
+  check("a send in flight says which phase it is in", sending.status, "Attaching report.pdf")
+  check("and how far along that is", [sending.determinate, sending.progress], [true, 0.6])
+
+  // A process that is running but has not said anything yet. The row turns
+  // rather than advancing: a bar moving on a timer while nothing happens is
+  // how "nearly done" comes to mean nothing.
+  const started = Model.outboxRows([job({ state: "sending" })])[0]
+  check("one that has not reported yet is still Sending", started.status, "Sending")
+  check("with nothing to draw a bar from",
+        [started.determinate, started.progress], [false, 0])
+
+  const failed = Model.outboxRows([job({ state: "failed", error: "SMTP said no" })])[0]
+  check("a failure keeps its own words", [failed.status, failed.error],
+        ["Not sent", "SMTP said no"])
+  check("and is the row that wants a person", [failed.failed, failed.sending], [true, false])
+
+  // The bar's one line. A failure leads: everything else in a queue will
+  // happen by itself.
+  check("nothing waiting says nothing at all", Model.outboxSummary([]), "")
+  check("one waiting says so",
+        Model.outboxSummary([job({})]), "1 message waiting to send")
+  check("a send in flight says what it is doing, and how many are behind it",
+        Model.outboxSummary([job({ id: "1", state: "sending", what: "Sending" }),
+                             job({ id: "2" })]),
+        "Sending Re: Rechnung Q3 · 1 waiting")
+  check("and a failure wins over both",
+        Model.outboxSummary([job({ id: "1", state: "failed", error: "no" }),
+                             job({ id: "2", state: "sending" })]),
+        "1 message was not sent")
+})
+
+// The Outbox in the folder tree. It is not a folder and belongs to no mailbox,
+// which is most of what these check: it never lands under a mailbox's header,
+// and it is only drawn when there is a reason to.
+group("the Outbox row", () => {
+  const views = [{ alias: "work", short: "W", color: "#fff", username: "jan@example.com",
+                   unreadCount: 2, folderName: "Inbox", folders: [] }]
+  const outboxRow = (rows) => rows.filter((r) => r.outbox === true)[0] || null
+
+  check("no queue, no row",
+        outboxRow(Model.folderRows(views, {}, "", "", { count: 0, failed: 0 })), null)
+  check("something waiting puts it at the end, under no mailbox",
+        (() => {
+          const rows = Model.folderRows(views, {}, "", "", { count: 2, failed: 0 })
+          const row = rows[rows.length - 1]
+          return [row.outbox === true, row.depth, row.alias, row.unread, row.alert]
+        })(), [true, 0, "", 2, false])
+  check("a failed send asks for the accent",
+        outboxRow(Model.folderRows(views, {}, "", "", { count: 1, failed: 1 })).alert, true)
+  // Or the row would go out from under the reader the moment the last message
+  // left the queue.
+  check("an empty queue keeps its row while it is the open view",
+        (() => {
+          const row = outboxRow(Model.folderRows(views, {}, "", "",
+                                                 { count: 0, failed: 0, showing: true }))
+          return [row.selected, row.unread]
+        })(), [true, 0])
+  check("and the id it carries is the sentinel, not a folder anybody could have",
+        outboxRow(Model.folderRows(views, {}, "", "", { count: 1, failed: 0 })).id,
+        Model.outboxFolder())
+})
+
 group("where a message can be filed", () => {
   // Two mailboxes, because the answer has to come from one of them: a folder
   // id names a folder in a single mailbox, and Graph cannot move a message

@@ -574,6 +574,52 @@ Panel {
           }
         }
 
+        // Mail on its way out, in one line. The dropdown has no room for the
+        // queue and no business performing its actions - a Retry here would be
+        // the fourth surface that can send - but it is the surface that is
+        // open most often, and a message that failed to send while the window
+        // was closed has to be visible from somewhere. So it says what is
+        // happening and opens the window on the queue.
+        //
+        // Nothing at all when the queue is empty, which is nearly always.
+        Rectangle {
+          width: parent.width
+          visible: !!root.service && root.service.outboxSummary !== ""
+          implicitHeight: outboxLine.implicitHeight + Style.spacing.sm * 2
+          radius: Style.space(5)
+          color: outboxHover.containsMouse
+            ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08) : "transparent"
+
+          Behavior on color { ColorAnimation { duration: 120 } }
+
+          Text {
+            id: outboxLine
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.spacing.sm
+            anchors.rightMargin: Style.spacing.sm
+            // The glyph mail clients have used for an outbox since Outlook
+            // did: an envelope going somewhere.
+            text: "\u{F048A}  " + (root.service ? root.service.outboxSummary : "")
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+            // The accent only for the state that wants a person. A message
+            // that is merely on its way is information, not a problem.
+            color: root.service && root.service.outboxFailed > 0 ? root.accent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          MouseArea {
+            id: outboxHover
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.openWindow({ outbox: true })
+          }
+        }
+
         PanelSeparator { width: parent.width }
 
         // ---------------- settings ----------------
