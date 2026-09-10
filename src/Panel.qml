@@ -224,8 +224,11 @@ Panel {
   }
 
   function close() {
-    setCenterHoverRevealSuppressed(false)
+    // Hide first, unconditionally: this panel binds keyboardFocus to `opened`,
+    // so anything that throws before hide() leaves the layer surface holding
+    // an exclusive keyboard grab and the desktop looks frozen.
     root.controller.hide()
+    setCenterHoverRevealSuppressed(false)
   }
 
   function toggle() {
@@ -240,7 +243,12 @@ Panel {
   }
 
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
+    // The bar handed to an installed plugin is the PluginBarApi facade, where
+    // this property is readonly and only the setter moves it. Assigning to it
+    // throws, and a throw in close() leaves the panel holding the keyboard.
+    if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function")
+      root.bar.setCenterHoverRevealSuppressed(value)
+    else if (root.bar && "centerHoverRevealSuppressed" in root.bar)
       root.bar.centerHoverRevealSuppressed = value
   }
 
