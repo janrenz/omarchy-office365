@@ -45,8 +45,17 @@ Item {
   property string vDayEnd: "22:00"
   property bool vShowWeekends: true
   // One entry per mailbox. Kept as a plain array and replaced wholesale on
-  // every edit, which is what makes the Repeaters rebuild.
+  // every edit. The Repeaters below are therefore keyed on the row *count*
+  // rather than on this array, so that replacing it leaves their delegates --
+  // and the text field being typed into -- alive.
   property var rows: []
+  // Shape-compatible stand-in for a row index that is momentarily out of
+  // range, so a delegate being torn down after a removal does not read
+  // properties off undefined.
+  readonly property var blankRow: ({
+    account: "", short: "", color: "", clientId: "", authority: "",
+    transport: "", webUrl: "", openCommand: [], focusMatch: ""
+  })
   property var advancedOpen: ({})
 
   // Set between pressing Save and hearing back. Writing shell.json is another
@@ -290,11 +299,11 @@ Item {
         }
 
         Repeater {
-          model: root.rows
+          model: root.rows.length
 
           SettingsRow {
-            required property var modelData
             required property int index
+            readonly property var modelData: root.rows[index] || root.blankRow
             width: parent.width
             showDot: true
             dotColor: root.hueColor(modelData.color, index)
@@ -1087,13 +1096,20 @@ Item {
     // A Repeater rather than one reused page: each mailbox owns its own text
     // fields, so moving between mailboxes cannot leave the previous one's
     // typing behind in a field whose binding was broken by editing it.
+    //
+    // Keyed on the row count, not on `rows` itself. Every keystroke in any
+    // field replaces `rows` wholesale, and a Repeater whose model is that
+    // array rebuilds all of its delegates when it does -- destroying the very
+    // TextField being typed into, which is what made the Alias field drop
+    // focus after each letter. The count changes only when a mailbox is added
+    // or removed, which is exactly when these pages should be rebuilt.
     Repeater {
-      model: root.rows
+      model: root.rows.length
 
       Column {
         id: page
-        required property var modelData
         required property int index
+        readonly property var modelData: root.rows[page.index] || root.blankRow
         width: parent.width
         spacing: Style.spacing.xxl
         visible: root.editing === page.index
