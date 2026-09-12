@@ -80,30 +80,16 @@ TRANSPORT_IMAP = "imap"
 # registration of your own instead.
 IMAP_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 
-# Registrations reachable by name from the client id field, so a Graph mailbox
-# can be moved onto one without pasting a GUID out of a comment. Each is worth
-# trying where the bundled registration is what the tenant refuses: Entra grants
-# scopes per request rather than per registration, so a Graph sign-in as one of
-# these may get its consent where this plugin's own never does. The caveat is
-# the same each time - the tenant sees that client's name where this widget is
-# what connects, and it may still withhold Mail.Read (or want an admin to
-# approve it), which the sign-in says rather than this code guessing in advance.
-#
-# - thunderbird: Mozilla's, the same one the IMAP path uses. A third-party app,
-#   so a tenant that gates third-party consent behind an admin gates this too.
-# - office: "Microsoft Office", d3590ed6-... A Microsoft *first-party* app that
-#   most tenants have already granted for Graph, since their own people run
-#   Office - which is why it often signs in without the admin approval a
-#   third-party registration needs. Still Graph, so no move to IMAP.
-# - apple: "iOS Accounts", f8d98a96-... The client Apple's Mail and Calendar
-#   sign in as. Named because a tenant that lets Apple Mail in has consented to
-#   it; but Apple's app is built for Exchange's ActiveSync/EWS rather than
-#   Graph, so it is the long shot of the three for a Graph mailbox.
-CLIENT_ID_ALIASES = {
-    "thunderbird": IMAP_CLIENT_ID,
-    "office": "d3590ed6-52b3-4102-aeff-aad2292ab01c",
-    "apple": "f8d98a96-0999-43f5-8af3-69971c7bb423",
-}
+# The same registration, reachable by name from the client id field, so a Graph
+# mailbox can be moved onto it without pasting a GUID out of this comment. It is
+# worth trying where the bundled registration is what the tenant refuses:
+# Thunderbird is a client such tenants have usually already approved, and Entra
+# grants scopes per request rather than per registration, so a Graph sign-in may
+# get its consent where this plugin's own never does. The same caveat as the
+# IMAP path applies - the tenant sees Thunderbird where this widget is what
+# connects - and the tenant may still withhold Mail.Read, which the sign-in
+# says rather than this code guessing in advance.
+CLIENT_ID_ALIASES = {"thunderbird": IMAP_CLIENT_ID}
 
 
 def resolve_client_id(value):

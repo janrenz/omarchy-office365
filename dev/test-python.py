@@ -209,23 +209,15 @@ class Aliases(unittest.TestCase):
 
 
 class ClientIds(unittest.TestCase):
-    """The client id field takes a name as well as a GUID, because the ones
-    worth reaching for are otherwise GUIDs to copy by hand."""
+    """The client id field takes a name as well as a GUID, because the one
+    worth reaching for - Thunderbird's - is otherwise a GUID to copy by hand."""
 
     def test_thunderbird_names_the_registration_the_imap_path_uses(self):
         self.assertEqual(graph.resolve_client_id("thunderbird"), graph.IMAP_CLIENT_ID)
 
-    def test_each_known_name_resolves_to_a_guid(self):
-        for name in graph.CLIENT_ID_ALIASES:
-            resolved = graph.resolve_client_id(name)
-            self.assertRegex(resolved,
-                             r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-                             name)
-
     def test_the_name_survives_how_it_was_typed(self):
-        for typed in ("Thunderbird", " thunderbird ", "THUNDERBIRD", " Office ", "APPLE"):
-            self.assertEqual(graph.resolve_client_id(typed),
-                             graph.CLIENT_ID_ALIASES[typed.strip().lower()], typed)
+        for typed in ("Thunderbird", " thunderbird ", "THUNDERBIRD"):
+            self.assertEqual(graph.resolve_client_id(typed), graph.IMAP_CLIENT_ID, typed)
 
     def test_a_guid_of_your_own_is_passed_through(self):
         self.assertEqual(graph.resolve_client_id(" 1cebbbf2-9896-4381-b471-0b6740eb6748 "),
