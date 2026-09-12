@@ -109,7 +109,7 @@ Per-mailbox keys, inside an `accounts` entry:
 | `webUrl` | `https://outlook.office.com/mail/` | Opened when you click the popup header. Use `https://outlook.live.com/mail/` for Outlook.com. |
 | `openCommand` | - | Argv array for opening links, with `{url}` substituted, so each mailbox opens in its own browser profile. It also opens that mailbox's sign-in page, which is what makes the right account come up. Edit in `shell.json` - it is a command with arguments, so the settings form leaves it alone. |
 | `focusMatch` | - | Window class/title regex. When set, clicking the header focuses that window instead of opening the web app. |
-| `clientId` | bundled | Your own Entra app registration, for tenants that require one. |
+| `clientId` | bundled | Your own Entra app registration, for tenants that require one. `thunderbird` names Mozilla's registration - the one the IMAP path signs in as - which is worth trying where the tenant will not consent to the bundled one. |
 | `authority` | `common` | `common`, `organizations`, `consumers`, or a tenant id. |
 
 A fuller widget: three mailboxes merged, each opening its links and its
@@ -796,6 +796,23 @@ Then add the delegated Graph permissions, and set `"clientId"` (and
 `"authority"` if you want to pin a tenant) on each mailbox that should use it.
 Switching client ids means signing that mailbox in again: tokens belong to the
 client id that obtained them.
+
+### Signing in as Thunderbird
+
+Set `"clientId": "thunderbird"` and the mailbox signs in as Mozilla's public
+registration - `9e5f94bc-…`, the one an IMAP sign-in already defaults to -
+rather than as the bundled one. Entra grants scopes per request rather than per
+registration, so a Graph sign-in can ask for `Mail.Read` under it.
+
+It is the thing to try when consent to the bundled registration is what the
+tenant refuses, and it is not a way around a tenant that has decided: the
+consent screen still appears, an admin can still have to approve it, and a
+tenant that withholds `Mail.Read` withholds it here too - the sign-in says so.
+What changes is which client is asking, and Thunderbird is one such tenants have
+usually already approved. Two things follow from that: the tenant's sign-in logs
+and consent screen say Thunderbird where this widget is what connects, and if
+that is not a trade you want to make, sign in over IMAP instead - same
+registration, a transport the tenant has usually already consented to.
 
 ## Removing it
 

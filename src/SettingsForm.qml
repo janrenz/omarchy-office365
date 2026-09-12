@@ -1408,6 +1408,7 @@ Item {
               width: parent.width
               label: "App registration - client id"
               placeholder: "leave empty for the bundled one"
+              hint: "Or \"thunderbird\" to sign in as Mozilla's registration, which is worth trying where the tenant will not consent to the bundled one. Changing it means signing in again."
               value: page.modelData.clientId
               fg: root.fg; dim: root.dim; accent: root.accent; fontFamily: root.fontFamily
               onEdited: function(v) { root.updateRow(page.index, "clientId", v) }

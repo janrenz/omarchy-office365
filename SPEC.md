@@ -74,7 +74,11 @@ with `AADSTS65001`, not with a prompt.
 
 Sign-in is OAuth 2.0 **device code**. No password, no client secret.
 `DEFAULT_CLIENT_ID` is `1cebbbf2-…`; the IMAP path uses Thunderbird's public
-client id `9e5f94bc-…`. Default authority is `common`.
+client id `9e5f94bc-…`. A Graph mailbox can use that one too: `CLIENT_ID_ALIASES`
+maps the name `thunderbird`, typed in the client id field or passed to
+`--client-id`, onto it, and `resolve_client_id` spells it out before the device
+code is asked for - so what is stored, and what a token belongs to, is always
+the GUID. Default authority is `common`.
 
 Write scope is **per mailbox and opt-in**: "Allow changes…" signs that one
 mailbox in again with the wider scope. Every other mailbox stays read-only, and
@@ -91,7 +95,7 @@ the helper contract in `PLATFORM.md` §2.
 
 | Command | Arguments | Returns |
 |---|---|---|
-| `login-start` | `--client-id`, `--authority`, `--transport {"",imap}`, `--write`, `--calendar` | device code, verification URI |
+| `login-start` | `--client-id` *(GUID or `thunderbird`)*, `--authority`, `--transport {"",imap}`, `--write`, `--calendar` | device code, verification URI |
 | `login-poll` | — | pending, or the stored sign-in |
 | `list` | *(no account)* | configured aliases |
 | `remove` | — | forgets the account |

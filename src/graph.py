@@ -80,6 +80,23 @@ TRANSPORT_IMAP = "imap"
 # registration of your own instead.
 IMAP_CLIENT_ID = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 
+# The same registration, reachable by name from the client id field, so a Graph
+# mailbox can be moved onto it without pasting a GUID out of this comment. It is
+# worth trying where the bundled registration is what the tenant refuses:
+# Thunderbird is a client such tenants have usually already approved, and Entra
+# grants scopes per request rather than per registration, so a Graph sign-in may
+# get its consent where this plugin's own never does. The same caveat as the
+# IMAP path applies - the tenant sees Thunderbird where this widget is what
+# connects - and the tenant may still withhold Mail.Read, which the sign-in
+# says rather than this code guessing in advance.
+CLIENT_ID_ALIASES = {"thunderbird": IMAP_CLIENT_ID}
+
+
+def resolve_client_id(value):
+    """A client id as typed, with a well-known name spelled out to its GUID."""
+    text = str(value or "").strip()
+    return CLIENT_ID_ALIASES.get(text.lower(), text)
+
 # One resource per token: these are Outlook's own scopes, not Graph's, and the
 # two cannot be asked for together. IMAP has no read-only scope to ask for -
 # IMAP.AccessAsUser.All is the whole mailbox - so unlike the Graph path, a
@@ -561,7 +578,7 @@ def cmd_login_start(args):
     default_client = IMAP_CLIENT_ID if transport == TRANSPORT_IMAP else DEFAULT_CLIENT_ID
     if calendar:
         default_client = existing.get("client_id") or IMAP_CLIENT_ID
-    client_id = args.client_id or default_client
+    client_id = resolve_client_id(args.client_id) or default_client
     authority = args.authority or (existing.get("authority") if calendar else "") or DEFAULT_AUTHORITY
     scope = SCOPES_EWS if calendar else scopes_for(args.write, transport)
     status, payload = http(
@@ -3568,7 +3585,9 @@ def main():
         return item
 
     start = with_account("login-start", "begin a device-code sign-in")
-    start.add_argument("--client-id", default="")
+    start.add_argument("--client-id", default="",
+                       help="app registration to sign in as; \"thunderbird\" for Mozilla's, "
+                            "which is also what an IMAP sign-in defaults to")
     start.add_argument("--authority", default="", help="common, organizations, consumers, or a tenant id")
     start.add_argument("--transport", default="", choices=["", TRANSPORT_IMAP],
                        help="imap to sign in for IMAP/SMTP instead of Graph, for tenants that "

@@ -208,6 +208,26 @@ class Aliases(unittest.TestCase):
         self.assertEqual(caught.exception.code, "bad_alias")
 
 
+class ClientIds(unittest.TestCase):
+    """The client id field takes a name as well as a GUID, because the one
+    worth reaching for - Thunderbird's - is otherwise a GUID to copy by hand."""
+
+    def test_thunderbird_names_the_registration_the_imap_path_uses(self):
+        self.assertEqual(graph.resolve_client_id("thunderbird"), graph.IMAP_CLIENT_ID)
+
+    def test_the_name_survives_how_it_was_typed(self):
+        for typed in ("Thunderbird", " thunderbird ", "THUNDERBIRD"):
+            self.assertEqual(graph.resolve_client_id(typed), graph.IMAP_CLIENT_ID, typed)
+
+    def test_a_guid_of_your_own_is_passed_through(self):
+        self.assertEqual(graph.resolve_client_id(" 1cebbbf2-9896-4381-b471-0b6740eb6748 "),
+                         "1cebbbf2-9896-4381-b471-0b6740eb6748")
+
+    def test_nothing_typed_leaves_the_default_to_the_caller(self):
+        for empty in ("", "   ", None):
+            self.assertEqual(graph.resolve_client_id(empty), "", repr(empty))
+
+
 class Pagination(unittest.TestCase):
     """Graph hands back one page and a link to the next. A busy week is more
     meetings than one page holds, and stopping there looks like a quiet week."""
