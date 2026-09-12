@@ -109,7 +109,7 @@ Per-mailbox keys, inside an `accounts` entry:
 | `webUrl` | `https://outlook.office.com/mail/` | Opened when you click the popup header. Use `https://outlook.live.com/mail/` for Outlook.com. |
 | `openCommand` | - | Argv array for opening links, with `{url}` substituted, so each mailbox opens in its own browser profile. It also opens that mailbox's sign-in page, which is what makes the right account come up. Edit in `shell.json` - it is a command with arguments, so the settings form leaves it alone. |
 | `focusMatch` | - | Window class/title regex. When set, clicking the header focuses that window instead of opening the web app. |
-| `clientId` | bundled | Your own Entra app registration, for tenants that require one. `thunderbird` names Mozilla's registration - the one the IMAP path signs in as - which is worth trying where the tenant will not consent to the bundled one. |
+| `clientId` | bundled | Your own Entra app registration, for tenants that require one. Also takes a name - `office` (Microsoft's, usually allowed without an admin), `thunderbird`, or `apple` - see [Signing in as another client](#signing-in-as-another-client). |
 | `authority` | `common` | `common`, `organizations`, `consumers`, or a tenant id. |
 
 A fuller widget: three mailboxes merged, each opening its links and its
@@ -797,22 +797,28 @@ Then add the delegated Graph permissions, and set `"clientId"` (and
 Switching client ids means signing that mailbox in again: tokens belong to the
 client id that obtained them.
 
-### Signing in as Thunderbird
+### Signing in as another client
 
-Set `"clientId": "thunderbird"` and the mailbox signs in as Mozilla's public
-registration - `9e5f94bc-…`, the one an IMAP sign-in already defaults to -
-rather than as the bundled one. Entra grants scopes per request rather than per
-registration, so a Graph sign-in can ask for `Mail.Read` under it.
+Where consent to the bundled registration is what a tenant refuses, `clientId`
+takes the name of a well-known client instead of a GUID, and the mailbox signs
+in as that one. Entra grants scopes per request rather than per registration,
+so these are all still **Graph** sign-ins asking for `Mail.Read` - no move to
+IMAP.
 
-It is the thing to try when consent to the bundled registration is what the
-tenant refuses, and it is not a way around a tenant that has decided: the
-consent screen still appears, an admin can still have to approve it, and a
-tenant that withholds `Mail.Read` withholds it here too - the sign-in says so.
-What changes is which client is asking, and Thunderbird is one such tenants have
-usually already approved. Two things follow from that: the tenant's sign-in logs
-and consent screen say Thunderbird where this widget is what connects, and if
-that is not a trade you want to make, sign in over IMAP instead - same
-registration, a transport the tenant has usually already consented to.
+| `clientId` | Registration | When it helps |
+|---|---|---|
+| `office` | Microsoft Office (`d3590ed6-…`) | A Microsoft **first-party** app your tenant almost certainly already grants, since its own people run Office - so it often signs in without the admin approval a third-party app needs. **Try this first.** |
+| `thunderbird` | Mozilla Thunderbird (`9e5f94bc-…`) | The same one an IMAP sign-in uses. A third-party app, so a tenant that gates third-party consent behind an admin gates this too. |
+| `apple` | iOS Accounts (`f8d98a96-…`) | The client Apple's Mail signs in as. Named because a tenant that lets Apple Mail in has consented to it - but Apple's app is built for Exchange (ActiveSync/EWS), not Graph, so it is the long shot here. |
+
+None of these is a way around a tenant that has decided: the consent screen
+still appears, `Mail.Read` can still need an admin to approve it, and a tenant
+that withholds it withholds it here too - the sign-in says so rather than
+failing later. What changes is which client is asking, and the cost is that the
+tenant's sign-in logs and consent screen show that client's name where this
+widget is what connects. If `office` needs admin approval you cannot get and
+the others do too, the tenant has closed the Graph door on delegated mail, and
+the only one usually left open is Exchange's - which is signing in over IMAP.
 
 ## Removing it
 
