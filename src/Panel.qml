@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import Quickshell
 import qs.Commons
 import qs.Ui
@@ -301,11 +302,27 @@ Panel {
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
-      Column {
+      // The panel's height is capped to the screen (fittedContentHeight), but
+      // a tall page - the settings form, with a mailbox's fields and its Sign
+      // in button at the foot - is taller than that cap. Without something that
+      // scrolls, the overflow is simply clipped and the button cannot be
+      // reached. So the content lives in a Flickable, interactive only when it
+      // actually overflows so a popup that fits still lets wheel and clicks
+      // through to what is under it.
+      Flickable {
+        id: panelFlick
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: column.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        Column {
         id: column
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.top: parent.top
+        width: panelFlick.width
         spacing: Style.spacing.xxl
 
         // ---------------- header ----------------
@@ -912,6 +929,7 @@ Panel {
             ? Model.oneLine(root.service.errorMessage, 200) : ""
           accent: root.accent
           fontFamily: root.fontFamily
+        }
         }
       }
     }
