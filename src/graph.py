@@ -739,8 +739,17 @@ def graph_get_url(token, url, extra_headers=None):
 
 
 def graph_get(token, path, params, extra_headers=None):
-    """GET one page from a Graph collection or resource."""
-    url = GRAPH + path + "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+    """GET one page from a Graph collection or resource.
+
+    `params` may be None: a single resource - one attachment, fetched by its
+    own id - is asked for whole, and has no query to select or page through.
+    Appending a bare "?" to those is not merely untidy, it is the one call
+    that has no dict to encode, and urlencode(None) raises rather than
+    returning an empty string.
+    """
+    url = GRAPH + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
     return graph_get_url(token, url, extra_headers)
 
 
