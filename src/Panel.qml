@@ -98,6 +98,12 @@ Panel {
                       action: String(action) })
   }
   readonly property bool previewing: !!service && service.previewMail !== null
+
+  // Whether the keyboard list is up. The popup's own, and shorter than the
+  // window's: it takes f, u and F and the ladder's j/k/Enter/Tab/Esc, and
+  // nothing else. Listing the window's letters here would name keys that do
+  // nothing where they are being read.
+  property bool showHelp: false
   // A meeting opened for its details wants the same column a message does, so
   // the agenda stands aside for either of them.
   readonly property bool meeting: !!service && service.meetingOpen
@@ -290,11 +296,16 @@ Panel {
         else if (text === "u") root.service.unreadOnly = !root.service.unreadOnly
         // Capital F, the same as in the window, and clear of the f above.
         else if (text === "F") root.flagAtCursor()
+        // The same key as the window's, for the popup's own shorter list.
+        else if (text === "?") root.showHelp = !root.showHelp
       }
       // Escape backs out one layer at a time: the meeting you opened, then the
       // one you merely picked in the grid, then the message you opened, then
       // the panel.
       onCloseRequested: {
+        // The list is drawn over everything else, so while it is up it is what
+        // Escape means - before the meeting, the preview or the panel itself.
+        if (root.showHelp) { root.showHelp = false; return }
         if (root.meeting) root.service.closeMeeting()
         else if (root.service && root.service.selectedEvent) root.service.selectEvent(null)
         else if (root.previewing) root.service.closePreview()
@@ -444,6 +455,21 @@ Panel {
                 color: root.fg
                 spinning: refreshButton.spinning
               }
+            }
+
+            // What the keyboard does here. A literal ? rather than a glyph,
+            // because it names the key that opens the same list - and the
+            // same character the window and the Slack and Teams panels use.
+            Button {
+              visible: !!root.service && root.service.configured && !root.showSettings
+              text: "?"
+              tooltipText: "What the keyboard does"
+              bordered: true
+              selected: root.showHelp
+              foreground: Qt.darker(root.fg, 1.4)
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              onClicked: root.showHelp = !root.showHelp
             }
 
             // Hidden while there is nothing configured: the form is already
@@ -930,6 +956,43 @@ Panel {
           accent: root.accent
           fontFamily: root.fontFamily
         }
+        }
+      }
+    }
+
+    // The keyboard, listed - the popup's own short version. ? works from
+    // anywhere in it, and it is drawn over the whole popup rather than inside
+    // the scroller so a long list is not something to scroll the mail to find.
+    Item {
+      anchors.fill: parent
+      visible: root.showHelp
+      z: 120
+
+      Rectangle {
+        anchors.fill: parent
+        color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.97)
+
+        MouseArea { anchors.fill: parent; onClicked: root.showHelp = false }
+
+        KeyHelp {
+          anchors.centerIn: parent
+          title: "Keyboard, in this panel"
+          fg: root.fg
+          fontFamily: root.fontFamily
+          canFocus: !!root.service && root.service.canFocus
+          // Two sections of the window's four. There is no folder tree here
+          // and nothing that scrolls by the screenful, so those headings would
+          // stand over nothing.
+          sections: ["Moving", "Doing"]
+          // Everything the window takes and this does not. The panel has no
+          // reading pane to step into, no calendar of its own to jump to, no
+          // search, no compose, no agent and no folders - so the letters for
+          // those are left out rather than listed and dead.
+          without: ["h", "l", "C", "c", "s", "x", "m", "a", "t", "/", "r"]
+          overrides: ({
+            "Enter": "Open the message in the panel",
+            "Esc": "Back one step: the meeting, the message, the panel"
+          })
         }
       }
     }

@@ -22,6 +22,33 @@ Column {
   // IMAP mailbox does not have.
   property bool canFocus: true
 
+  // Which sections to draw, in order. The bar's popup takes a handful of the
+  // window's keys and none of its folder or scrolling ones, so it asks for the
+  // two sections it can honour rather than showing a list that is mostly
+  // wrong. Everything, in the window.
+  property var sections: ["Moving", "Scrolling", "Doing", "Folders"]
+
+  // Keys this host does not handle, however they are filed above. The popup
+  // shares the ladder's j/k/Enter/Esc/Tab but has no reading pane to step
+  // into, no search, and no agent - so it names them here rather than
+  // maintaining a second copy of the table.
+  property var without: []
+
+  // The heading. A popup is not the window, and saying so stops the short
+  // list reading as the whole of what the plugin can do.
+  property string title: "Keyboard"
+
+  // What a key does here, where that differs from the window. Esc is the one
+  // that really does: it backs out through whatever layers the host has, and
+  // the popup's layers are not the window's. A map of key to description,
+  // rather than a second table, so a binding added below still reaches both.
+  property var overrides: ({})
+
+  function describe(row) {
+    var own = root.overrides[row[0]]
+    return own !== undefined ? String(own) : row[1]
+  }
+
   // [key, what it does, which section]
   readonly property var bindings: [
     ["j / k", "Down and up, in whatever has focus", "Moving"],
@@ -62,7 +89,7 @@ Column {
   spacing: Style.spacing.md
 
   Text {
-    text: "Keyboard"
+    text: root.title
     textFormat: Text.PlainText
     color: root.fg
     font.family: root.fontFamily
@@ -71,7 +98,7 @@ Column {
   }
 
   Repeater {
-    model: ["Moving", "Scrolling", "Doing", "Folders"]
+    model: root.sections
 
     delegate: Column {
       required property string modelData
@@ -84,6 +111,7 @@ Column {
           return row[2] === modelData
                  && (root.agentHandover || row[0] !== "a")
                  && (root.canFocus || row[0] !== "f")
+                 && root.without.indexOf(row[0]) === -1
         })
 
         delegate: Row {
@@ -101,7 +129,7 @@ Column {
           }
 
           Text {
-            text: modelData[1]
+            text: root.describe(modelData)
             textFormat: Text.PlainText
             color: root.dim
             font.family: root.fontFamily

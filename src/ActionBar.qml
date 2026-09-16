@@ -20,10 +20,15 @@ import qs.Ui
 // An action is a plain object, not an Item, so the same one can be drawn in
 // either line:
 //
-//   { text, tooltip, enabled, visible, danger, muted, trigger }
+//   { text, tooltip, key, enabled, visible, danger, muted, trigger }
 //
 // `danger` draws it in the accent - Delete, Send, a raised flag - and `muted`
 // in the dim foreground, for the ones that are offers rather than actions.
+//
+// `key` is the keyboard shortcut that does the same thing, drawn dim inside
+// the button. Leave it off where the key does not work: the same action list
+// is drawn in the bar's popup, which takes far fewer letters than the window.
+// It widens the button, so it is measured below like everything else.
 //
 // `visible: false` takes an action out entirely - that is how the pane hides
 // what a read-only mailbox cannot do - and only what is left is measured.
@@ -101,8 +106,9 @@ Item {
     Repeater {
       id: rulerRepeater
       model: root.live
-      Button {
+      KeyButton {
         text: String(modelData.text || "")
+        keyText: String(modelData.key || "")
         bordered: true
         fontFamily: root.fontFamily
         fontSize: root.fontSize
@@ -135,10 +141,11 @@ Item {
 
       Repeater {
         model: root.live
-        Button {
+        KeyButton {
           visible: index < root.fits
           enabled: modelData.enabled !== false
           text: String(modelData.text || "")
+          keyText: String(modelData.key || "")
           tooltipText: String(modelData.tooltip || "")
           bordered: true
           foreground: modelData.danger === true ? root.accent
@@ -176,10 +183,11 @@ Item {
 
       Repeater {
         model: root.live
-        Button {
+        KeyButton {
           visible: index >= root.fits
           enabled: modelData.enabled !== false
           text: String(modelData.text || "")
+          keyText: String(modelData.key || "")
           tooltipText: String(modelData.tooltip || "")
           bordered: true
           foreground: modelData.danger === true ? root.accent

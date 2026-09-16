@@ -1475,6 +1475,26 @@ Item {
                 fontFamily: Style.font.family
                 onClicked: mailView.refresh()
               }
+
+              // Last in the row, and the way out of the window's normal
+              // business rather than part of it - the same place and the same
+              // character the Slack and Teams windows put it.
+              //
+              // The list itself has been reachable with ? since it was
+              // written, which is exactly the problem: a shortcut nobody can
+              // find is a shortcut nobody has, and the one list that says
+              // what the keyboard does was the one thing with no way in for
+              // somebody who had not already read it. A literal ? rather than
+              // a glyph, because it names the key that does the same thing.
+              FilterPill {
+                label: "?"
+                visible: mailView.configured && root.settingsError === ""
+                selected: root.showHelp
+                fg: Color.foreground
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: root.showHelp = !root.showHelp
+              }
             }
           }
 

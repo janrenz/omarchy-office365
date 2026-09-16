@@ -123,6 +123,16 @@ Column {
     return root.actsHere ? text : (text + " — opens the window on it")
   }
 
+  // The key beside an action, but only where pressing it would do anything.
+  //
+  // This pane is drawn twice: in the window, where the key catcher takes the
+  // whole ladder of letters, and in the bar's popup, where it takes f, u and
+  // F and nothing else. A hint is a promise, so the popup gets none - the
+  // popup's own ? lists what it really has.
+  function keyFor(key) {
+    return root.actsHere ? key : ""
+  }
+
   function people(list) {
     var names = []
     for (var i = 0; i < (list || []).length; i++) {
@@ -534,6 +544,7 @@ Column {
       // state on purpose: flagging is "come back to this", which is most often
       // what one wants for a message one has just read.
       { text: root.mail && root.mail.flagged ? "Unflag" : "Flag",
+        key: root.keyFor("F"),
         tooltip: root.mail && root.mail.flagged
                  ? "Clear the follow-up flag"
                  : "Flag it for follow-up, in Outlook too",
@@ -545,16 +556,19 @@ Column {
       // which is why this one is not gated on canWrite the way the three
       // answers above are.
       { text: "Ask agent",
+        key: root.keyFor("a"),
         tooltip: root.elsewhere("Open your coding agent on this message"),
         visible: root.canAgent,
         trigger: function() { root.agentRequested() } },
 
       { text: "Move\u2026",
+        key: root.keyFor("m"),
         tooltip: root.elsewhere("File it in another folder of this mailbox"),
         visible: root.canMove && root.canWrite, enabled: !root.actionRunning,
         trigger: function() { root.moveRequested() } },
 
-      { text: "Delete", tooltip: "Moves it to Deleted Items",
+      { text: "Delete", key: root.keyFor("x"),
+        tooltip: "Moves it to Deleted Items",
         visible: root.canWrite, enabled: !root.actionRunning, danger: true,
         trigger: function() { root.deleteRequested() } },
 
