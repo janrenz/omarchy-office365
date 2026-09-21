@@ -974,6 +974,46 @@ journalctl --user -f | grep -i office365
 
 ## Changelog
 
+### 1.14.0 — 2026-09-21
+
+- **A shell start draws your mail at once.** The panel used to open on a
+  skeleton for as long as the first fetch took — four to eight seconds,
+  measured — because nothing the plugin learned outlived the process that
+  learned it. Each fetch now leaves its answer in
+  `~/.cache/omarchy/office365/`, written `0600` in a `0700` directory the way
+  the tokens are, and the panel draws it before it has spoken to anybody. The
+  spinner keeps running over those rows, because they are the last answer
+  rather than a fresh one. Subjects, senders and the two lines of preview a row
+  shows are therefore on disk; message bodies are not, and signing a mailbox
+  out deletes its file.
+
+- **A refresh is several times faster, by asking for less of what nothing is
+  showing.** Three things were being fetched every time whether or not anything
+  drew them.
+
+  Outlook's **Focused** views are the two slowest requests a fetch makes by a
+  distance — 1.4 and 1.0 seconds of a 3.4 second fetch, because
+  `inferenceClassification` is a filter Exchange will not answer from an index.
+  They fill one filter pill, which is off unless you turn it on, so they are
+  read only while it is on. The **folder tree** costs three requests on Graph
+  and one per folder over IMAP — 850 milliseconds on a mailbox with 34 of them
+  — and only the window has a sidebar, so the bar alone no longer pays for it.
+  Over IMAP the unread and flagged lists **stopped re-downloading the mail the
+  page had already brought back**, which is most of it.
+
+  Switching a filter on, or opening the window, fetches what it needs at once
+  instead of waiting out the refresh interval — which is also why the window no
+  longer opens on the bar's shorter list.
+
+- **The connection to Graph stays up between requests.** One fetch is ten
+  requests, and each used to open its own TCP and TLS connection: 157 to 204
+  milliseconds of handshake apiece against 17 to 60 on one already up. A
+  machine behind a proxy keeps the old path, since that is the one that works
+  there.
+
+  Measured end to end on a real mailbox, for the refresh the bar runs: 4.4
+  seconds to 0.9 over Graph, and 3.9 to 2.7 over IMAP.
+
 ### 1.13.0 — 2026-09-09
 
 - **An outbox, so sending does not stop you working.** Send closes the compose
