@@ -27,13 +27,16 @@ import html
 import json
 import os
 import re
+import ssl
 import stat
 import struct
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.client import HTTPException, HTTPSConnection
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -404,6 +407,163 @@ def read_capped(response, limit=MAX_RESPONSE_BYTES):
     return response.read(limit + 1)[:limit].decode("utf-8", "replace")
 
 
+# One fetch is ten requests to graph.microsoft.com, and urlopen gives every one
+# of them its own TCP and TLS handshake. Measured from this machine: a cold
+# connect costs 157-204 ms against 17-60 ms for a request on a connection that
+# is already up, so roughly a third of a fetch was spent shaking hands. urllib
+# cannot be made to keep a connection open; http.client can, and it is stdlib
+# (invariant 4).
+#
+# The pool is keyed by thread as well as by host because cmd_fetch reads
+# several mailboxes at once and one connection cannot carry two requests at a
+# time. Nothing here is a cache: a connection is a socket, so the process
+# leaves the pool behind when it exits and the next invocation starts cold.
+#
+# `from http.client import ...` rather than `import http.client`, because this
+# module has a function called `http` and the two names would fight.
+_POOL = {}
+_SSL_CONTEXT = None
+
+# The server is free to drop an idle connection at any moment, and it is not
+# obliged to tell us first: a reused socket can fail rather than answering.
+# That is not an error worth reporting, so the request is made again on a fresh
+# connection - once, because a second failure is the network.
+POOL_RETRIES = 2
+REDIRECT_HOPS = 3
+# What may be sent a second time when a pooled connection dies with the answer
+# half-arrived. A GET that ran twice costs a round trip; a POST that ran twice
+# sends the message twice, so `sendMail` is reported as failed instead. See
+# `Dropped`.
+REPEATABLE = ("GET", "HEAD", "OPTIONS")
+
+
+class Dropped(Exception):
+    """A pooled connection failed under a request.
+
+    `safe` is whether that request may simply be made again. A socket that died
+    while the request was still going out never reached the server, so anything
+    can be repeated; one that died while the answer was coming back may well
+    have left a message sent, and sending it twice is worse than saying it
+    failed. A connection this process opened for this very request cannot have
+    been dropped for being idle, so its failure is the network and is reported
+    rather than retried.
+    """
+
+    def __init__(self, cause, safe):
+        super().__init__(str(cause))
+        self.cause = cause
+        self.safe = safe
+
+
+def ssl_context():
+    """One verified context for the process.
+
+    Building one reads the system CA store, measured at 15 ms - which a fetch
+    used to pay ten times over.
+    """
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        _SSL_CONTEXT = ssl.create_default_context()
+    return _SSL_CONTEXT
+
+
+def pooled(host, port, timeout):
+    """(key, connection, reused) for this thread's connection to one host."""
+    key = (threading.get_ident(), host, port, timeout)
+    connection = _POOL.get(key)
+    if connection is not None:
+        return key, connection, True
+    connection = HTTPSConnection(host, port or 443, timeout=timeout, context=ssl_context())
+    _POOL[key] = connection
+    return key, connection, False
+
+
+def unpool(key):
+    """Close and forget one connection, so the next request opens its own."""
+    connection = _POOL.pop(key, None)
+    if connection is not None:
+        try:
+            connection.close()
+        except OSError:
+            pass
+
+
+def proxied(host):
+    """Whether a proxy stands between us and this host.
+
+    urllib reads http_proxy/https_proxy and http.client does not, so a machine
+    behind a proxy has to keep the old path rather than quietly failing to
+    reach Graph at all. Being slower there is the right trade: it works.
+    """
+    proxies = urllib.request.getproxies()
+    if not proxies.get("https") and not proxies.get("all"):
+        return False
+    try:
+        return not urllib.request.proxy_bypass(host)
+    except (TypeError, ValueError, OSError):
+        return True
+
+
+def send_once(url, method, body, headers, timeout):
+    """(status, raw, header getter, reusable) for one request on the pool.
+
+    `reusable` is false when the answer was longer than the cap: the rest of it
+    is still in the socket, so the connection cannot carry another request and
+    is dropped rather than handed back poisoned.
+    """
+    parts = urllib.parse.urlsplit(url)
+    target = parts.path or "/"
+    if parts.query:
+        target += "?" + parts.query
+    key, connection, reused = pooled(parts.hostname, parts.port, timeout)
+    try:
+        connection.request(method, target, body=body, headers=headers)
+    except (OSError, HTTPException) as error:
+        unpool(key)
+        raise Dropped(error, reused) from error
+    try:
+        response = connection.getresponse()
+        raw = response.read(MAX_RESPONSE_BYTES + 1)
+    except (OSError, HTTPException) as error:
+        unpool(key)
+        raise Dropped(error, reused and method in REPEATABLE) from error
+    oversized = len(raw) > MAX_RESPONSE_BYTES
+    if oversized or response.will_close:
+        unpool(key)
+    return (response.status,
+            raw[:MAX_RESPONSE_BYTES].decode("utf-8", "replace"),
+            response.getheader,
+            response.headers.get("Location", ""))
+
+
+def send(url, method, body, headers, timeout):
+    """One request, following redirects and surviving a dropped connection.
+
+    urlopen followed redirects and nothing on the Graph path has ever needed
+    one; they are followed here anyway, because a path that is never taken is
+    exactly the one where silently doing something different would go unnoticed
+    for a year. 301, 302 and 303 turn a POST into a GET the way urllib does.
+    """
+    for _hop in range(REDIRECT_HOPS):
+        for attempt in range(POOL_RETRIES):
+            try:
+                status, raw, header, location = send_once(url, method, body, headers, timeout)
+                break
+            except Dropped as error:
+                if not error.safe or attempt == POOL_RETRIES - 1:
+                    raise error.cause
+        if status not in (301, 302, 303, 307, 308) or not location:
+            return status, raw, header
+        nxt = urllib.parse.urljoin(url, location)
+        if urllib.parse.urlsplit(nxt).scheme != "https":
+            return status, raw, header
+        if status in (301, 302, 303) and method not in ("GET", "HEAD"):
+            method, body = "GET", None
+            headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
+        url = nxt
+    return status, raw, header
+
+
 def http(url, *, method="GET", data=None, json_body=None, headers=None, timeout=20):
     """Return (status, parsed_json). Non-2xx comes back with its body parsed."""
     body = None
@@ -416,25 +576,46 @@ def http(url, *, method="GET", data=None, json_body=None, headers=None, timeout=
         request_headers["Content-Type"] = "application/json"
     request_headers.update(headers or {})
 
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname or proxied(parts.hostname):
+        return http_via_urllib(url, method, body, request_headers, timeout)
+
+    try:
+        status, raw, header = send(url, method, body, request_headers, timeout)
+    except TimeoutError:
+        return 0, {"error": "network", "error_description": "Request timed out"}
+    except (OSError, HTTPException) as error:
+        reason = getattr(error, "reason", None)
+        return 0, {"error": "network", "error_description": str(reason or error)}
+    return parsed_response(status, raw, header("Retry-After"))
+
+
+def parsed_response(status, raw, retry_after):
+    """The body as the callers expect it, whichever path fetched it."""
+    if 200 <= status < 300:
+        try:
+            return status, (json.loads(raw) if raw.strip() else {})
+        except ValueError:
+            return status, {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = {"error_description": raw[:500]}
+    # Carried alongside the body so throttled callers can honour it.
+    if retry_after and isinstance(parsed, dict):
+        parsed["retryAfter"] = retry_after
+    return status, parsed
+
+
+def http_via_urllib(url, method, body, request_headers, timeout):
+    """The pre-pool path, for a proxied machine. See `proxied`."""
     request = urllib.request.Request(url, data=body, method=method, headers=request_headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = read_capped(response)
-            try:
-                return response.status, (json.loads(raw) if raw.strip() else {})
-            except ValueError:
-                return response.status, {}
+            return parsed_response(response.status, read_capped(response), None)
     except urllib.error.HTTPError as error:
-        raw = read_capped(error)
-        try:
-            parsed = json.loads(raw)
-        except ValueError:
-            parsed = {"error_description": raw[:500]}
-        # Carried alongside the body so throttled callers can honour it.
         retry_after = error.headers.get("Retry-After") if error.headers else None
-        if retry_after and isinstance(parsed, dict):
-            parsed["retryAfter"] = retry_after
-        return error.code, parsed
+        return parsed_response(error.code, read_capped(error), retry_after)
     except urllib.error.URLError as error:
         return 0, {"error": "network", "error_description": str(error.reason)}
     except TimeoutError:
