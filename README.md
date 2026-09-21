@@ -803,6 +803,15 @@ stored per account under `~/.local/state/omarchy/office365/`, written
 `0600` in a `0700` directory. Nothing is sent anywhere except Microsoft
 Graph - no telemetry, no third-party service.
 
+The last answer each mailbox gave is also kept, under
+`~/.cache/omarchy/office365/`, one file per mailbox and written the same way -
+`0600` in a `0700` directory. It is what the panel draws the moment a shell
+starts, instead of a skeleton for the four to eight seconds a first fetch
+takes, and it holds what a list row shows: subjects, senders, arrival times and
+the two lines of preview text. Message bodies are not in it - those are fetched
+per message and were never part of a fetch's answer. Signing a mailbox out
+deletes its file.
+
 `graph.py` is the only component that ever touches a token; the QML widget
 just renders the JSON it prints.
 
@@ -880,7 +889,7 @@ not mean signing in again; your mailboxes just need adding to a widget once
 more. To take the tokens too:
 
 ```bash
-rm -rf ~/.local/state/omarchy/office365
+rm -rf ~/.local/state/omarchy/office365 ~/.cache/omarchy/office365
 ```
 
 Signing a mailbox out through the panel also revokes nothing at Microsoft's

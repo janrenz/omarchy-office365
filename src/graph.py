@@ -210,6 +210,34 @@ STATE_DIR = os.path.join(
 )
 
 
+# What a fetch leaves behind, so the next shell to start has something to draw.
+#
+# Nothing the plugin learned used to survive the process that learned it, so
+# every shell start - and a QML edit is a shell restart - put the panel on a
+# skeleton until the first fetch came back: 4 to 8 seconds, measured on real
+# mailboxes. The last answer is kept per mailbox and folder and drawn at once,
+# with the spinner still running over it, and the fetch replaces it when it
+# lands.
+#
+# Subjects, senders and the two lines of preview text a row shows therefore sit
+# on this disk. They are written 0600 inside a directory created 0700 - what
+# the token store is written as, and anybody who can read one can already read
+# the other and help themselves to the mailbox itself. Bodies are not kept:
+# they are fetched per message and were never in a fetch's answer.
+CACHE_DIR = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+    "omarchy",
+    "office365",
+)
+# How many of one mailbox's folders to keep. The inbox and whatever the window
+# was last left on are what a start needs; a file that grew a folder every time
+# somebody clicked one would be a cache nobody asked for.
+CACHE_FOLDERS = 8
+# A snapshot that will not fit this is one worth losing rather than writing: the
+# next start reads it synchronously.
+CACHE_MAX_BYTES = 4 * 1024 * 1024
+
+
 # --------------------------------------------------------------------------
 # small helpers
 # --------------------------------------------------------------------------
@@ -339,6 +367,72 @@ def write_json(path, data):
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(data, handle)
     os.replace(tmp, path)
+
+
+def cache_path(alias):
+    """One file per mailbox, holding one snapshot per folder.
+
+    Per mailbox rather than per folder so that the name is the alias, which is
+    already checked to be a filename; a folder id is a Graph blob or an IMAP
+    path and would have to be hashed into one, which QML would then have to
+    hash the same way to find it.
+    """
+    problem = alias_problem(alias)
+    if problem:
+        raise AccountError("bad_alias", problem)
+    return os.path.join(CACHE_DIR, "%s.json" % str(alias).strip())
+
+
+def write_cache(path, data):
+    """Write a snapshot the way the token store is written: 0600, atomically."""
+    os.makedirs(CACHE_DIR, mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(data)
+    os.replace(tmp, path)
+
+
+def remember(alias, folder_key, account, fetched_at, timezone_name):
+    """Keep one mailbox's answer for the next start. Failure is not reported.
+
+    The fetch succeeded; the only thing a failed write costs is that start
+    being as slow as every start used to be, and a widget that complained
+    about its cache would be a worse widget than one that quietly has none.
+    """
+    try:
+        path = cache_path(alias)
+        held = read_json(path, None) or {}
+        folders = held.get("folders")
+        if not isinstance(folders, dict):
+            folders = {}
+        folders[folder_key] = {"fetchedAt": fetched_at, "timeZone": timezone_name,
+                               "account": account}
+        # Oldest out first, by when each was written rather than by when it was
+        # last looked at: a folder nobody has opened since the last restart is
+        # exactly the one worth dropping.
+        order = sorted(folders, key=lambda name: str(folders[name].get("fetchedAt", "")))
+        for name in order[:max(0, len(order) - CACHE_FOLDERS)]:
+            del folders[name]
+        body = json.dumps({"folders": folders})
+        if len(body.encode("utf-8")) > CACHE_MAX_BYTES:
+            return
+        write_cache(path, body)
+    except (OSError, ValueError, TypeError, AccountError):
+        return
+
+
+def forget_cache(alias):
+    """Drop a mailbox's kept mail. Signing out must not leave any behind."""
+    try:
+        path = cache_path(alias)
+    except AccountError:
+        return False
+    try:
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
 
 
 def local_timezone():
@@ -1693,6 +1787,16 @@ def cmd_fetch(args):
             snapshot["accounts"] = list(pool.map(collect, aliases))
     else:
         snapshot["accounts"] = [collect(alias) for alias in aliases]
+
+    # Keyed by the folder that was *asked* for rather than the one that
+    # answered, because that is the key the store looks it up under. The two
+    # differ exactly when a folder has gone, and standing in with the inbox
+    # under the missing folder's name is not what anybody wants back.
+    wanted = folder_choices(getattr(args, "folder", []))
+    for account in snapshot["accounts"]:
+        if account.get("ok") is not False and account.get("alias"):
+            remember(account["alias"], wanted.get(account["alias"], "") or "inbox",
+                     account, snapshot["fetchedAt"], timezone_name)
 
     out(snapshot)
 
@@ -3922,6 +4026,9 @@ def cmd_remove(args):
         if os.path.exists(path):
             os.unlink(path)
             removed = True
+    # Signing a mailbox out has to take its mail with it. The tokens going and
+    # the subjects staying would be the worst of both.
+    forget_cache(args.account)
     out({"ok": True, "removed": removed})
 
 

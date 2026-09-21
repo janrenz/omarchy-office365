@@ -162,6 +162,19 @@ keeps using the old client id or authority.
 
 ## Things that will surprise you
 
+- **A start draws the last answer before it asks anyone anything.** `fetch`
+  writes what came back to `~/.cache/omarchy/office365/<alias>.json`, one
+  snapshot per folder, and `Store` reads it with a blocking `FileView` in the
+  fetch unit's `Component.onCompleted`. Three things it deliberately does not
+  do, and each of them is a bug if it is undone: it does not touch `loading`,
+  because the fetch is still running and the spinner belongs over those rows;
+  it never draws over an answer already in hand, whatever order things arrive
+  in; and it stays away from the notifier, because priming that from the cache
+  would leave the first real fetch announcing everything that arrived while the
+  shell was off - a toast storm at login rather than a feature. Anything added
+  to a fetch's answer is cached with it for free, which also means anything
+  secret added to one would be on disk.
+
 - **A toast is a route back in, and it survives a shell restart.** Notifications
   go out through `omarchy-notification-send`, whose `--exec` becomes the
   `omarchy-exec-argv` hint: the click action rides as *data*, so omarchy can

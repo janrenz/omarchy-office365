@@ -44,6 +44,39 @@ Item {
     return pluginDir + "/graph.py"
   }
 
+  // Where `fetch` leaves its last answer. The same path graph.py builds, and
+  // the reason it is one file per mailbox rather than one per folder: an alias
+  // is already checked to be a filename and a folder id is a Graph blob or an
+  // IMAP path, which both sides would then have to hash into one the same way.
+  readonly property string cacheDir: {
+    var base = Quickshell.env("XDG_CACHE_HOME")
+    if (!base) base = Quickshell.env("HOME") + "/.cache"
+    return base + "/omarchy/office365"
+  }
+
+  // The last answer a mailbox gave, drawn before anything has been asked of
+  // the network. A shell start - and a QML edit is a shell restart - used to
+  // put the panel on a skeleton for as long as the first fetch took, measured
+  // at 4 to 8 seconds against real mailboxes, for data that had been on this
+  // machine the whole time.
+  //
+  // Three things it deliberately does not do. It does not touch `loading`: the
+  // fetch is still running and the spinner belongs over these rows, because
+  // they are the last answer rather than a fresh one. It never draws over an
+  // answer already in hand, whatever order things arrive in. And it does not
+  // go near the notifier - priming it from the cache would leave the first
+  // real fetch announcing everything that arrived while the shell was off,
+  // which is a toast storm at login rather than a feature.
+  function applyCached(key, held) {
+    if (!held || !held.account) return false
+    var entry = entries[key]
+    if (entry && entry.data) return false
+    var at = Date.parse(String(held.fetchedAt || ""))
+    patchEntry(key, { data: held.account, at: isNaN(at) ? 0 : at })
+    harvestFromMail(held.account)
+    return true
+  }
+
   // ---- subscriptions ------------------------------------------------------
   //
   // A Service claims a token, keeps a request under it, and drops it when it
@@ -702,7 +735,39 @@ Item {
       // A folder picked for the first time has nothing cached, so fetch it as
       // soon as somebody asks for it rather than at the next tick.
       readonly property string keySignature: root.keysForAlias(mailbox).join(",")
-      onKeySignatureChanged: Qt.callLater(unit.refreshNow)
+      onKeySignatureChanged: {
+        unit.drawFromCache()
+        Qt.callLater(unit.refreshNow)
+      }
+
+      // This mailbox's last answer, per folder. Loaded blockingly and once:
+      // the file is tens of kilobytes on local disk, and the whole point is to
+      // have it before the first frame rather than after it. Not watched -
+      // every fetch rewrites it, and re-reading our own answer would be work
+      // for nothing.
+      property FileView cache: FileView {
+        path: root.cacheDir + "/" + unit.mailbox + ".json"
+        blockLoading: true
+        printErrors: false
+      }
+
+      Component.onCompleted: unit.drawFromCache()
+
+      function drawFromCache() {
+        var text = ""
+        // No file at all is the ordinary case on a first run, and FileView
+        // says so by throwing rather than by answering with nothing.
+        try { text = cache.text() } catch (error) { return }
+        if (!text) return
+        var held = Model.parseJson(text, null)
+        var folders = held && held.folders ? held.folders : null
+        if (!folders) return
+        var keys = root.keysForAlias(mailbox)
+        for (var i = 0; i < keys.length; i++) {
+          var spec = root.wants[keys[i]]
+          if (spec) root.applyCached(keys[i], folders[spec.folder])
+        }
+      }
     }
   }
 

@@ -279,6 +279,89 @@ class Pagination(unittest.TestCase):
         self.assertFalse(complete)
 
 
+class WhatAStartDrawsBeforeTheNetwork(unittest.TestCase):
+    """The snapshot a fetch leaves behind for the next shell to open on.
+
+    Nothing the plugin learned used to outlive the process that learned it, so
+    every start - and a QML edit is a restart - put the panel on a skeleton for
+    as long as the first fetch took. What is kept is what came back, per
+    mailbox and folder, and the store draws it before it asks anyone anything.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.original = graph.CACHE_DIR
+        graph.CACHE_DIR = self.dir
+
+    def tearDown(self):
+        graph.CACHE_DIR = self.original
+
+    def held(self, alias="work"):
+        with open(os.path.join(self.dir, alias + ".json"), encoding="utf-8") as fh:
+            return json.load(fh)["folders"]
+
+    def account(self, alias="work", subject="Hello"):
+        return {"ok": True, "alias": alias, "mail": [{"id": "1", "subject": subject}]}
+
+    def test_the_answer_comes_back_under_the_folder_it_was_asked_for(self):
+        graph.remember("work", "inbox", self.account(), "2026-09-21T06:00:00+00:00", "UTC")
+        held = self.held()
+        self.assertEqual(list(held), ["inbox"])
+        self.assertEqual(held["inbox"]["account"]["mail"][0]["subject"], "Hello")
+        self.assertEqual(held["inbox"]["fetchedAt"], "2026-09-21T06:00:00+00:00")
+
+    def test_a_second_folder_joins_the_first_rather_than_replacing_it(self):
+        # The bar reads the inbox while the window reads Archive, and a start
+        # that dropped one of them would draw a skeleton for whichever lost.
+        graph.remember("work", "inbox", self.account(), "2026-09-21T06:00:00+00:00", "UTC")
+        graph.remember("work", "AAA=", self.account(), "2026-09-21T06:01:00+00:00", "UTC")
+        self.assertEqual(sorted(self.held()), ["AAA=", "inbox"])
+
+    def test_the_oldest_folder_falls_out_past_the_cap(self):
+        for n in range(graph.CACHE_FOLDERS + 3):
+            graph.remember("work", "f%02d" % n, self.account(),
+                           "2026-09-21T06:%02d:00+00:00" % n, "UTC")
+        held = self.held()
+        self.assertEqual(len(held), graph.CACHE_FOLDERS)
+        self.assertNotIn("f00", held)
+        self.assertIn("f%02d" % (graph.CACHE_FOLDERS + 2), held)
+
+    def test_a_snapshot_too_big_to_be_worth_reading_back_is_dropped(self):
+        # The store reads this file before its first frame, so one that would
+        # stall the start is one worth not having.
+        huge = {"ok": True, "alias": "work",
+                "mail": [{"id": str(n), "preview": "x" * 4096}
+                         for n in range(graph.CACHE_MAX_BYTES // 4096 + 2)]}
+        graph.remember("work", "inbox", huge, "2026-09-21T06:00:00+00:00", "UTC")
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "work.json")))
+
+    def test_a_directory_that_cannot_be_written_is_not_worth_a_word(self):
+        # The fetch succeeded. All a failed write costs is the next start being
+        # as slow as every start used to be.
+        graph.CACHE_DIR = "/proc/nothing-here"
+        graph.remember("work", "inbox", self.account(), "2026-09-21T06:00:00+00:00", "UTC")
+
+    def test_signing_out_takes_the_mail_with_it(self):
+        graph.remember("work", "inbox", self.account(), "2026-09-21T06:00:00+00:00", "UTC")
+        self.assertTrue(graph.forget_cache("work"))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "work.json")))
+
+    def test_the_file_is_no_more_readable_than_the_tokens_are(self):
+        # Subjects, senders and two lines of preview text, at rest. Same mode
+        # as the token store, in a directory made the same way.
+        # A directory this has to create itself: mkdtemp already makes a 0700
+        # one, so checking that would be checking the standard library.
+        graph.CACHE_DIR = os.path.join(self.dir, "made", "here")
+        graph.remember("work", "inbox", self.account(), "2026-09-21T06:00:00+00:00", "UTC")
+        self.assertEqual(os.stat(os.path.join(graph.CACHE_DIR, "work.json")).st_mode & 0o777,
+                         0o600)
+        self.assertEqual(os.stat(graph.CACHE_DIR).st_mode & 0o777, 0o700)
+
+    def test_an_alias_that_is_not_a_filename_is_refused_rather_than_resolved(self):
+        with self.assertRaises(graph.AccountError):
+            graph.cache_path("../../etc/passwd")
+
+
 class Args:
     """The pieces of the parsed command line that fetch_account reads."""
 
