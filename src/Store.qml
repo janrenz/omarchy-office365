@@ -92,7 +92,7 @@ Item {
           spec = out[key] = {
             key: key, alias: alias, folder: folder,
             mails: 0, days: 0, demo: false, intervalSec: 3600,
-            notify: false, pausePolling: true
+            notify: false, pausePolling: true, wantFolders: false
           }
         }
         // The most anyone asked for, so a widget showing five messages and a
@@ -100,6 +100,9 @@ Item {
         spec.mails = Math.max(spec.mails, Number(request.mails) || 5)
         spec.days = Math.max(spec.days, Number(request.days) || 3)
         spec.demo = spec.demo || request.demo === true
+        // One host drawing the tree is enough to pay for it, and the bar on
+        // its own does not draw one - see Service.wantsFolders.
+        spec.wantFolders = spec.wantFolders || request.wantFolders === true
         spec.intervalSec = Math.min(spec.intervalSec, Number(request.intervalSec) || 180)
         // One host wanting to be told is enough. The fetch is shared, so the
         // announcement has to be made once for all of them or not at all.
@@ -595,6 +598,43 @@ Item {
         enqueue(root.keysForAlias(mailbox))
       }
 
+      // What the last fetch for each key actually asked for, as
+      // {key: {mails, folders}}. Nothing binds to it, so it is written in
+      // place.
+      property var served: ({})
+
+      // A host arriving wants more than the one before it: the window wants
+      // twenty-five rows and the folder tree where the bar wanted five and no
+      // tree at all. The key is the same, so `keySignature` does not move and
+      // the answer already in the store stands - which left the window opening
+      // on five messages beside an empty sidebar until the interval came
+      // round, up to three minutes later. Wanting *less* is not worth a fetch:
+      // what is in hand already covers it.
+      readonly property string demand: {
+        var keys = root.keysForAlias(mailbox)
+        var parts = []
+        for (var i = 0; i < keys.length; i++) {
+          var spec = root.wants[keys[i]]
+          if (spec) parts.push(keys[i] + "=" + spec.mails + "," + (spec.wantFolders ? "t" : "f"))
+        }
+        return parts.join(" ")
+      }
+
+      onDemandChanged: Qt.callLater(unit.catchUp)
+
+      function catchUp() {
+        var keys = root.keysForAlias(mailbox)
+        var behind = []
+        for (var i = 0; i < keys.length; i++) {
+          var spec = root.wants[keys[i]]
+          if (!spec) continue
+          var last = served[keys[i]]
+          if (!last || spec.mails > last.mails || (spec.wantFolders && !last.folders))
+            behind.push(keys[i])
+        }
+        if (behind.length > 0) enqueue(behind)
+      }
+
       function pump() {
         if (proc.running || queue.length === 0 || root.pluginDir === "") return
         var key = queue[0]
@@ -604,6 +644,9 @@ Item {
                        "--mails", String(spec.mails),
                        "--days", String(spec.days),
                        "--account", spec.alias]
+        // Left off entirely when the tree is wanted, so the command line is
+        // what it always was for anyone reading it over somebody's shoulder.
+        if (!spec.wantFolders) command.push("--no-folders")
         // Only a folder that was actually picked: leaving the default off
         // keeps the command line what it was for anyone reading their inbox.
         if (spec.folder !== "" && spec.folder !== "inbox")
@@ -611,6 +654,9 @@ Item {
         // "demo": true in shell.json fills the panel with synthetic data, for
         // working on the layout without every mailbox being signed in.
         if (spec.demo) command.push("--demo")
+        // Recorded as it goes out rather than when it lands: this is what was
+        // asked for, and a fetch that failed is the retry timer's business.
+        unit.served[key] = { mails: spec.mails, folders: spec.wantFolders === true }
         root.patchEntry(key, { loading: true })
         proc.command = command
         proc.running = true

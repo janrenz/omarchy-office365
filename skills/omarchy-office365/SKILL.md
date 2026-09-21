@@ -42,6 +42,9 @@ sender's markup where it has none. `--body html` keeps the markup either way
 and `--body text` flattens it either way; text is rarely not what you want.
 `fetch` is the list — recent mail plus calendar events, and `--folder
 ALIAS=ID` reads a folder other than the inbox; `folders` names them.
+`--no-folders` leaves the folder tree out of the answer, which is three
+requests on Graph and one per folder on IMAP: worth passing when the ids are
+not what you came for.
 
 `search` is how to reach mail `fetch` does not: `fetch` reads the newest N of
 one folder, and everything older than that is only findable this way. It

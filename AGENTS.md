@@ -73,6 +73,18 @@ What belongs to one host stays in `Service.qml`. Fetching is keyed by mailbox
 token refresh and Entra rotates refresh tokens, so two at once risks an
 avoidable sign-in. Do not add a poll outside the store.
 
+**A host pays only for what it draws, and asking for more re-fetches at once.**
+The store merges every host's request into one, taking the most anyone asked
+for — and `Service.wantsFolders` is part of that, because only the window has a
+sidebar and reading the tree costs three requests on Graph and a STATUS per
+folder on IMAP (850 ms on a mailbox with 34 of them). The key does not change
+when a host arrives, so `keySignature` does not move and the answer already in
+the store would have stood: the window opened on the bar's five messages beside
+an empty sidebar until the interval came round. `fetchUnits`'s `demand` and
+`catchUp` are what close that — a fetch goes out the moment somebody wants more
+than the last one asked for, and never when they want less. Anything new that
+makes a fetch cheaper for one host belongs in that comparison too.
+
 ## Invariants. Breaking one of these is a security bug, not a regression
 
 1. **Tokens never reach QML.** They live under `~/.local/state/omarchy/` mode

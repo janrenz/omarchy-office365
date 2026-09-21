@@ -300,11 +300,15 @@ class FetchAccount(unittest.TestCase):
     """
 
     def fetch(self, failing_queries=(), inbox_ok=True, timezone_name="UTC",
-              folder=(), folders=None, folders_error=""):
+              folder=(), folders=None, folders_error="", want_folders=None):
         failing = set(failing_queries)
         self.calendar_params = {}
         # Every folder the mail queries were pointed at, in order.
         self.folders_read = []
+        # Whether the tree was asked for at all. `want_folders=None` leaves the
+        # attribute off the arguments entirely, which is the caller written
+        # before --no-folders existed.
+        self.tree_read = 0
 
         def collect(token, path, params, *a, **k):
             self.calendar_params = params
@@ -312,6 +316,14 @@ class FetchAccount(unittest.TestCase):
 
         args = Args()
         args.folder = list(folder)
+        if want_folders is not None:
+            args.folders_wanted = want_folders
+
+        def fetch_folders(token, inbox_id=""):
+            self.tree_read += 1
+            return ([] if folders_error else (list(folders) if folders is not None else []),
+                    folders_error,
+                    True)
 
         patched = {
             "read_json": lambda *a, **k: {"username": "you@example.com"},
@@ -321,11 +333,7 @@ class FetchAccount(unittest.TestCase):
                 else (403, {"error": {"message": "Access is denied"}})
             ),
             "fetch_messages": self.messages(failing),
-            "fetch_folders": lambda token, inbox_id="": (
-                [] if folders_error else (list(folders) if folders is not None else []),
-                folders_error,
-                True,
-            ),
+            "fetch_folders": fetch_folders,
             "graph_collect": collect,
         }
         original = {name: getattr(graph, name) for name in patched}
@@ -353,6 +361,36 @@ class FetchAccount(unittest.TestCase):
 
     def test_nothing_wrong_says_nothing(self):
         result = self.fetch()
+        self.assertEqual(result["warnings"], [])
+
+    def test_a_caller_that_never_heard_of_the_flag_still_gets_the_tree(self):
+        # The skill, a shell script and anyone at a terminal all call `fetch`
+        # without it, and a folder list that quietly stopped arriving is a
+        # window with an empty sidebar and nothing saying why.
+        self.fetch(folders=[{"id": "A", "name": "Archive", "isInbox": False}])
+        self.assertEqual(self.tree_read, 1)
+
+    def test_the_tree_is_not_read_when_nothing_is_drawing_it(self):
+        """--no-folders, for a bar widget with no window open.
+
+        One request per level on Graph and one STATUS per folder on IMAP,
+        measured at 850 ms on a mailbox with 34 of them, spent on a sidebar
+        nobody is looking at. The empty list is not "no folders": the store
+        keeps the last tree it was given until a window asks for a fresh one.
+        """
+        result = self.fetch(folders=[{"id": "A", "name": "Archive", "isInbox": False}], want_folders=False)
+        self.assertEqual(self.tree_read, 0)
+        self.assertEqual(result["folders"], [])
+        # Everything the bar actually draws is still there.
+        self.assertEqual(result["unreadCount"], 9)
+        self.assertTrue(result["mail"])
+        self.assertEqual(result["warnings"], [])
+
+    def test_a_folder_picked_without_a_tree_is_taken_at_its_word(self):
+        # Nothing to check the id against is not a reason to show the inbox
+        # instead: the window picked it, and the window has the tree.
+        result = self.fetch(folder=["work=A"], want_folders=False)
+        self.assertEqual(result["folderId"], "A")
         self.assertEqual(result["warnings"], [])
         self.assertEqual(result["unreadCount"], 9)
         self.assertTrue(result["unreadKnown"])

@@ -243,6 +243,8 @@ Item {
     pluginDir: root.pluginDir
     store: root.service
     fallbackColor: Color.accent
+    // The one host with a sidebar, so the one host whose fetches pay for it.
+    wantsFolders: true
   }
 
   // The window's own view of those mailboxes. Deliberately not called

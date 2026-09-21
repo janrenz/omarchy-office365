@@ -182,6 +182,12 @@ Item {
   // whichever host can draw it and left alone by the ones that cannot, so it
   // is deliberately not read from the widget's configuration.
   property bool threaded: false
+  // Whether this host draws the folder tree. Only the window does, and reading
+  // one costs three requests on Graph and a STATUS per folder on IMAP - 850 ms
+  // on a mailbox with 34 of them, spent on a sidebar nobody is looking at
+  // while the bar is the only thing on screen. Set by the host that can draw
+  // it, for the same reason `threaded` is.
+  property bool wantsFolders: false
   // The agenda as a day-grouped list or as a drawn time grid. The list is the
   // default until the grid has earned it.
   readonly property string agendaView: String(setting("agendaView", "list")) === "timeline" ? "timeline" : "list"
@@ -206,6 +212,8 @@ Item {
     days: Model.calendarDays(calendarMode),
     demo: demo,
     intervalSec: refreshIntervalSec,
+    // Not `folders`: that key above is which folder each mailbox is reading.
+    wantFolders: wantsFolders,
     // Asked for per host, answered once by the store: the widget and the
     // window watching the same inbox share one fetch, so they must also share
     // one announcement of what that fetch found.

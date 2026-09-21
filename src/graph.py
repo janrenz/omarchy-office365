@@ -1338,6 +1338,15 @@ def online_provider(event):
     return provider
 
 
+def folders_wanted(args):
+    """Whether this fetch should read the folder tree.
+
+    Default true, so a caller written before `--no-folders` - the skill, a
+    shell script, somebody at a terminal - keeps getting the whole answer.
+    """
+    return getattr(args, "folders_wanted", True) is not False
+
+
 def imap_fetch_account(alias, account, token, args, timezone_name):
     """One IMAP mailbox, in the shape fetch_account returns for a Graph one.
 
@@ -1350,7 +1359,8 @@ def imap_fetch_account(alias, account, token, args, timezone_name):
     top = max(1, min(args.mails, MAIL_CAP))
     wanted = folder_choices(getattr(args, "folder", [])).get(alias, "")
     try:
-        data = need_imap().snapshot(account, token, top, wanted)
+        data = need_imap().snapshot(account, token, top, wanted,
+                                    want_folders=folders_wanted(args))
     except need_imap().TransportError as error:
         # An AccountError rather than a fail(): one unreachable mailbox must
         # not empty the others in the same fetch.
@@ -1455,14 +1465,22 @@ def fetch_account(alias, args, timezone_name):
         count_error = graph_error(payload, "Could not read the unread count")
 
     # ---- folders ---------------------------------------------------------
-    folders, folder_error, folders_complete = fetch_folders(token, inbox_id)
+    # One request per level of the tree, and only the window draws it: a bar
+    # widget on its own spent 380 ms of every refresh reading a sidebar nobody
+    # was looking at. An empty list is not "this mailbox has no folders" - the
+    # store keeps the last tree it was given and the window asks for one the
+    # moment it opens.
+    folders = []
+    if folders_wanted(args):
+        folders, folder_error, folders_complete = fetch_folders(token, inbox_id)
+        if folder_error:
+            result["warnings"].append({"scope": "folders", "message": folder_error})
+        elif not folders_complete:
+            result["warnings"].append(
+                {"scope": "folders",
+                 "message": "Too many folders to list them all - some are not shown"}
+            )
     result["folders"] = folders
-    if folder_error:
-        result["warnings"].append({"scope": "folders", "message": folder_error})
-    elif not folders_complete:
-        result["warnings"].append(
-            {"scope": "folders", "message": "Too many folders to list them all - some are not shown"}
-        )
 
     # Which folder to read. An id that is no longer in the tree - a folder
     # deleted or renamed away since it was picked - falls back to the inbox
@@ -1482,8 +1500,9 @@ def fetch_account(alias, args, timezone_name):
                     {"scope": "folders", "message": "That folder is gone - showing the inbox"}
                 )
             else:
-                # No tree to check against, so take the caller at its word
-                # rather than silently ignoring the choice.
+                # No tree to check against - not read, or the request for it
+                # failed - so take the caller at its word rather than silently
+                # ignoring the choice and showing the inbox instead.
                 folder_id = wanted
     if folder_name == "":
         for row in folders:
@@ -3952,6 +3971,15 @@ def main():
         action="store_true",
         help="start the calendar window at the current time instead of midnight",
     )
+    fetch.add_argument(
+        "--no-folders",
+        dest="folders_wanted",
+        action="store_false",
+        help="skip the folder tree. It costs three requests on Graph and one "
+             "STATUS per folder on IMAP - measured at 850 ms on a mailbox with "
+             "34 of them - and only the window draws it.",
+    )
+    fetch.set_defaults(folders_wanted=True)
     fetch.set_defaults(func=cmd_fetch)
 
     search = sub.add_parser("search", help="find mail in one or more mailboxes")
