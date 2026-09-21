@@ -214,6 +214,12 @@ Item {
     intervalSec: refreshIntervalSec,
     // Not `folders`: that key above is which folder each mailbox is reading.
     wantFolders: wantsFolders,
+    // Outlook's Focused views are the two slowest requests a fetch makes -
+    // 2.4 s of 3.4 s, measured - and they fill this one filter. Unlike
+    // `wantsFolders` this is not about what a host can draw but about what it
+    // is drawing right now, so it moves whenever the pill does and the store's
+    // catch-up turns that into a fetch.
+    wantFocused: focusedOnly,
     // Asked for per host, answered once by the store: the widget and the
     // window watching the same inbox share one fetch, so they must also share
     // one announcement of what that fetch found.

@@ -1432,6 +1432,24 @@ def online_provider(event):
     return provider
 
 
+def focused_wanted(args):
+    """Whether this fetch should read the two Focused views.
+
+    They are the most expensive thing a fetch does - measured at 1.4 s and
+    1.0 s of a 3.4 s fetch against a real mailbox, because
+    `inferenceClassification eq 'focused'` is a filter Exchange will not answer
+    from an index and the `receivedDateTime ge 1970` prefix that makes it
+    orderable at all does not help. They fill one filter pill, which is off
+    unless `focusedByDefault` turns it on.
+
+    Default true, for the same reason `--no-folders` is opt-out rather than
+    opt-in: the rows these queries bring back are folded into `mail` with all
+    the others, so a caller that got fewer of them would have no way of
+    noticing. The store opts out; a script does not have to know this exists.
+    """
+    return getattr(args, "focused_wanted", True) is not False
+
+
 def folders_wanted(args):
     """Whether this fetch should read the folder tree.
 
@@ -1620,9 +1638,13 @@ def fetch_account(alias, args, timezone_name):
 
     # Focused/Other is a split Outlook draws across the inbox and nowhere else,
     # so outside it those two queries would cost two round trips to answer a
-    # question the folder cannot be asked. A flag means the same thing in every
-    # folder, so that query stays wherever the reader is.
-    queries = MAIL_QUERIES if reading_inbox else tuple(q for q in MAIL_QUERIES if not q[2])
+    # question the folder cannot be asked. They are also the two most expensive
+    # requests a fetch makes by a distance, so they are skipped again when
+    # nothing on screen is filtered to Focused - see focused_wanted. A flag
+    # means the same thing in every folder, so that query stays wherever the
+    # reader is.
+    want_focused = reading_inbox and focused_wanted(args)
+    queries = tuple(q for q in MAIL_QUERIES if not q[2] or want_focused)
 
     # How far back the folder's own page reaches, and whether anything is
     # behind it. Reported rather than left to be worked out from `mail`,
@@ -4078,6 +4100,15 @@ def main():
         action="store_true",
         help="start the calendar window at the current time instead of midnight",
     )
+    fetch.add_argument(
+        "--no-focused",
+        dest="focused_wanted",
+        action="store_false",
+        help="skip Outlook's Focused views. They are the two slowest requests "
+             "a fetch makes - 2.4 s of 3.4 s, measured - and only the Focused "
+             "filter shows what they bring back.",
+    )
+    fetch.set_defaults(focused_wanted=True)
     fetch.add_argument(
         "--no-folders",
         dest="folders_wanted",

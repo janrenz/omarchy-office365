@@ -125,7 +125,7 @@ Item {
           spec = out[key] = {
             key: key, alias: alias, folder: folder,
             mails: 0, days: 0, demo: false, intervalSec: 3600,
-            notify: false, pausePolling: true, wantFolders: false
+            notify: false, pausePolling: true, wantFolders: false, wantFocused: false
           }
         }
         // The most anyone asked for, so a widget showing five messages and a
@@ -136,6 +136,10 @@ Item {
         // One host drawing the tree is enough to pay for it, and the bar on
         // its own does not draw one - see Service.wantsFolders.
         spec.wantFolders = spec.wantFolders || request.wantFolders === true
+        // The same bargain for Outlook's Focused views, except that this one
+        // follows a filter rather than a host: one pill switched on anywhere
+        // buys the two queries for everybody watching that mailbox.
+        spec.wantFocused = spec.wantFocused || request.wantFocused === true
         spec.intervalSec = Math.min(spec.intervalSec, Number(request.intervalSec) || 180)
         // One host wanting to be told is enough. The fetch is shared, so the
         // announcement has to be made once for all of them or not at all.
@@ -648,7 +652,9 @@ Item {
         var parts = []
         for (var i = 0; i < keys.length; i++) {
           var spec = root.wants[keys[i]]
-          if (spec) parts.push(keys[i] + "=" + spec.mails + "," + (spec.wantFolders ? "t" : "f"))
+          if (spec) parts.push(keys[i] + "=" + spec.mails
+                               + "," + (spec.wantFolders ? "t" : "f")
+                               + "," + (spec.wantFocused ? "t" : "f"))
         }
         return parts.join(" ")
       }
@@ -662,7 +668,9 @@ Item {
           var spec = root.wants[keys[i]]
           if (!spec) continue
           var last = served[keys[i]]
-          if (!last || spec.mails > last.mails || (spec.wantFolders && !last.folders))
+          if (!last || spec.mails > last.mails
+              || (spec.wantFolders && !last.folders)
+              || (spec.wantFocused && !last.focused))
             behind.push(keys[i])
         }
         if (behind.length > 0) enqueue(behind)
@@ -680,6 +688,7 @@ Item {
         // Left off entirely when the tree is wanted, so the command line is
         // what it always was for anyone reading it over somebody's shoulder.
         if (!spec.wantFolders) command.push("--no-folders")
+        if (!spec.wantFocused) command.push("--no-focused")
         // Only a folder that was actually picked: leaving the default off
         // keeps the command line what it was for anyone reading their inbox.
         if (spec.folder !== "" && spec.folder !== "inbox")
@@ -689,7 +698,8 @@ Item {
         if (spec.demo) command.push("--demo")
         // Recorded as it goes out rather than when it lands: this is what was
         // asked for, and a fetch that failed is the retry timer's business.
-        unit.served[key] = { mails: spec.mails, folders: spec.wantFolders === true }
+        unit.served[key] = { mails: spec.mails, folders: spec.wantFolders === true,
+                             focused: spec.wantFocused === true }
         root.patchEntry(key, { loading: true })
         proc.command = command
         proc.running = true

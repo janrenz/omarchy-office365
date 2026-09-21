@@ -85,6 +85,16 @@ an empty sidebar until the interval came round. `fetchUnits`'s `demand` and
 than the last one asked for, and never when they want less. Anything new that
 makes a fetch cheaper for one host belongs in that comparison too.
 
+`Service.wantFocused` rides the same rails for a different reason: not what a
+host *can* draw but what it is drawing right now. Outlook's two Focused queries
+cost 1.4 s and 1.0 s of a 3.4 s fetch — `inferenceClassification eq 'focused'`
+is a filter Exchange will not answer from an index, and the
+`receivedDateTime ge 1970` prefix that makes it orderable at all does not help
+— so they are read only while a Focused pill is on somewhere. Switching one on
+is a demand that grew, so `catchUp` fetches them at once; until they land the
+list shows the focused rows already in hand, because every row carries its own
+`focused` flag whichever query found it.
+
 ## Invariants. Breaking one of these is a security bug, not a regression
 
 1. **Tokens never reach QML.** They live under `~/.local/state/omarchy/` mode

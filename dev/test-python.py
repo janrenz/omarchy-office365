@@ -383,11 +383,14 @@ class FetchAccount(unittest.TestCase):
     """
 
     def fetch(self, failing_queries=(), inbox_ok=True, timezone_name="UTC",
-              folder=(), folders=None, folders_error="", want_folders=None):
+              folder=(), folders=None, folders_error="", want_folders=None,
+              want_focused=None):
         failing = set(failing_queries)
         self.calendar_params = {}
         # Every folder the mail queries were pointed at, in order.
         self.folders_read = []
+        # Which views were actually asked for, as (unread, focused, flagged).
+        self.queries_run = []
         # Whether the tree was asked for at all. `want_folders=None` leaves the
         # attribute off the arguments entirely, which is the caller written
         # before --no-folders existed.
@@ -401,6 +404,8 @@ class FetchAccount(unittest.TestCase):
         args.folder = list(folder)
         if want_folders is not None:
             args.folders_wanted = want_folders
+        if want_focused is not None:
+            args.focused_wanted = want_focused
 
         def fetch_folders(token, inbox_id=""):
             self.tree_read += 1
@@ -432,6 +437,7 @@ class FetchAccount(unittest.TestCase):
         def answer(token, top, tz, unread_only=False, focused_only=False, folder_id="inbox",
                    flagged_only=False):
             self.folders_read.append(folder_id)
+            self.queries_run.append((unread_only, focused_only, flagged_only))
             for label, unread, focused, flagged in graph.MAIL_QUERIES:
                 if (unread, focused, flagged) != (unread_only, focused_only, flagged_only):
                     continue
@@ -468,6 +474,39 @@ class FetchAccount(unittest.TestCase):
         self.assertEqual(result["unreadCount"], 9)
         self.assertTrue(result["mail"])
         self.assertEqual(result["warnings"], [])
+
+    def test_a_caller_that_never_heard_of_no_focused_still_gets_the_views(self):
+        # Focused rows are folded into `mail` with all the others, so a caller
+        # getting fewer of them has no way of noticing - which is exactly why
+        # this one is opt-out rather than opt-in.
+        self.fetch()
+        self.assertIn((False, True, False), self.queries_run)
+        self.assertIn((True, True, False), self.queries_run)
+
+    def test_the_focused_views_are_not_read_when_no_filter_wants_them(self):
+        """--no-focused, for a panel whose Focused pill is off.
+
+        `inferenceClassification eq 'focused'` is a filter Exchange will not
+        answer from an index: the two queries cost 1.4 s and 1.0 s of a 3.4 s
+        fetch, measured, which is more than everything else together. The pill
+        is off unless `focusedByDefault` turns it on.
+        """
+        result = self.fetch(want_focused=False)
+        self.assertEqual(self.queries_run,
+                         [(False, False, False), (True, False, False), (False, False, True)])
+        # The views that are actually on screen are all still there.
+        self.assertTrue(result["mail"])
+        self.assertEqual(result["warnings"], [])
+
+    def test_outside_the_inbox_they_are_gone_either_way(self):
+        # Focused/Other is a split Outlook draws across the inbox and nowhere
+        # else, so asking elsewhere spends two round trips on a question the
+        # folder cannot be asked.
+        for wanted in (None, True):
+            self.fetch(folder=["work=A"], folders=[{"id": "A", "name": "Archive",
+                                                    "isInbox": False}],
+                       want_focused=wanted)
+            self.assertNotIn((False, True, False), self.queries_run)
 
     def test_a_folder_picked_without_a_tree_is_taken_at_its_word(self):
         # Nothing to check the id against is not a reason to show the inbox
@@ -2379,6 +2418,7 @@ class TheFoldTheNotifierReadsFrom(FetchAccount):
         def answer(token, top, tz, unread_only=False, focused_only=False, folder_id="inbox",
                    flagged_only=False):
             self.folders_read.append(folder_id)
+            self.queries_run.append((unread_only, focused_only, flagged_only))
             for label, unread, focused, flagged in graph.MAIL_QUERIES:
                 if (unread, focused, flagged) != (unread_only, focused_only, flagged_only):
                     continue

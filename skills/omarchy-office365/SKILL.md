@@ -44,7 +44,9 @@ and `--body text` flattens it either way; text is rarely not what you want.
 ALIAS=ID` reads a folder other than the inbox; `folders` names them.
 `--no-folders` leaves the folder tree out of the answer, which is three
 requests on Graph and one per folder on IMAP: worth passing when the ids are
-not what you came for.
+not what you came for. `--no-focused` drops Outlook's Focused views, which are
+the two slowest requests a fetch makes by a distance - the rows they add are
+the ones only a Focused filter shows.
 
 `search` is how to reach mail `fetch` does not: `fetch` reads the newest N of
 one folder, and everything older than that is only findable this way. It
