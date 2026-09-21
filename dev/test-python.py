@@ -775,40 +775,63 @@ class ImapSnapshotLists(unittest.TestCase):
                 raise imaplib.IMAP4.error("SEARCH not supported")
             return "OK", [" ".join(self.hits.get(key, [])).encode()]
 
-    def snapshot(self, hits=(), refusing=()):
+    def snapshot(self, hits=(), refusing=(), counts=None):
+        """One fetch against a mailbox holding uids 7, 8 and 9 as its page.
+
+        The rows carry ids `make_id` built rather than hand-written ones, so
+        that `page_uids` can read a UID back out of them the way it does in
+        production. A fixture that made up its own id shape is exactly how the
+        two fetches would go on overlapping with the suite staying green.
+        """
         import imapmail
         client = self.Client(hits, refusing)
-        row = lambda uid: {"id": "<%s@example.com>" % uid, "subject": uid,
+        row = lambda uid: {"id": imapmail.make_id("INBOX", "42", uid), "subject": uid,
                            "received": "2026-09-0%s 10:00:00" % uid, "flagged": False,
                            "read": True}
+        asked = []
+
+        def read_rows(c, mailbox, validity, spec, by_uid):
+            # The real one refuses an empty spec before it reaches the server,
+            # so an empty one is not a fetch and does not belong in the list a
+            # test counts round trips from.
+            if not spec:
+                return []
+            asked.append(str(spec))
+            return [row(uid) for uid in str(spec).split(",") if uid]
+
         patched = {
             "connect": lambda account, token: client,
             "close": lambda c: None,
             "folder_rows": lambda c, want_counts=True: (
-                [{"id": "INBOX", "name": "Inbox", "isInbox": True}], True),
+                [{"id": "INBOX", "name": "Inbox", "isInbox": True}], True, dict(counts or {})),
             "folder_counts": lambda c, mailbox: (2, 40),
             "select": lambda c, mailbox, readonly=True: (9, "42"),
             "sequence_window": lambda exists, top: "7,8,9",
             # The window's own rows, then whichever uids a SEARCH matched.
-            "read_rows": lambda c, mailbox, validity, spec, by_uid: [
-                row(uid) for uid in str(spec).split(",") if uid],
+            "read_rows": read_rows,
         }
         original = {name: getattr(imapmail, name) for name in patched}
         for name, stub in patched.items():
             setattr(imapmail, name, stub)
         try:
-            return client, imapmail.snapshot({"alias": "work"}, "token", 3)
+            result = imapmail.snapshot({"alias": "work"}, "token", 3)
+            client.fetched = asked
+            return client, result
         finally:
             for name, value in original.items():
                 setattr(imapmail, name, value)
+
+    def uid_id(self, uid):
+        import imapmail
+        return imapmail.make_id("INBOX", "42", uid)
 
     def test_both_filtered_views_are_asked_for(self):
         client, result = self.snapshot(hits={"UNSEEN": ["4"], "FLAGGED": ["1"]})
         self.assertEqual(client.searches, ["UNSEEN", "FLAGGED"])
         # The flagged one is mail the window itself never listed: uid 1 is
         # nowhere in the newest three, and that is the point of asking.
-        self.assertIn("<1@example.com>", [row["id"] for row in result["mail"]])
-        self.assertIn("<4@example.com>", [row["id"] for row in result["mail"]])
+        self.assertIn(self.uid_id("1"), [row["id"] for row in result["mail"]])
+        self.assertIn(self.uid_id("4"), [row["id"] for row in result["mail"]])
         self.assertEqual(result["warnings"], [])
 
     def test_a_server_that_refuses_one_says_which_view_is_short(self):
@@ -833,7 +856,42 @@ class ImapSnapshotLists(unittest.TestCase):
         _client, result = self.snapshot(hits={"UNSEEN": ["4"], "FLAGGED": ["1"]})
         # uids 7, 8 and 9 are the window; 1 and 4 came out of the searches.
         self.assertEqual(result["mailPage"], {"oldest": "2026-09-07 10:00:00", "full": True})
-        self.assertIn("<1@example.com>", [row["id"] for row in result["mail"]])
+        self.assertIn(self.uid_id("1"), [row["id"] for row in result["mail"]])
+
+    def test_a_search_hit_the_page_already_carried_is_not_fetched_again(self):
+        """The page and the searches overlap, and the overlap used to be paid for.
+
+        The newest unread mail is nearly always inside the newest N, so the
+        UNSEEN fetch re-downloaded headers and preview text for rows that were
+        already in hand - measured at 682 ms of a 4.4 s refresh on a real
+        mailbox. Uid 8 is in the page here and uid 4 is not, so only uid 4 is
+        worth a round trip, and the answer has to be the same either way.
+        """
+        client, result = self.snapshot(hits={"UNSEEN": ["4", "8"]})
+        self.assertEqual(client.fetched, ["7,8,9", "4"])
+        self.assertEqual(sorted(row["id"] for row in result["mail"]),
+                         sorted(self.uid_id(uid) for uid in ("4", "7", "8", "9")))
+
+    def test_a_search_matching_only_what_is_shown_asks_for_nothing(self):
+        # read_rows refuses an empty spec, so this is a round trip saved rather
+        # than a FETCH of everything - which is what an empty set would mean.
+        client, _result = self.snapshot(hits={"UNSEEN": ["8", "9"]})
+        self.assertEqual(client.fetched, ["7,8,9"])
+
+    def test_the_unread_count_comes_from_the_tree_that_was_just_read(self):
+        # folder_rows STATUSes every folder it lists and the inbox sorts first,
+        # so asking again is a second round trip for the same number. The stub
+        # answers 2 from STATUS and 11 from the tree: 11 is the one that must
+        # come back when the tree carries it.
+        _client, result = self.snapshot(counts={"INBOX": (11, 40)})
+        self.assertEqual(result["unreadCount"], 11)
+
+    def test_a_tree_that_never_counted_the_inbox_still_asks(self):
+        # 0 on a row cannot mean both "none unread" and "never asked", which is
+        # why the count cap reports what it reached rather than leaving it to
+        # be guessed from the row.
+        _client, result = self.snapshot(counts={})
+        self.assertEqual(result["unreadCount"], 2)
 
 
 class SearchingIMAP(unittest.TestCase):

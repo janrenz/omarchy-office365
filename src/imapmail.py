@@ -435,8 +435,12 @@ def list_folders(client):
 def folder_rows(client, want_counts=True):
     """The folder tree flattened parents-first, in graph.py's row shape.
 
-    Returns (rows, complete). Counts come from one STATUS per folder, which is
-    one round trip each - capped, and the cap is what `complete` reports.
+    Returns (rows, complete, counts). Counts come from one STATUS per folder,
+    which is one round trip each - capped, and the cap is what `complete`
+    reports. `counts` says which folders that actually reached, as
+    {id: (unread, total)}, so a caller wanting one of those numbers again can
+    tell "none unread" from "never asked" without spending a second round trip
+    to find out. A row's 0 cannot carry that difference.
     """
     folders = list_folders(client)
     inbox = next((name for name, _, _ in folders if name.upper() == "INBOX"), "INBOX")
@@ -453,7 +457,7 @@ def folder_rows(client, want_counts=True):
         return keyed
 
     truncated = False
-    rows, counted = [], 0
+    rows, counts = [], {}
     for name, delimiter, flags in sorted(folders, key=sort_key):
         if len(rows) >= FOLDER_CAP:
             truncated = True
@@ -465,9 +469,9 @@ def folder_rows(client, want_counts=True):
             continue
         selectable = not any(flag.lower() == "\\noselect" for flag in flags)
         unread = total = 0
-        if want_counts and selectable and counted < FOLDER_COUNT_CAP:
+        if want_counts and selectable and len(counts) < FOLDER_COUNT_CAP:
             unread, total = folder_counts(client, name)
-            counted += 1
+            counts[name] = (unread, total)
         elif want_counts and selectable:
             truncated = True
         rows.append(
@@ -485,7 +489,7 @@ def folder_rows(client, want_counts=True):
                 "isInbox": name == inbox,
             }
         )
-    return rows, not truncated
+    return rows, not truncated, counts
 
 
 STATUS_COUNTS = re.compile(rb"MESSAGES\s+(\d+).*?UNSEEN\s+(\d+)|UNSEEN\s+(\d+).*?MESSAGES\s+(\d+)", re.S)
@@ -1166,6 +1170,23 @@ def row_from(prefix, header_blob, mailbox, validity, previews):
     }
 
 
+def page_uids(rows):
+    """The UIDs behind a page of rows.
+
+    A row carries its UID inside the id it was given, and nothing else here
+    knows what a page fetched by sequence number contained. An id this module
+    did not build is skipped rather than raising: the worst that costs is a
+    message fetched twice, which is what used to happen to all of them.
+    """
+    uids = set()
+    for row in rows:
+        try:
+            uids.add(parse_id(row["id"])[2])
+        except TransportError:
+            continue
+    return uids
+
+
 def sequence_window(exists, top):
     """The newest `top` messages as a sequence range, or "" for an empty folder."""
     if exists <= 0:
@@ -1280,10 +1301,10 @@ def snapshot(account, token, top, folder_id="", want_folders=True):
     try:
         client = connect(account, token)
 
-        folders, complete = ([], True)
+        folders, complete, counts = ([], True, {})
         if want_folders:
             try:
-                folders, complete = folder_rows(client)
+                folders, complete, counts = folder_rows(client)
             except TransportError as error:
                 warnings.append({"scope": "folders", "message": error.message})
             if not complete:
@@ -1294,10 +1315,19 @@ def snapshot(account, token, top, folder_id="", want_folders=True):
         inbox = next((row["id"] for row in folders if row["isInbox"]), "INBOX")
         mailbox = folder_to_open(client, account, folders, folder_id, warnings)
 
-        unread, _total = folder_counts(client, inbox)
+        # The badge number. Where the tree was read it has just been asked for
+        # - the inbox sorts first, so it is inside the count cap - and asking
+        # again is a round trip for a number that cannot have changed since.
+        if inbox in counts:
+            unread = counts[inbox][0]
+        else:
+            unread, _total = folder_counts(client, inbox)
         exists, validity = select(client, mailbox, readonly=True)
 
         collected = {}
+        # Which UIDs are already in hand, so the two searches below ask only
+        # for what the page did not already bring back.
+        have = set()
         # How far back the folder's own page reaches, and whether anything is
         # behind it - see graph.py's mailPage, and Store.qml's notifyFloor. The
         # searches below deliberately reach past the page, so the union cannot
@@ -1308,6 +1338,7 @@ def snapshot(account, token, top, folder_id="", want_folders=True):
             page = read_rows(client, mailbox, validity, sequence_window(exists, top), by_uid=False)
             for row in page:
                 collected[row["id"]] = row
+            have |= page_uids(page)
             # A page as long as was asked for has more behind it; a short one
             # means the folder ran out and nothing can be below the fold.
             page_full = len(page) >= top
@@ -1324,8 +1355,17 @@ def snapshot(account, token, top, folder_id="", want_folders=True):
                 typ, data = client.uid("SEARCH", None, key)
                 if typ == "OK":
                     hits = _text(data).split()
-                    for row in read_rows(client, mailbox, validity, ",".join(hits[-top:]), by_uid=True):
+                    # The newest `top` hits are the view, and the ones of those
+                    # already on the page are already the answer: fetching them
+                    # again downloaded the same headers and preview text twice
+                    # for most of an inbox's unread mail. Sliced before the
+                    # subtraction, never after - taking the newest `top` of
+                    # what is left would reach further back than the view asks
+                    # for and undo the saving.
+                    wanted = [uid for uid in hits[-top:] if uid not in have]
+                    for row in read_rows(client, mailbox, validity, ",".join(wanted), by_uid=True):
                         collected.setdefault(row["id"], row)
+                    have |= set(hits[-top:])
             except (imaplib.IMAP4.error, TransportError) as error:
                 warnings.append({"scope": "mail",
                                  "message": "Could not list %s mail: %s" % (missing, _text(error))})
@@ -1460,7 +1500,7 @@ def search(account, token, query, folder_id="", scope="all", top=SEARCH_CAP):
         # Without counts: a search is already a round trip per folder, and the
         # unread numbers on a tree nobody is looking at are not worth doubling
         # that. The tree is only being read here to know what to open.
-        folders, listed = folder_rows(client, want_counts=False)
+        folders, listed, _counts = folder_rows(client, want_counts=False)
         if not listed:
             complete = False
 

@@ -3258,7 +3258,7 @@ def cmd_folders(args):
         client = None
         try:
             client = need_imap().connect(account, token)
-            folders, complete = need_imap().folder_rows(client)
+            folders, complete, _counts = need_imap().folder_rows(client)
         except need_imap().TransportError as error:
             fail(error.code, error.message)
         finally:
