@@ -22,6 +22,13 @@ position: rewriting the wrong widget's settings is worse than saying no.
 
 Values are applied as given; an empty string removes the key so the plugin's
 default takes over again.
+
+`--every` is the one exception to all of the above: it writes the same keys
+into every entry of this plugin, with no match at all. It exists for Pause
+fetching, which is one switch for the whole plugin because one store fetches
+for every widget - a pause written into one entry and not the others would
+leave widgets disagreeing about whether the plugin is paused. It stamps no
+instance ids: it identifies nothing, so it has nothing to remember.
 """
 
 import argparse
@@ -150,6 +157,27 @@ def list_widgets(args):
     out({"ok": True, "widgets": widgets})
 
 
+def apply_updates(entry, updates):
+    for key, value in updates.items():
+        if key in ("id", "instance"):
+            continue
+        if value == "":
+            entry.pop(key, None)
+        else:
+            entry[key] = value
+
+
+def plugin_entries(config, plugin_id):
+    layout = (config.get("bar") or {}).get("layout") or {}
+    for section in SECTIONS:
+        entries = layout.get(section) or []
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("id") == plugin_id:
+                yield entry
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plugin-id", default="caseonline.omarchy.office365")
@@ -158,6 +186,11 @@ def main():
         dest="listing",
         action="store_true",
         help="print this plugin's widget entries and exit; --match and --set are then unused",
+    )
+    parser.add_argument(
+        "--every",
+        action="store_true",
+        help="write --set into every entry of this plugin; --match and --instance are then unused",
     )
     parser.add_argument("--match", default="", help="the widget's current settings, as JSON")
     parser.add_argument("--set", dest="updates", default="", help="keys to write, as JSON")
@@ -169,11 +202,11 @@ def main():
         list_widgets(args)
         return
 
-    if not args.match or not args.updates:
+    if not args.updates or (not args.every and not args.match):
         fail("bad_args", "--match and --set are required unless --list is given")
 
     try:
-        match = json.loads(args.match)
+        match = json.loads(args.match) if not args.every else {}
         updates = json.loads(args.updates)
     except ValueError as error:
         fail("bad_json", "Could not parse arguments: %s" % error)
@@ -187,6 +220,15 @@ def main():
         fail("no_config", "Could not read %s: %s" % (args.shell_json, error))
     except ValueError as error:
         fail("bad_config", "%s is not valid JSON: %s" % (args.shell_json, error))
+
+    if args.every:
+        entries = list(plugin_entries(config, args.plugin_id))
+        if not entries:
+            fail("not_found", "Could not find this widget in the bar layout")
+        for entry in entries:
+            apply_updates(entry, updates)
+        write_config(args.shell_json, config)
+        out({"ok": True, "count": len(entries)})
 
     instance = str(args.instance or "").strip()
     target = find_entry(config, args.plugin_id, match, instance)
@@ -203,13 +245,7 @@ def main():
 
     section, index = target
     entry = config["bar"]["layout"][section][index]
-    for key, value in updates.items():
-        if key in ("id", "instance"):
-            continue
-        if value == "":
-            entry.pop(key, None)
-        else:
-            entry[key] = value
+    apply_updates(entry, updates)
 
     # Stamp identity on the way past, so the next save does not have to guess
     # again. Short because a person may well read it in shell.json.

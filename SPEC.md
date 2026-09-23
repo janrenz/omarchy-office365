@@ -355,6 +355,7 @@ Read through `setting()` / `intSetting()`; declared in
 | `dedupeEvents` | boolean | true | Show a meeting from two mailboxes once |
 | `refreshIntervalSec` | integer | 180 | 60–3600 |
 | `pausePolling` | boolean | true | |
+| `paused` | boolean | false | Plugin-wide: any widget carrying it holds the store; written to every entry at once (`config.py --every`) |
 | `tintOnUnread` | boolean | true | |
 | `notify` | boolean | true | |
 | `htmlBody` | boolean | false | Always keep the message's own formatting |

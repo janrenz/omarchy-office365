@@ -21,6 +21,12 @@ import Quickshell.Wayland
 //            stretched further in the power-saver profile, because the user
 //            asking the system for less power is asking us too.
 //
+// And one thing only the user knows: `held`, the Pause fetching switch. It is
+// not a guess about whether anybody is there, so it is not part of the
+// automatic gate either - it closes the gate with `pausePolling` off, and it
+// is named first in `reason`, because a panel that is not moving on purpose
+// should say whose purpose it was.
+//
 // Both signals arrive late: for the first second or two of a shell's life
 // UPower has no devices, NetworkManager reports Unknown connectivity, and
 // `canCheckConnectivity` is false. Every default here therefore means "go
@@ -34,12 +40,14 @@ QtObject {
   property bool pauseWhenAway: true
   property bool pauseWhenOffline: true
   property bool slowOnBattery: true
+  // The user said stop. Nothing automatic goes out until they say go again.
+  property bool held: false
 
   readonly property bool away: pauseWhenAway && idleSeconds > 0 && idle.isIdle
   readonly property bool offline: pauseWhenOffline
                                  && Networking.canCheckConnectivity
                                  && Networking.connectivity === NetworkConnectivity.None
-  readonly property bool paused: away || offline
+  readonly property bool paused: held || away || offline
 
   // What to multiply a poll interval by. Whole numbers, so a mailbox asked for
   // every three minutes lands on six or nine rather than something unreadable
@@ -51,6 +59,7 @@ QtObject {
 
   // For a host that wants to say why the panel is not moving. Empty when it is.
   readonly property string reason: {
+    if (held) return "paused"
     if (offline) return "offline"
     if (away) return "paused while you are away"
     return ""

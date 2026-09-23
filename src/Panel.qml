@@ -202,7 +202,9 @@ Panel {
     cursorIndex = -1
     if (service) {
       service.clearFilters()
-      service.refresh()
+      // Opening the panel is looking, not asking. Paused, what is drawn is
+      // the last answer, and r or the Refresh button is how to ask anyway.
+      if (!service.paused) service.refresh()
     }
   }
 
@@ -214,7 +216,9 @@ Panel {
     // starts from the whole picture again.
     if (service) {
       service.clearFilters()
-      service.refresh()
+      // Opening the panel is looking, not asking. Paused, what is drawn is
+      // the last answer, and r or the Refresh button is how to ask anyway.
+      if (!service.paused) service.refresh()
     }
     // Deferred: showing hands over to the popout coordinator, which closes the
     // previous panel and clears this shared flag on the way out.
@@ -310,6 +314,9 @@ Panel {
         else if (text === "!") root.service.flaggedOnly = !root.service.flaggedOnly
         // The same key as the window's, for the popup's own shorter list.
         else if (text === "?") root.showHelp = !root.showHelp
+        // Pause fetching, and the same p in the window. The whole plugin, not
+        // this panel: there is one fetch behind both.
+        else if (text === "p") root.service.togglePause()
       }
       // Escape backs out one layer at a time: the meeting you opened, then the
       // one you merely picked in the grid, then the message you opened, then
@@ -441,6 +448,22 @@ Panel {
               foreground: root.fg
               visible: !!root.service && root.service.configured && !root.showSettings
               onClicked: root.openWindow({})
+            }
+
+            // Pause fetching. Beside Refresh because the two answer one
+            // question - is this panel moving - and because Refresh still
+            // works while this is on, which is the way to look once without
+            // resuming.
+            PanelActionButton {
+              // nf-md-play while paused, nf-md-pause while not: the glyph is
+              // what pressing it will do, the way a media player draws it.
+              iconText: root.service && root.service.paused ? "\u{F040A}" : "\u{F03E4}"
+              tooltipText: root.service && root.service.paused
+                ? "Resume fetching (p)" + (root.service.pauseError !== "" ? " — not saved: " + root.service.pauseError : "")
+                : "Pause fetching (p) — nothing is fetched until you resume"
+              foreground: root.service && root.service.paused ? Color.accent : root.fg
+              visible: !!root.service && root.service.configured && !root.showSettings
+              onClicked: if (root.service) root.service.togglePause()
             }
 
             PanelActionButton {

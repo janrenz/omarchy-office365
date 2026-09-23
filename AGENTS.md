@@ -50,7 +50,8 @@ src/MeetingPane.qml   One meeting: who is coming, what they said, and the
 src/AgendaList.qml    The day-grouped agenda. AgendaTimeline.qml is the grid.
 src/Notifier.qml      omarchy-notification-send, the prime-then-announce rule,
                       and the click that opens the message.
-src/PollGate.qml      Whether it is worth polling at all: idle, network, battery.
+src/PollGate.qml      Whether it is worth polling at all: idle, network, battery,
+                      and `held` - the user's own Pause fetching switch.
 src/handover.sh       Builds the prompt that hands a message to the user's
                       coding agent and execs omarchy-agent. Runnable by hand;
                       --print shows the prompt and launches nothing.
@@ -241,6 +242,20 @@ keeps using the old client id or authority.
   Every default in `PollGate.qml` therefore means "go ahead": a gate that failed
   closed would swallow the first fetch after every shell start, which is the one
   that fills an empty panel.
+- **Pause fetching merges the other way to `pausePolling`, and is written to
+  every widget.** `pausePolling` is a host saying it can tolerate a pause, so
+  one host that wants to keep polling wins. `paused` is the user saying stop,
+  so one host carrying it holds `Store.held` for everybody - the fetch loop is
+  shared, and a pause one widget overruled would be a switch that does
+  nothing. `Store.setPaused` writes it with `config.py --every` into every
+  entry of this plugin, and holds `heldOverride` until the hosts' own settings
+  agree, because the window reads its settings once on opening and would
+  otherwise hold a stale value indefinitely. What the hold gates: the fetch
+  unit's timer (through `poll.paused`), `retry`, `catchUp`, the refresh
+  `Panel.open` makes, and the one after a settings save. What it does not:
+  `refresh()` by hand, a folder key appearing (somebody clicked it), and the
+  single fetch that confirms an action, a send or a sign-in. Anything new that
+  fetches on its own needs to be on the first list.
 - **A formatted message brings its own colours, and they are for white paper.**
   Outlook and Word put `color: black` (or `rgb(0, 0, 0)`, or `windowtext`) on
   almost every span they emit; Qt's rich text obeys it, so on a dark theme the

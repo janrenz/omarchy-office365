@@ -60,6 +60,13 @@ ShellRoot {
         cyan: "#7dcfff", orange: "#ff9e64", red: "#f7768e", brown: "#cfa07a"
       })
       property bool configured: true
+      // Pause fetching is the store's, not the entry's, and it is set rather
+      // than saved - so here it is a flag and a log line.
+      property bool paused: false
+      function setPaused(value) {
+        console.log("setPaused", value)
+        paused = value === true
+      }
       property bool saving: false
       property string saveError: ""
       // No settingsChanged signal here: `property var settings` already

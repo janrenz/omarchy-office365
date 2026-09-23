@@ -90,6 +90,7 @@ Widget-level keys:
 | `showWeekends` | `true` | Draw Saturday and Sunday in the grid. |
 | `refreshIntervalSec` | `180` | How often to poll Microsoft Graph (60–3600). |
 | `pausePolling` | `true` | Stop polling while the screen has been idle five minutes or there is no network. Doubles the interval on battery. |
+| `paused` | `false` | Pause fetching: nothing is fetched on its own until you switch it off. One switch for every widget and the window - see [Pausing it yourself](#pausing-it-yourself). |
 | `tintOnUnread` | `true` | Highlight the bar icon while **new** mail is waiting - unread mail that is in the list, meaning among the newest `mails` messages. An unread message further down the mailbox is backlog and leaves the icon plain, so the tint keeps meaning "something arrived" instead of settling in permanently on an inbox nobody empties. The tooltip and the panel header say both numbers: `2 new · 14 unread`. When the mailbox will not say how many are unread, the panel shows `3+` rather than `3`, and `?` rather than claiming none. |
 | `notify` | `true` | Desktop notification when new mail arrives. |
 | `previewLine` | `true` | Show a line of the message body under each subject. Off gives a two-line row. |
@@ -156,6 +157,31 @@ Clicking the notification opens that message: the right mailbox, the right folde
 A poll is not free. It is a token refresh and a round trip, and on a mailbox with a rate limit it is part of a budget — so it stops when there is nobody to poll for. Nothing is asked of the server while the screen has been idle for five minutes, or while the machine has no network at all, and a fetch goes out the moment you come back or reconnect rather than at the next tick. Idle inhibitors count as being present, so a full-screen call does not look like an empty desk. On battery the interval is doubled, and tripled in the power-saver profile, because a system asked for less power is asking us for less too.
 
 Anything you ask for by hand still goes out, offline included: a failure you can see beats a silence you cannot. The refresh button's tooltip says why the panel is not moving while it is paused. Set `pausePolling` to `false` to keep the old fixed cadence.
+
+### Pausing it yourself
+
+Sometimes you know better than the idle timer: a metered hotspot, a
+presentation, an afternoon you would rather not see mail arrive. **Pause
+fetching** stops everything the plugin fetches on its own until you switch it
+off again — the poll, the quick retry after a failure, the refresh the panel
+makes as it opens, and the extra fetch the window makes when it wants a longer
+list than the bar's. It works whether `pausePolling` is on or not.
+
+Press `p` in the panel or the window, click the pause button beside Refresh,
+or flip the switch in settings. The bar icon fades and its tooltip says so,
+the Refresh tooltip reads "paused", and the window's pause pill stays lit.
+What is on screen is the last answer, not a live one.
+
+A pause stops the plugin *asking*, not you: Refresh (or `r`, or a middle click
+on the icon) still fetches once, and sending, moving, deleting, flagging and
+signing in all work, each with the one fetch that confirms it. Opening a folder
+you have not looked at yet fetches that folder, since an empty list is not what
+pausing asked for. Switching the pause off fetches at once.
+
+It is one switch for the whole plugin rather than one per widget, because one
+fetch loop serves every widget and the window: a pause one widget asked for and
+another overruled would be a switch that does nothing. So it is written into
+every widget's entry in `shell.json` at once, and survives a restart.
 
 ## Filtering
 
@@ -681,6 +707,7 @@ Once the bar panel is up:
 | u | Show only unread, or stop |
 | ! | Show only flagged mail, or stop |
 | Delete, Backspace or x | Delete it - the mailbox must allow changes |
+| p | Pause fetching, or resume it - see [Pausing it yourself](#pausing-it-yourself) |
 | Escape | Close the reading pane, then the panel |
 | Tab | Move to the next bar panel |
 
@@ -717,7 +744,8 @@ including inside a message, which is the one place they used to do nothing.
 | `!` | Only flagged, wherever in the mailbox it is |
 | `t` | Group the list by conversation |
 | `e` | In the Outbox: put the message back in the compose box |
-| `r` | Refresh |
+| `r` | Refresh - it still goes out while fetching is paused |
+| `p` | Pause fetching, or resume it, for every widget and the window |
 | `?` | This list |
 
 In the folder tree the same letters are about folders — see
@@ -973,6 +1001,21 @@ journalctl --user -f | grep -i office365
 ```
 
 ## Changelog
+
+### 1.15.0 — 2026-09-23
+
+- **Pause fetching, until you say otherwise.** The plugin already stopped
+  polling while you were away or offline, but only on its own judgement. Now
+  there is a switch of your own: `p` in the panel or the window, a pause button
+  beside Refresh, or **Pause fetching** in settings. While it is on nothing is
+  fetched on its own — not the poll, not the retry after a failure, not the
+  refresh a panel used to make every time it opened. The bar icon fades and
+  says why in its tooltip. Refresh by hand still goes out, and so do sending,
+  moving, deleting and signing in; switching it off fetches at once.
+
+  It is one switch for every widget and the window, since they share one fetch
+  loop, so it is written into every widget's entry in `shell.json` at once
+  rather than into the one you happened to press it in.
 
 ### 1.14.0 — 2026-09-21
 

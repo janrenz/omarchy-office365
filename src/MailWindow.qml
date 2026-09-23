@@ -1313,6 +1313,8 @@ Item {
           else if (text === "u") mailView.unreadOnly = !mailView.unreadOnly
           else if (text === "t") mailView.threaded = !mailView.threaded
           else if (text === "r") mailView.refresh()
+          // The same p as the bar panel's, and the same one switch behind it.
+          else if (text === "p") mailView.togglePause()
           else if (text === "m") root.moveAtCursor()
           else if (text === "a") root.askAgent()
           // c for compose, because r is Refresh here and always has been.
@@ -1602,6 +1604,21 @@ Item {
                 accent: Color.accent
                 fontFamily: Style.font.family
                 onClicked: mailView.refresh()
+              }
+
+              // Pause fetching, lit while it is on: a window that stays open
+              // for hours is where a pause is most easily forgotten. A glyph
+              // for the header's sake, like the pills before it, and the one
+              // that says what pressing it will do.
+              FilterPill {
+                icon: mailView.paused ? "\u{F040A}" : "\u{F03E4}"   // nf-md-play / nf-md-pause
+                label: mailView.paused ? "Resume fetching" : "Pause fetching"
+                selected: mailView.paused
+                visible: mailView.configured && root.settingsError === ""
+                fg: Color.foreground
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: mailView.togglePause()
               }
 
               // Last in the row, and the way out of the window's normal

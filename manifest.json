@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "caseonline.omarchy.office365",
   "name": "Office 365 Mail & Calendar",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "author": "Kees Schollaart",
   "license": "MIT",
   "description": "Unread Outlook mail and your agenda in the Omarchy bar. One widget can carry several mailboxes, or add one per mailbox. Needs python3 (standard library only) and talks to Microsoft Graph, nothing else.",
@@ -30,6 +30,7 @@
       "agendaView": "list",
       "refreshIntervalSec": 180,
       "pausePolling": true,
+      "paused": false,
       "tintOnUnread": true,
       "notify": true,
       "agentHandover": true
@@ -121,6 +122,13 @@
         "label": "Stop polling while you are away",
         "description": "A poll is also a token refresh, and spending one on a locked laptop spends it on nobody. Nothing is asked of the server while the screen has been idle for five minutes or the machine has no network, and a fetch goes out the moment you come back or reconnect. Anything you ask for by hand still goes out either way. On battery the interval is doubled, and tripled in the power-saver profile.",
         "defaultValue": true
+      },
+      {
+        "key": "paused",
+        "type": "boolean",
+        "label": "Pause fetching",
+        "description": "Stop asking the server for anything on its own until you switch this off again: no poll, no retry, no refresh when a panel opens. The panel keeps showing the last answer and the bar icon fades. Refresh by hand still goes out, and so do sending, moving, deleting and signing in. It applies to every widget and the window at once, works whether or not the setting above is on, and switching it off fetches straight away. p in the panel or the window toggles it.",
+        "defaultValue": false
       },
       {
         "key": "tintOnUnread",

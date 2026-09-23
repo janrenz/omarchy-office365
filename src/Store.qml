@@ -586,16 +586,93 @@ Item {
   //
   // See PollGate.qml. Nothing here decides *what* to fetch, only whether the
   // timers should be running, so a refresh anybody asked for by hand still
-  // goes out - a failure the user can see beats a silence they cannot.
+  // goes out - a failure the user can see beats a silence they cannot. The
+  // same holds for the one fetch that confirms an action (a move, a delete, a
+  // send, a sign-in): it is the tail of something the user did, not a poll.
   readonly property bool pausePolling: {
     for (var key in wants) if (wants[key].pausePolling === false) return false
     return true
+  }
+
+  // ---- the user's own pause -----------------------------------------------
+  //
+  // Pause fetching is one switch for the whole plugin, not one per widget,
+  // and it merges the opposite way to `pausePolling`. That one is a host
+  // saying it can *tolerate* a pause, so the most demanding host keeps the
+  // poll alive. This one is the user saying stop, and there is only one fetch
+  // loop behind every widget and the window: a pause that one widget asked
+  // for and another quietly overruled would be a switch that does nothing.
+  // So any host carrying `paused` holds the store.
+  //
+  // It is still written into each widget's entry in shell.json, because that
+  // is the only settings path there is and it survives a restart - but into
+  // *every* entry of this plugin at once (config.py --every), so that no
+  // widget is left holding a pause nobody can see a switch for. The window
+  // reads its settings once, when it opens, which is why `heldOverride`
+  // exists: the switch takes effect the moment it is pressed, whatever any
+  // host's copy of shell.json still says, and stands down when the hosts'
+  // own settings agree with it.
+  readonly property bool pausedByHosts: {
+    for (var token in requests) {
+      var request = requests[token]
+      if (request && request.paused === true) return true
+    }
+    return false
+  }
+
+  property var heldOverride: null
+  readonly property bool held: heldOverride !== null ? heldOverride === true : pausedByHosts
+
+  onPausedByHostsChanged: if (heldOverride !== null && pausedByHosts === heldOverride) heldOverride = null
+
+  function setPaused(value) {
+    var next = value === true
+    heldOverride = next === pausedByHosts ? null : next
+    pauseWrite = next
+    writePause()
+  }
+
+  function togglePause() {
+    setPaused(!held)
+  }
+
+  // The value still to be written, or null. A second press while the first
+  // write is running is kept rather than dropped, and only the last one
+  // matters.
+  property var pauseWrite: null
+
+  function writePause() {
+    if (pauseProc.running || pauseWrite === null || pluginDir === "") return
+    pauseProc.command = ["python3", pluginDir + "/config.py",
+                         "--plugin-id", "caseonline.omarchy.office365",
+                         "--every", "--set", JSON.stringify({ paused: pauseWrite === true })]
+    pauseWrite = null
+    pauseProc.running = true
+  }
+
+  // Why the last write did not land, for a host that wants to say so. The
+  // pause itself is in force either way; only surviving a restart is at risk.
+  property string pauseError: ""
+
+  Process {
+    id: pauseProc
+    running: false
+    stdout: StdioCollector { id: pauseOut; waitForEnd: true }
+    stderr: StdioCollector { id: pauseErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var parsed = Model.parseJson(pauseOut.text, null)
+      root.pauseError = exitCode === 0 && parsed && parsed.ok !== false ? ""
+        : (parsed && parsed.error ? String(parsed.error.message)
+                                  : Model.oneLine(pauseErr.text || "Could not save the pause", 160))
+      root.writePause()
+    }
   }
 
   property PollGate poll: PollGate {
     pauseWhenAway: root.pausePolling
     pauseWhenOffline: root.pausePolling
     slowOnBattery: root.pausePolling
+    held: root.held
   }
 
   // For a host that wants to explain a panel that is not moving.
@@ -662,6 +739,9 @@ Item {
       onDemandChanged: Qt.callLater(unit.catchUp)
 
       function catchUp() {
+        // Held, a host wanting more waits: what it wants is automatic, and the
+        // fetch the resume makes asks for everything anybody wants by then.
+        if (root.held) return
         var keys = root.keysForAlias(mailbox)
         var behind = []
         for (var i = 0; i < keys.length; i++) {
@@ -728,12 +808,14 @@ Item {
       property Timer retry: Timer {
         interval: 20000
         repeat: false
-        onTriggered: unit.refreshNow()
+        // Armed before the gate closed, it would still fire into a pause.
+        onTriggered: if (!root.poll.paused) unit.refreshNow()
       }
 
-      // triggeredOnStart is what makes waking up and coming back online
-      // immediate: the gate opening restarts this timer, and a restarted timer
-      // fires at once rather than an interval later.
+      // triggeredOnStart is what makes waking up, coming back online and
+      // switching Pause fetching off immediate: the gate opening restarts this
+      // timer, and a restarted timer fires at once rather than an interval
+      // later.
       property Timer timer: Timer {
         interval: unit.intervalSec * 1000 * root.poll.intervalScale
         repeat: true
@@ -743,7 +825,10 @@ Item {
       }
 
       // A folder picked for the first time has nothing cached, so fetch it as
-      // soon as somebody asks for it rather than at the next tick.
+      // soon as somebody asks for it rather than at the next tick. Not held
+      // back by the pause: a key only appears because somebody clicked a
+      // folder, and an empty list for a folder you just opened is not what
+      // pausing asked for.
       readonly property string keySignature: root.keysForAlias(mailbox).join(",")
       onKeySignatureChanged: {
         unit.drawFromCache()

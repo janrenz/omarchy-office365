@@ -36,6 +36,11 @@ Item {
   property bool vTint: true
   property bool vNotify: true
   property bool vPausePolling: true
+  property bool vPaused: false
+  // The pause this Save is to apply once shell.json has been written, or
+  // null. Not before: it is a write of its own, to every widget, and two
+  // writers at once is how one of them loses.
+  property var pauseOnSave: null
   property bool vMarkRead: false
   property bool vAgentHandover: true
   property bool vPreviewLine: true
@@ -99,6 +104,9 @@ Item {
     vTint = setting("tintOnUnread", true) !== false
     vNotify = setting("notify", true) !== false
     vPausePolling = setting("pausePolling", true) !== false
+    // What is in force, not what this widget's entry says: the switch is one
+    // for the whole plugin, and the store is where that is decided.
+    vPaused = service ? service.paused === true : false
     vMarkRead = setting("markReadOnOpen", false) === true
     vAgentHandover = setting("agentHandover", true) !== false
     vPreviewLine = setting("previewLine", true) !== false
@@ -251,7 +259,10 @@ Item {
     })
     // Closed by onSettingsSaved, or not at all if the write failed. A second
     // press while the first is still running must not clear this.
-    if (started === true) closeWhenSaved = true
+    if (started === true) {
+      closeWhenSaved = true
+      pauseOnSave = vPaused !== (service.paused === true) ? vPaused : null
+    }
   }
 
   // The panel injects `service` after this form is constructed, so loading
@@ -266,6 +277,10 @@ Item {
     function onSettingsChanged() { root.load() }
     // shell.json is written. Only now is there nothing left to lose by closing.
     function onSettingsSaved() {
+      if (root.pauseOnSave !== null) {
+        root.service.setPaused(root.pauseOnSave)
+        root.pauseOnSave = null
+      }
       if (!root.closeWhenSaved) return
       root.closeWhenSaved = false
       root.done()
@@ -588,6 +603,42 @@ Item {
           width: parent.width
           wrapMode: Text.WordWrap
           text: "A poll is also a token refresh, and spending one on a locked laptop spends it on nobody. Nothing is asked of the server while the screen has been idle five minutes or the machine has no network, and a fetch goes out the moment you come back or reconnect. Anything you ask for by hand still goes out. On battery the interval is doubled."
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(pausedLabel.implicitHeight, pausedSwitch.implicitHeight)
+
+          Text {
+            textFormat: Text.PlainText
+            id: pausedLabel
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Pause fetching"
+            color: root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          ToggleSwitch {
+            id: pausedSwitch
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            checked: root.vPaused
+            foreground: root.fg
+            accent: root.accent
+            onToggled: root.vPaused = !root.vPaused
+          }
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.WordWrap
+          text: "Nothing is fetched on its own until you switch this off again - not the poll, not a retry, not the refresh a panel makes as it opens - and the panel keeps showing the last answer. Refresh by hand still goes out, and so do sending, moving, deleting and signing in. One switch for every widget and the window; p in either toggles it too."
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

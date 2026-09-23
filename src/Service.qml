@@ -145,6 +145,10 @@ Item {
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 180, 60, 3600)
   readonly property bool notifyOnNew: setting("notify", true) !== false
   readonly property bool pausePolling: setting("pausePolling", true) !== false
+  // Pause fetching, as this widget's entry last said. What is actually in
+  // force is `paused` below: the switch is one for the whole plugin, and the
+  // store is where every host's copy of it meets - see Store.qml.
+  readonly property bool pauseSetting: setting("paused", false) === true
   readonly property bool dedupeEvents: setting("dedupeEvents", true) !== false
   // Off unless asked for: turning it on is what makes the plugin want
   // permission to change mail, and the default stays read-only.
@@ -227,7 +231,10 @@ Item {
     // Whether this host is content for the store to stop polling while nobody
     // is at the machine. One host saying no is enough to keep it polling - the
     // fetch is shared, so the most demanding subscriber decides.
-    pausePolling: pausePolling
+    pausePolling: pausePolling,
+    // The opposite bargain: one host paused holds everybody, because the
+    // switch means the user, not this widget.
+    paused: pauseSetting
   })
 
   function syncRequest() {
@@ -286,6 +293,21 @@ Item {
   // Why the store is not polling, when it is not. Empty while it is.
 
   readonly property string pollReason: hub ? hub.pollReason : ""
+
+  // Whether the user has paused fetching, for the whole plugin. Nothing
+  // automatic goes out while it is on - the poll, its retries, the catch-up
+  // when a host wants more, the refresh a panel makes as it opens - and
+  // anything asked for by hand still does. Switching it off fetches at once.
+  readonly property bool paused: hub ? hub.held : pauseSetting
+  readonly property string pauseError: hub ? hub.pauseError : ""
+
+  function setPaused(value) {
+    if (hub) hub.setPaused(value === true)
+  }
+
+  function togglePause() {
+    if (hub) hub.togglePause()
+  }
 
 
   readonly property bool loading: {
@@ -1786,7 +1808,9 @@ Item {
     if (!refreshQueued || !configured || !hub) return
     refreshQueued = false
     refreshDeadline.stop()
-    refresh()
+    // Saving settings is not asking for mail. Paused, the new settings wait
+    // for the resume like everything else does.
+    if (!paused) refresh()
   }
 
   // The settings this object was waiting for. Anything else that changes them

@@ -185,6 +185,48 @@ class Saving(unittest.TestCase):
         self.assertNotIn("label", entries[1])
 
 
+class SavingEvery(unittest.TestCase):
+    """Pause fetching is one switch for the plugin, so it is written into every
+    widget at once - and into nothing else."""
+
+    def save_every(self, cfg, updates):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump(cfg, handle)
+            path = handle.name
+        argv = ["config.py", "--plugin-id", PLUGIN, "--shell-json", path,
+                "--every", "--set", json.dumps(updates)]
+        old_argv, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as reported:
+                with self.assertRaises(SystemExit):
+                    config.main()
+            self.report = json.loads(reported.getvalue())
+        finally:
+            sys.argv = old_argv
+        with open(path, encoding="utf-8") as handle:
+            written = json.load(handle)
+        os.unlink(path)
+        return written["bar"]["layout"]["right"]
+
+    def test_every_widget_of_the_plugin_is_written(self):
+        """Two widgets on the same mailbox - the case a single save refuses as
+        ambiguous - both take the pause, and the clock beside them does not."""
+        cfg = layout(widget(account="work"), widget(account="work"), {"id": "omarchy.clock"})
+        entries = self.save_every(cfg, {"paused": True})
+        self.assertTrue(self.report["ok"])
+        self.assertEqual(self.report["count"], 2)
+        self.assertEqual([e.get("paused") for e in entries], [True, True, None])
+
+    def test_every_stamps_no_instance(self):
+        entries = self.save_every(layout(widget(account="work")), {"paused": False})
+        self.assertIs(entries[0]["paused"], False)
+        self.assertNotIn("instance", entries[0])
+
+    def test_every_with_no_widget_is_not_found(self):
+        self.save_every(layout({"id": "omarchy.clock"}), {"paused": True})
+        self.assertEqual(self.report["error"]["code"], "not_found")
+
+
 class Aliases(unittest.TestCase):
     def test_punctuation_cannot_collapse_two_aliases_onto_one_file(self):
         for alias in ("work/a", "work!a", "work a", "../work", "work\\a"):

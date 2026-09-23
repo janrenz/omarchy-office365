@@ -111,11 +111,18 @@ BarWidget {
     // icon plain, so a tint keeps meaning "something arrived" rather than
     // fading into the permanent state of an inbox nobody empties.
     active: root.tintOnUnread && service.newUnreadCount > 0
+    // Faded while fetching is paused. The count it tints for is the last
+    // answer rather than a live one, and an icon that looks exactly as it
+    // always does is how a pause gets forgotten for a week.
+    opacity: service.paused ? 0.45 : 1.0
     // One line per mailbox, so a combined widget says what it is holding
     // without opening the panel.
     tooltipText: {
       if (!service.configured) return "Office 365: add a mailbox in settings"
       var lines = []
+      // First, because it explains every line under it: those are the last
+      // answer, not a live one.
+      if (service.paused) lines.push("Fetching paused · p in the panel resumes, middle-click still refreshes")
       var views = service.views
       for (var i = 0; i < views.length; i++) {
         var view = views[i]

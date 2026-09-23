@@ -75,7 +75,8 @@ Column {
     ["f", "Show only Focused mail", "Doing"],
     ["t", "Group the list by conversation", "Doing"],
     ["/", "Search — typing narrows this list, Enter asks the mailbox", "Doing"],
-    ["r", "Refresh", "Doing"],
+    ["r", "Refresh - it still goes out while fetching is paused", "Doing"],
+    ["p", "Pause fetching, or resume it - for every widget and the window", "Doing"],
     ["?", "This list", "Doing"],
 
     // In the folder tree the same letters are about folders. Listed as their
