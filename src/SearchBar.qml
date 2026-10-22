@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // The field the window searches from, and the line under it saying what came
@@ -34,9 +35,9 @@ Column {
   property string scope: "all"
   property string folderName: ""
 
-  property color fg: Color.foreground
+  property color fg: Commons.Color.foreground
   property color dim: Qt.darker(fg, 1.5)
-  property color accent: Color.accent
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
 
   signal edited(string text)

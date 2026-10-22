@@ -3,6 +3,7 @@ import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -242,7 +243,7 @@ Item {
     settings: root.settings
     pluginDir: root.pluginDir
     store: root.service
-    fallbackColor: Color.accent
+    fallbackColor: Commons.Color.accent
     // The one host with a sidebar, so the one host whose fetches pay for it.
     wantsFolders: true
   }
@@ -940,7 +941,7 @@ Item {
   FloatingWindow {
     id: window
     title: root.folderTitle === "Office 365" ? "Office 365" : ("Office 365 — " + root.folderTitle)
-    color: Color.background
+    color: Commons.Color.background
     implicitWidth: 1180
     implicitHeight: 760
     minimumSize: Qt.size(720, 480)
@@ -1012,7 +1013,7 @@ Item {
             "delete": "Delete " + root.folderActionName
           })[root.folderAction] || ""
 
-          color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.97)
+          color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.97)
 
           // Clicking off it is the same as Escape: nothing is changed.
           MouseArea { anchors.fill: parent; onClicked: root.cancelFolderAction() }
@@ -1031,7 +1032,7 @@ Item {
               text: parent.parent.title
               textFormat: Text.PlainText
               elide: Text.ElideRight
-              color: Color.foreground
+              color: Commons.Color.foreground
               font.family: Style.font.family
               font.pixelSize: Style.font.subtitle
               font.bold: true
@@ -1045,9 +1046,9 @@ Item {
               label: root.folderActionNestIn
                 ? ("Inside " + root.folderActionParentOfferName) : "At the top level"
               selected: root.folderActionNestIn
-              fg: Color.foreground
-              dim: Qt.darker(Color.foreground, 1.5)
-              accent: Color.accent
+              fg: Commons.Color.foreground
+              dim: Qt.darker(Commons.Color.foreground, 1.5)
+              accent: Commons.Color.accent
               fontFamily: Style.font.family
               onClicked: {
                 root.folderActionNestIn = !root.folderActionNestIn
@@ -1062,8 +1063,8 @@ Item {
               visible: root.folderNaming
               text: root.folderAction === "rename" ? root.folderActionName : ""
               placeholderText: "Folder name"
-              foreground: Color.foreground
-              accent: Color.accent
+              foreground: Commons.Color.foreground
+              accent: Commons.Color.accent
               font.family: Style.font.family
               font.pixelSize: Style.font.body
               onAccepted: if (text.trim() !== "") root.commitFolderAction(text.trim(), "")
@@ -1086,7 +1087,7 @@ Item {
                 : "This puts the folder and everything in it in Deleted Items, where Outlook can take it back out."
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              color: Qt.darker(Color.foreground, 1.4)
+              color: Qt.darker(Commons.Color.foreground, 1.4)
               font.family: Style.font.family
               font.pixelSize: Style.font.body
             }
@@ -1098,7 +1099,7 @@ Item {
                 ? "Return deletes it. Escape leaves it alone."
                 : "Return saves it. Escape leaves it alone."
               textFormat: Text.PlainText
-              color: Qt.darker(Color.foreground, 1.8)
+              color: Qt.darker(Commons.Color.foreground, 1.8)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -1115,8 +1116,8 @@ Item {
                 width: folderPane2.width
                 rows: root.folderActionTargets
                 cursorIndex: 0
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 // The id is empty for the "Top level" row, which is exactly
                 // what the helper wants for "no parent".
@@ -1139,7 +1140,7 @@ Item {
           property alias tree: pickerTree
           property alias scroller: pickerScroll
 
-          color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.97)
+          color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.97)
 
           // Clicking off it is the same as Escape: nothing is filed.
           MouseArea { anchors.fill: parent; onClicked: root.cancelMove() }
@@ -1155,7 +1156,7 @@ Item {
               width: parent.width
               text: "Move to folder"
               textFormat: Text.PlainText
-              color: Color.foreground
+              color: Commons.Color.foreground
               font.family: Style.font.family
               font.pixelSize: Style.font.subtitle
               font.bold: true
@@ -1168,7 +1169,7 @@ Item {
               text: root.moveRow ? String(root.moveRow.subject || "(no subject)") : ""
               textFormat: Text.PlainText
               elide: Text.ElideRight
-              color: Qt.darker(Color.foreground, 1.5)
+              color: Qt.darker(Commons.Color.foreground, 1.5)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -1181,7 +1182,7 @@ Item {
                 : "This mailbox has nowhere else to put it."
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              color: Qt.darker(Color.foreground, 1.8)
+              color: Qt.darker(Commons.Color.foreground, 1.8)
               font.family: Style.font.family
               font.pixelSize: Style.font.body
             }
@@ -1204,8 +1205,8 @@ Item {
                 // list is opened to pick from, and has nothing already
                 // selected in it to start from.
                 cursorIndex: 0
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onPicked: function(alias, folderId) {
                   root.moveToFolder(folderId, pickerTree.nameFor(folderId))
@@ -1224,13 +1225,13 @@ Item {
 
         Rectangle {
           anchors.fill: parent
-          color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.97)
+          color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.97)
 
           MouseArea { anchors.fill: parent; onClicked: root.showHelp = false }
 
           KeyHelp {
             anchors.centerIn: parent
-            fg: Color.foreground
+            fg: Commons.Color.foreground
             fontFamily: Style.font.family
             agentHandover: mailView.agentHandover
             canFocus: mailView.canFocus
@@ -1384,7 +1385,7 @@ Item {
                 text: root.folderTitle
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
-                color: Color.foreground
+                color: Commons.Color.foreground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.heading
               }
@@ -1403,7 +1404,7 @@ Item {
                   visible: mailView.loading
                   text: "loading…"
                   textFormat: Text.PlainText
-                  color: Qt.darker(Color.foreground, 1.5)
+                  color: Qt.darker(Commons.Color.foreground, 1.5)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -1422,7 +1423,7 @@ Item {
                   text: mailView.actionNotice
                   textFormat: Text.PlainText
                   elide: Text.ElideRight
-                  color: Color.accent
+                  color: Commons.Color.accent
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -1440,7 +1441,7 @@ Item {
                   text: mailView.composeNotice
                   textFormat: Text.PlainText
                   elide: Text.ElideRight
-                  color: Color.accent
+                  color: Commons.Color.accent
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -1465,8 +1466,8 @@ Item {
                 // pencil the comment claimed. Checked by drawing it.
                 label: "Write"
                 visible: mailView.configured && mailView.canWrite(root.activeAlias)
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onClicked: root.startNewMessage()
               }
@@ -1481,8 +1482,8 @@ Item {
                 // has to still be here to put it away again.
                 visible: !columns.sidebarAlways && mailView.configured
                 selected: root.folderDrawer
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onClicked: root.toggleFolderDrawer()
               }
@@ -1497,8 +1498,8 @@ Item {
                 label: "Calendar"    // the name of a pill that shows a glyph
                 visible: !columns.showReader && mailView.configured
                 selected: root.pane === "agenda"
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onClicked: root.toggleAgenda()
               }
@@ -1511,8 +1512,8 @@ Item {
                 detail: mailView.unreadCount > 0 ? String(mailView.unreadCount) : ""
                 alert: mailView.unreadCount > 0
                 selected: mailView.unreadOnly
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onClicked: mailView.unreadOnly = !mailView.unreadOnly
               }
@@ -1525,8 +1526,8 @@ Item {
                 detail: mailView.threaded && mailView.threads.length > 0
                   ? String(mailView.threads.length) : ""
                 selected: mailView.threaded
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onClicked: mailView.threaded = !mailView.threaded
               }
@@ -1554,8 +1555,8 @@ Item {
                           : mailView.folderIdFor(root.activeAlias) === "inbox")
                          && mailView.canFocus
                 selected: mailView.focusedOnly
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onClicked: mailView.focusedOnly = !mailView.focusedOnly
               }
@@ -1574,8 +1575,8 @@ Item {
                 detail: mailView.flaggedCount > 0 ? String(mailView.flaggedCount) : ""
                 alert: mailView.flaggedCount > 0
                 selected: mailView.flaggedOnly
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onClicked: mailView.flaggedOnly = !mailView.flaggedOnly
               }
@@ -1587,8 +1588,8 @@ Item {
                 icon: "\u{F0349}"   // nf-md-magnify
                 label: "Search"      // the name of a pill that shows a glyph
                 selected: mailView.searchOpen
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onClicked: {
                   if (mailView.searchOpen) { mailView.closeSearch(); root.focusPane("mail") }
@@ -1600,8 +1601,8 @@ Item {
                 icon: "\u{F0450}"   // nf-md-refresh
                 label: "Refresh"     // still what the tooltip-less pill is named
                 faded: mailView.loading
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onClicked: mailView.refresh()
               }
@@ -1615,8 +1616,8 @@ Item {
                 label: mailView.paused ? "Resume fetching" : "Pause fetching"
                 selected: mailView.paused
                 visible: mailView.configured && root.settingsError === ""
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onClicked: mailView.togglePause()
               }
@@ -1635,8 +1636,8 @@ Item {
                 label: "?"
                 visible: mailView.configured && root.settingsError === ""
                 selected: root.showHelp
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onClicked: root.showHelp = !root.showHelp
               }
@@ -1678,7 +1679,7 @@ Item {
             implicitHeight: visible ? outboxLine.implicitHeight + Style.spacing.sm * 2 : 0
             radius: Style.space(5)
             color: outboxBarHover.containsMouse
-              ? Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.08)
+              ? Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.08)
               : "transparent"
 
             Behavior on color { ColorAnimation { duration: 120 } }
@@ -1699,7 +1700,7 @@ Item {
               // on its way is information, one that did not go is a problem,
               // and "Sent" is worth seeing.
               color: mailView.outboxFailed > 0 || !outboxBar.sending
-                ? Color.accent : Qt.darker(Color.foreground, 1.5)
+                ? Commons.Color.accent : Qt.darker(Commons.Color.foreground, 1.5)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -1727,8 +1728,8 @@ Item {
             total: mailView.searchTotal
             scope: mailView.searchScope
             folderName: mailView.folderNameFor(root.activeAlias)
-            fg: Color.foreground
-            accent: Color.accent
+            fg: Commons.Color.foreground
+            accent: Commons.Color.accent
             fontFamily: Style.font.family
             onEdited: function(text) { mailView.searchQuery = text }
             onSubmitted: mailView.runSearch()
@@ -1747,7 +1748,7 @@ Item {
                                             : "This widget has no mailbox yet. Add one from the bar panel's settings."
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
-            color: Qt.darker(Color.foreground, 1.4)
+            color: Qt.darker(Commons.Color.foreground, 1.4)
             font.family: Style.font.family
             font.pixelSize: Style.font.body
           }
@@ -1830,8 +1831,8 @@ Item {
                   id: drawerFolders
                   width: columns.width
                   rows: mailView.folderRows
-                  fg: Color.foreground
-                  accent: Color.accent
+                  fg: Commons.Color.foreground
+                  accent: Commons.Color.accent
                   fontFamily: Style.font.family
                   cursorIndex: -1
                   onPicked: function(alias, folderId) { root.pickFolder(alias, folderId) }
@@ -1849,8 +1850,8 @@ Item {
                 target: root.cursorFolder
                 busy: mailView.folderBusy
                 writable: !!root.cursorFolder && mailView.canWrite(root.cursorFolder.alias)
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onAct: function(what, topLevel) { root.startFolderAction(what, topLevel) }
               }
@@ -1873,8 +1874,8 @@ Item {
                   id: folders
                   width: columns.sidebarWidth
                   rows: mailView.folderRows
-                  fg: Color.foreground
-                  accent: Color.accent
+                  fg: Commons.Color.foreground
+                  accent: Commons.Color.accent
                   fontFamily: Style.font.family
                   onPicked: function(alias, folderId) { root.pickFolder(alias, folderId) }
                 }
@@ -1887,8 +1888,8 @@ Item {
                 target: root.cursorFolder
                 busy: mailView.folderBusy
                 writable: !!root.cursorFolder && mailView.canWrite(root.cursorFolder.alias)
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onAct: function(what, topLevel) { root.startFolderAction(what, topLevel) }
               }
@@ -1898,7 +1899,7 @@ Item {
               width: Style.space(1)
               height: columns.height
               visible: columns.showSidebar
-              color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
+              color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.12)
             }
 
             // Placeholder rows while a folder switch is in flight. The rows
@@ -1916,7 +1917,7 @@ Item {
               visible: !columns.folderPicking && !root.outboxShowing
                        && (mailView.switchingFolder
                            || (mailView.mail.length === 0 && mailView.loading))
-              fg: Color.foreground
+              fg: Commons.Color.foreground
               fontFamily: Style.font.family
               groups: [Math.max(3, Math.min(8, mailView.mails))]
               lines: mailView.previewLine
@@ -1962,8 +1963,8 @@ Item {
                 id: outboxList
                 width: columns.listWidth
                 rows: mailView.outboxRows
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onRetryRequested: function(jobId) { mailView.retrySend(jobId) }
                 onEditRequested: function(jobId) {
@@ -2000,8 +2001,8 @@ Item {
                 cursorId: root.pane === "mail" && root.mailCursor >= 0
                           && root.mailCursor < mailView.mail.length
                   ? String(mailView.mail[root.mailCursor].id) : ""
-                fg: Color.foreground
-                accent: Color.accent
+                fg: Commons.Color.foreground
+                accent: Commons.Color.accent
                 fontFamily: Style.font.family
                 onActivated: function(mail) {
                   root.pane = "mail"
@@ -2016,7 +2017,7 @@ Item {
               width: Style.space(1)
               height: columns.height
               visible: columns.showReader
-              color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
+              color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.12)
             }
 
             // The reading pane. Wide enough, it stands there empty until a
@@ -2054,8 +2055,8 @@ Item {
                   running: mailView.composeRunning
                   error: mailView.composeError
                   sendBlocked: mailView.composeSendBlocked
-                  fg: Color.foreground
-                  accent: Color.accent
+                  fg: Commons.Color.foreground
+                  accent: Commons.Color.accent
                   fontFamily: Style.font.family
                   attachments: mailView.composeAttachments
                   onAttachRequested: function(path) { mailView.attachToCompose(path) }
@@ -2116,7 +2117,7 @@ Item {
                     return ""
                   }
                   textFormat: Text.PlainText
-                  color: Qt.darker(Color.foreground, 1.8)
+                  color: Qt.darker(Commons.Color.foreground, 1.8)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -2152,8 +2153,8 @@ Item {
                     showAccount: mailView.combined
                     selectedEvent: mailView.selectedEvent
                     availableHeight: agendaScroll.height
-                    fg: Color.foreground
-                    accent: Color.accent
+                    fg: Commons.Color.foreground
+                    accent: Commons.Color.accent
                     fontFamily: Style.font.family
                     onEventClicked: function(event) { mailView.selectEvent(event) }
                     onDetailsRequested: function(event) { mailView.showMeeting(event) }
@@ -2168,8 +2169,8 @@ Item {
                     visible: !agendaScroll.grid
                     agenda: mailView.agenda
                     showAccount: mailView.combined
-                    fg: Color.foreground
-                    accent: Color.accent
+                    fg: Commons.Color.foreground
+                    accent: Commons.Color.accent
                     fontFamily: Style.font.family
                     onOpenRequested: function(url, alias) { mailView.openUrl(url, alias) }
                     onJoinRequested: function(url, alias) { mailView.openUrl(url, alias) }
@@ -2198,8 +2199,8 @@ Item {
                   // A window is taller than a dropdown, so the invitation gets
                   // to use that height.
                   maxBodyHeight: Math.max(Style.space(220), columns.height - Style.space(320))
-                  fg: Color.foreground
-                  accent: Color.accent
+                  fg: Commons.Color.foreground
+                  accent: Commons.Color.accent
                   fontFamily: Style.font.family
                   onCloseRequested: mailView.closeMeeting()
                   onOpenRequested: function(url) {
@@ -2253,8 +2254,8 @@ Item {
                   // A window is taller than a dropdown, so the body gets to use
                   // that height instead of being capped at the popup's.
                   maxBodyHeight: Math.max(Style.space(360), columns.height - Style.space(180))
-                  fg: Color.foreground
-                  accent: Color.accent
+                  fg: Commons.Color.foreground
+                  accent: Commons.Color.accent
                   fontFamily: Style.font.family
                   canWrite: !!mailView.previewMail && mailView.canWrite(mailView.previewMail.alias)
                   // Only here: the bar dropdown has nowhere to type, and no

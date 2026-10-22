@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -20,14 +21,14 @@ Column {
   property string error: ""
   property bool answering: false
   property string answerError: ""
-  property color fg: Color.foreground
+  property color fg: Commons.Color.foreground
   property color dim: Qt.darker(fg, 1.5)
-  property color accent: Color.accent
-  property color linkColor: Color.accent
+  property color accent: Commons.Color.accent
+  property color linkColor: Commons.Color.accent
   // What the body is drawn on, which is what decides whether a colour the
   // sender chose can be read here at all - see Model.legibleBody. The theme's
   // own background, because that is what is behind this pane in both hosts.
-  property color bg: Color.background
+  property color bg: Commons.Color.background
   property string fontFamily: Style.font.family
   property real maxBodyHeight: Style.space(220)
 

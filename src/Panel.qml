@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import Quickshell
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -28,8 +29,8 @@ Panel {
   // The bar identifies panels by the widget mounted in its slot.
   readonly property var barIdentity: hostWidget || root
 
-  readonly property color fg: root.bar ? root.bar.foreground : Color.foreground
-  readonly property color accent: root.bar ? root.bar.urgent : Color.urgent
+  readonly property color fg: root.bar ? root.bar.foreground : Commons.Color.foreground
+  readonly property color accent: root.bar ? root.bar.urgent : Commons.Color.urgent
   readonly property string fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
   readonly property color dim: Qt.darker(fg, 1.5)
 
@@ -461,7 +462,7 @@ Panel {
               tooltipText: root.service && root.service.paused
                 ? "Resume fetching (p)" + (root.service.pauseError !== "" ? " — not saved: " + root.service.pauseError : "")
                 : "Pause fetching (p) — nothing is fetched until you resume"
-              foreground: root.service && root.service.paused ? Color.accent : root.fg
+              foreground: root.service && root.service.paused ? Commons.Color.accent : root.fg
               visible: !!root.service && root.service.configured && !root.showSettings
               onClicked: if (root.service) root.service.togglePause()
             }
@@ -1069,7 +1070,7 @@ Panel {
 
       Rectangle {
         anchors.fill: parent
-        color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.97)
+        color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.97)
 
         MouseArea { anchors.fill: parent; onClicked: root.showHelp = false }
 

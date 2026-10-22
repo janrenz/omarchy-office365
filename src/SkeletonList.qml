@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Placeholder rows for the gap between a mailbox being signed in and its first
@@ -15,7 +16,7 @@ import qs.Ui
 Column {
   id: root
 
-  property color fg: Color.foreground
+  property color fg: Commons.Color.foreground
   // Rows per group. More than one group draws a heading bar each, the way the
   // agenda is grouped by day.
   property var groups: [5]

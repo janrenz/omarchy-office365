@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // The four things that can be done to a folder, for the pointer.
@@ -27,9 +28,9 @@ Column {
   // Whether this mailbox was signed in with permission to change mail.
   property bool writable: false
 
-  property color fg: Color.foreground
+  property color fg: Commons.Color.foreground
   property color dim: Qt.darker(fg, 1.5)
-  property color accent: Color.accent
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
 
   // `what` is new, rename, move or delete; `topLevel` only means anything to

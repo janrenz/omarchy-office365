@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -13,17 +14,17 @@ Column {
   property var detail: null
   property bool loading: false
   property string error: ""
-  property color fg: Color.foreground
+  property color fg: Commons.Color.foreground
   property color dim: Qt.darker(fg, 1.5)
-  property color accent: Color.accent
+  property color accent: Commons.Color.accent
   // Links in the body. Its own property rather than `accent` read directly, so
   // a host that wants its links to sit differently against its ground can say
   // so without moving every other accented thing in the pane with it.
-  property color linkColor: Color.accent
+  property color linkColor: Commons.Color.accent
   // What the body is drawn on, which is what decides whether a colour the
   // sender chose can be read here at all - see Model.legibleBody. The theme's
   // own background, because that is what is behind this pane in both hosts.
-  property color bg: Color.background
+  property color bg: Commons.Color.background
   property string fontFamily: Style.font.family
   property real maxBodyHeight: Style.space(360)
 
@@ -395,7 +396,7 @@ Column {
       anchors.bottom: parent.bottom
       height: hoveredAddress.implicitHeight + Style.spacing.xs * 2
       visible: bodyText.hoveredLink !== ""
-      color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.92)
+      color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.92)
 
       Text {
         id: hoveredAddress

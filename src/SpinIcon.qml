@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // A glyph that spins about its own ink rather than its line box.
 //
@@ -14,7 +15,7 @@ Item {
   property string text: ""
   property string fontFamily: Style.font.family
   property real fontSize: Style.font.icon
-  property color color: Color.foreground
+  property color color: Commons.Color.foreground
   property bool spinning: false
   property real angle: 0
 

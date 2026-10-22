@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -17,9 +18,9 @@ Item {
   // How much room the panel can spare. The grid scales the hour to fill it
   // rather than picking a height of its own and leaving a gap beside the mail.
   property real availableHeight: Style.space(420)
-  property color fg: Color.foreground
+  property color fg: Commons.Color.foreground
   property color dim: Qt.darker(fg, 1.5)
-  property color accent: Color.accent
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
 
   signal eventClicked(var event)

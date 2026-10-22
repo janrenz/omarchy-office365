@@ -3,6 +3,7 @@ import QtCore
 import QtQuick.Controls
 import QtQuick.Dialogs
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Writing a reply, a reply to everyone, a forward - or a message of your own.
@@ -49,9 +50,9 @@ Column {
   // instead of the error being repeated.
   property bool sendBlocked: false
 
-  property color fg: Color.foreground
+  property color fg: Commons.Color.foreground
   property color dim: Qt.darker(fg, 1.5)
-  property color accent: Color.accent
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
 
   // How tall the text box is. A reply is a strip under the message it is

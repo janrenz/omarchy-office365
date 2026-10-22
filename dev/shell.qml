@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 
 import "Fixtures.js" as Fixtures
 import "Model.js" as Model
@@ -21,7 +22,7 @@ ShellRoot {
     title: "office365 dev"
     implicitWidth: 1400
     implicitHeight: 900
-    color: Color.background
+    color: Commons.Color.background
 
     // The settings the timeline would take from a widget, as controls, so a
     // range or a working day can be tried without editing anything.
@@ -195,7 +196,7 @@ ShellRoot {
     Rectangle {
       id: content
       anchors.fill: parent
-      color: Color.background
+      color: Commons.Color.background
 
       Row {
         id: controls
@@ -218,16 +219,16 @@ ShellRoot {
             height: Style.space(20)
             radius: height / 2
             color: window.days === pill.modelData.days
-              ? Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.16)
+              ? Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.16)
               : "transparent"
             border.width: Style.space(1)
-            border.color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.2)
+            border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.2)
 
             Text {
               id: pillLabel
               anchors.centerIn: parent
               text: pill.modelData.label
-              color: Color.foreground
+              color: Commons.Color.foreground
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -244,7 +245,7 @@ ShellRoot {
           anchors.verticalCenter: parent.verticalCenter
           text: Model.clockFromMinutes(window.startMinutes) + "–" + Model.clockFromMinutes(window.endMinutes)
                 + "   ·   " + (window.selected ? window.selected.subject : "nothing selected")
-          color: Qt.darker(Color.foreground, 1.5)
+          color: Qt.darker(Commons.Color.foreground, 1.5)
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }
@@ -265,7 +266,7 @@ ShellRoot {
                                            : Style.space(560)
         color: "transparent"
         border.width: Style.space(1)
-        border.color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.15)
+        border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.15)
 
         AgendaList {
           anchors.left: parent.left

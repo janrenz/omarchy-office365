@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // Text you can select and copy.
 //
@@ -27,7 +28,7 @@ TextEdit {
   wrapMode: singleLine ? TextEdit.NoWrap : TextEdit.Wrap
   clip: singleLine
   textFormat: TextEdit.PlainText
-  color: Color.foreground
+  color: Commons.Color.foreground
   // Links, in the theme's accent rather than in Qt's built-in blue, which
   // belongs to no Omarchy theme and sat oddly against every one of them.
   //
@@ -38,8 +39,8 @@ TextEdit {
   // these two lines in place. So the colour that actually lands on a message
   // body is the style block `Model.withLinkColor` puts in front of it; these
   // stay for the selection and for any plain link a Qt version fixes later.
-  palette.link: Color.accent
-  palette.linkVisited: Color.accent
+  palette.link: Commons.Color.accent
+  palette.linkVisited: Commons.Color.accent
   // A TextEdit shows an I-beam and a blinking caret by default; read-only text
   // should look like text, not like a field somebody forgot to disable.
   cursorVisible: false

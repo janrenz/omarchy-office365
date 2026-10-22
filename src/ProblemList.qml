@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -24,7 +25,7 @@ Column {
   // A whole-fetch failure, already one line.
   property string errorMessage: ""
 
-  property color accent: Color.accent
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
 
   spacing: Style.spacing.xxs

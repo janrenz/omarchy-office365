@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // A text field that says what it holds. Placeholders disappear the moment a
@@ -12,9 +13,9 @@ Column {
   property string placeholder: ""
   property string value: ""
   property string hint: ""
-  property color fg: Color.foreground
+  property color fg: Commons.Color.foreground
   property color dim: Qt.darker(fg, 1.5)
-  property color accent: Color.accent
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
   // Optional input validator, for fields whose value has to survive being used
   // as something other than text - an alias becomes a filename.

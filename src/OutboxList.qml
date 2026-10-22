@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // The mail on its way out, drawn as a list.
@@ -24,9 +25,9 @@ Column {
 
   // Rows from Model.outboxRows(jobs).
   property var rows: []
-  property color fg: Color.foreground
+  property color fg: Commons.Color.foreground
   property color dim: Qt.darker(fg, 1.5)
-  property color accent: Color.accent
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
   // Keyboard cursor, as an index into `rows`. -1 until a key moves it, so a
   // list opened with the mouse shows no cursor.

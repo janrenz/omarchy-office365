@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // A thin line standing in for meetings the visible hours are hiding.
@@ -13,7 +14,7 @@ Item {
   property int count: 0
   property string direction: "earlier"
   property real leftInset: 0
-  property color fg: Color.foreground
+  property color fg: Commons.Color.foreground
   property color dim: Qt.darker(fg, 1.5)
   property string fontFamily: Style.font.family
 
